@@ -1,0 +1,12 @@
+-- warn: off by default, "@on"/"@off" control messages, multi-part messages
+warn("not shown")
+warn("@on")
+warn("shown ", "in ", "parts")
+warn("@unknown")
+warn("@off")
+warn("hidden again")
+warn("@on")
+warn("last")
+print(pcall(warn))
+print(pcall(warn, "a", {}))
+print(pcall(warn, 1, 2))

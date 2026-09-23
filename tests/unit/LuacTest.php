@@ -99,3 +99,15 @@ function test_errors_and_usage_match(): void
     assertSameAsReference(['-v', '-p', 'sample.lua']);
     assertSameAsReference(['-p', '--', 'sample.lua']);
 }
+
+// luac.c parses at C-call depth 1 (load() from a main chunk is depth 2), so
+// luac5.4 accepts 196 nested parentheses and rejects 197.
+function test_nesting_limit_matches_luac(): void
+{
+    foreach ([196, 197] as $depth) {
+        $source = 'return ' . str_repeat('(', $depth) . '1' . str_repeat(')', $depth) . "\n";
+        file_put_contents(workingDirectory() . '/nested.lua', $source);
+        [$ours, $reference] = runBoth(['-p', 'nested.lua']);
+        assertSame($reference, $ours, "nesting depth $depth");
+    }
+}

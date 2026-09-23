@@ -111,7 +111,7 @@ function loadFile(?string $filename): Proto
         }
     }
     try {
-        return Compiler::compile($prefix . $chunk, $chunkname);
+        return Compiler::compile($prefix . $chunk, $chunkname, 1); // luac.c parses at C-call depth 1
     } catch (CompileError $error) {
         fatal($error->getMessage());
     }
