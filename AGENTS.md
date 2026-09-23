@@ -101,21 +101,27 @@ interpreter `lua5.4` (5.4.9) and compiler `luac5.4`, both installed.
 
 ## Phases
 
-Each gate is verified by the coordinator before the box is ticked.
+Each gate is verified by the coordinator before the box is ticked. Official
+files are run with `tests/official.sh`; once a file passes it must keep passing.
 
-- [ ] Phase 0 — foundation: Proto, OpCodes, Undump, Dump, Listing, ChunkId,
-      temporary luac bridge behind `Compiler::compile`, `bin/luac`, test
-      harness. Gate: `tests/bytecode.sh` passes for every official test file;
-      `Dump(Undump(b)) === b` for luac5.4 output with and without `-s`.
-- [ ] Phase 1A — compiler front-end (llex/lparser/lcode) replaces the bridge.
-      Gate: `tests/bytecode.sh` passes on every official test file and dumps are
-      byte-identical to `luac5.4 -o`; syntax error messages match luac5.4.
-- [ ] Phase 1B — emitter + runtime core + base library + `bin/lua` + `bin/lua2php`.
-      Gate: official constructs, vararg, closure, goto, events, bitwise,
-      literals pass; transpiled `out.php` runs standalone.
-- [ ] Phase 2 — libraries: string/utf8 (strings, pm, tpack, utf8), math/table
-      (math, sort, nextvar), io/os/package (files, attrib).
-- [ ] Phase 3 — coroutines, errors, stack overflow, calls/string.dump,
-      to-be-closed variables (coroutine, errors, cstack, calls, locals).
-- [ ] Phase 4 — debug library + hooks, GC semantics (db, gc, gengc, big, verybig).
+- [x] Phase 0 — foundation: Proto, OpCodes, Undump, Dump, Listing, ChunkId,
+      NumberFormat, temporary luac bridge behind `Compiler::compile`,
+      `bin/luac`, test harness. Gate met: `tests/bytecode.sh` passes on all 33
+      official files; `Dump(Undump(b)) === b` with and without `-s`.
+- [ ] Phase 1A — compiler front-end (llex/lparser/lcode) plus
+      `src/Runtime/StringToNumber.php` replaces the bridge. Gate:
+      `tests/bytecode.sh` passes on every official file and our corpus; dumps
+      byte-identical to `luac5.4 -o`; syntax error messages match lua5.4.
+- [ ] Phase 1B — emitter + runtime core + base library + upvalue debug
+      functions + `bin/lua` + `bin/lua2php` + `tests/official.sh`. Gate:
+      differential corpus green; official vararg passes; a transpiled
+      `out.php` runs standalone and matches lua5.4.
+- [ ] Phase 2 — libraries in parallel lanes: string/utf8, math/table,
+      io/os/package, coroutine (Fiber). Gate: strings, pm, tpack, utf8, math,
+      sort, nextvar, files, attrib, constructs, bitwise, goto, closure,
+      literals, events.
+- [ ] Phase 3 — errors, stack overflow, calls/string.dump, to-be-closed
+      variables. Gate: errors, cstack, calls, locals, coroutine.
+- [ ] Phase 4 — debug library + hooks, GC semantics. Gate: db, gc, gengc,
+      big, verybig.
 - [ ] Phase 5 — `all.lua` prints `final OK !!!` under `-e"_U=true"`.

@@ -1,0 +1,199 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+// Port of luac.c (Lua 5.4.9) for a single input file: list, parse, strip,
+// dump. Usage and messages match luac5.4; the program name is argv[0].
+
+require __DIR__ . '/../src/autoload.php';
+
+use LuaPhp\Compiler\CompileError;
+use LuaPhp\Compiler\Compiler;
+use LuaPhp\Compiler\Dump;
+use LuaPhp\Compiler\Listing;
+use LuaPhp\Compiler\Proto;
+use LuaPhp\Compiler\Undump;
+
+const LUA_COPYRIGHT = 'Lua 5.4.9  Copyright (C) 1994-2026 Lua.org, PUC-Rio';
+const DEFAULT_OUTPUT = 'luac.out';  // luac.c: OUTPUT
+
+$programName = (isset($argv[0]) && $argv[0] !== '') ? $argv[0] : 'luac';
+
+// luac.c: fatal
+function fatal(string $message): never
+{
+    global $programName;
+    fwrite(STDERR, "$programName: $message\n");
+    exit(1);
+}
+
+// luac.c: usage
+function usage(string $message): never
+{
+    global $programName;
+    if ($message !== '' && $message[0] === '-') {
+        fwrite(STDERR, "$programName: unrecognized option '$message'\n");
+    } else {
+        fwrite(STDERR, "$programName: $message\n");
+    }
+    fwrite(STDERR, "usage: $programName [options] [filenames]\n"
+        . "Available options are:\n"
+        . "  -l       list (use -l -l for full listing)\n"
+        . "  -o name  output to file 'name' (default is \"" . DEFAULT_OUTPUT . "\")\n"
+        . "  -p       parse only\n"
+        . "  -s       strip debug information\n"
+        . "  -v       show version information\n"
+        . "  --       stop handling options\n"
+        . "  -        stop handling options and process stdin\n");
+    exit(1);
+}
+
+// The OS error text from PHP's last warning ("...: No such file or directory").
+function lastSystemError(): string
+{
+    $lastError = error_get_last()['message'] ?? '';
+    $separatorPosition = strrpos($lastError, ': ');
+    return $separatorPosition === false ? $lastError : substr($lastError, $separatorPosition + 2);
+}
+
+/**
+ * lauxlib.c: luaL_loadfilex (with skipBOM and skipcomment) for luac.
+ * $filename null means stdin.
+ */
+function loadFile(?string $filename): Proto
+{
+    if ($filename === null) {
+        $chunkname = '=stdin';
+        $contents = stream_get_contents(STDIN);
+    } else {
+        $chunkname = '@' . $filename;
+        if (is_dir($filename)) {
+            // C's fopen succeeds on a directory; the read then fails with EISDIR
+            fatal("cannot read $filename: Is a directory");
+        }
+        $contents = @file_get_contents($filename);
+        if ($contents === false) {
+            fatal("cannot open $filename: " . lastSystemError());
+        }
+    }
+
+    // lauxlib.c: skipBOM (an incomplete BOM still consumes what it matched)
+    $position = 0;
+    if (($contents[0] ?? '') === "\xEF") {
+        $position = 1;
+        if (($contents[1] ?? '') === "\xBB") {
+            $position = 2;
+            if (($contents[2] ?? '') === "\xBF") {
+                $position = 3;
+            }
+        }
+        if ($position < 3) {
+            // not a valid BOM: C returns the 0xEF, then continues after the consumed bytes
+            $contents = "\xEF" . substr($contents, $position === 1 ? 2 : 3);
+            $position = 0;
+        }
+    }
+    $prefix = '';
+    // lauxlib.c: skipcomment (first line starting with '#')
+    if (($contents[$position] ?? '') === '#') {
+        $newlinePosition = strpos($contents, "\n", $position);
+        $position = $newlinePosition === false ? strlen($contents) : $newlinePosition + 1;
+        $prefix = "\n";  // add newline to correct line numbers
+    }
+    $chunk = substr($contents, $position);
+
+    if (($chunk[0] ?? '') === Undump::LUA_SIGNATURE[0]) {  // binary file?
+        try {
+            return Undump::undump($chunk, $chunkname);
+        } catch (CompileError $error) {
+            fatal($error->getMessage());
+        }
+    }
+    try {
+        return Compiler::compile($prefix . $chunk, $chunkname);
+    } catch (CompileError $error) {
+        fatal($error->getMessage());
+    }
+}
+
+// luac.c: doargs
+$listing = 0;
+$dumping = true;
+$stripping = false;
+$output = DEFAULT_OUTPUT;  // null means stdout
+$version = 0;
+$argumentCount = count($argv);
+for ($i = 1; $i < $argumentCount; $i++) {
+    $argument = $argv[$i];
+    if ($argument === '' || $argument[0] !== '-') {  // end of options; keep it
+        break;
+    } elseif ($argument === '--') {  // end of options; skip it
+        ++$i;
+        if ($version) {
+            ++$version;
+        }
+        break;
+    } elseif ($argument === '-') {  // end of options; use stdin
+        break;
+    } elseif ($argument === '-l') {  // list
+        ++$listing;
+    } elseif ($argument === '-o') {  // output file
+        $output = $argv[++$i] ?? null;
+        if ($output === null || $output === '' || ($output[0] === '-' && $output !== '-')) {
+            usage("'-o' needs argument");
+        }
+        if ($output === '-') {
+            $output = null;
+        }
+    } elseif ($argument === '-p') {  // parse only
+        $dumping = false;
+    } elseif ($argument === '-s') {  // strip debug information
+        $stripping = true;
+    } elseif ($argument === '-v') {  // show version
+        ++$version;
+    } else {  // unknown option
+        usage($argument);
+    }
+}
+if ($i === $argumentCount && ($listing || !$dumping)) {
+    $dumping = false;
+    $argv[--$i] = DEFAULT_OUTPUT;
+}
+if ($version) {
+    echo LUA_COPYRIGHT, "\n";
+    if ($version === $argumentCount - 1) {
+        exit(0);
+    }
+}
+
+// luac.c: main / pmain
+$inputFiles = array_slice($argv, $i);
+if (count($inputFiles) <= 0) {
+    usage('no input files given');
+}
+if (count($inputFiles) > 1) {
+    fatal('only one input file is supported (luac.c combine() is not ported)');
+}
+$proto = loadFile($inputFiles[0] === '-' ? null : $inputFiles[0]);
+if ($listing) {
+    echo Listing::printFunction($proto, $listing > 1);
+}
+if ($dumping) {
+    $bytes = Dump::dump($proto, $stripping);
+    if ($output === null) {
+        fwrite(STDOUT, $bytes);
+        exit(0);
+    }
+    $outputHandle = @fopen($output, 'wb');
+    if ($outputHandle === false) {
+        fatal("cannot open $output: " . lastSystemError());  // luac.c: cannot("open")
+    }
+    if (@fwrite($outputHandle, $bytes) !== strlen($bytes)) {
+        fatal("cannot write $output: " . lastSystemError());  // luac.c: cannot("write")
+    }
+    if (!@fclose($outputHandle)) {
+        fatal("cannot close $output: " . lastSystemError());  // luac.c: cannot("close")
+    }
+}
+exit(0);
