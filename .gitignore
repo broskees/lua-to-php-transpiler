@@ -1,0 +1,3 @@
+reference/*.tar.gz
+/var/
+*.luac

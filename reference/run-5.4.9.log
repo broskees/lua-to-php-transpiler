@@ -1,0 +1,310 @@
+
+	Starting Tests
+random seeds: 1790196998, 94902012657688
+current path:
+****/usr/local/share/lua/5.4/?.lua;/usr/local/share/lua/5.4/?/init.lua;/usr/share/lua/5.4/?.lua;/usr/share/lua/5.4/?/init.lua;/usr/local/lib/lua/5.4/?.lua;/usr/local/lib/lua/5.4/?/init.lua;/usr/lib/lua/5.4/?.lua;/usr/lib/lua/5.4/?/init.lua;./?.lua;./?/init.lua****
+
+    ---- total memory: 44.9K, max memory: 44.9K ----
+
+time: 1.5e-05 (+1.5e-05)
+
+***** FILE 'main.lua'*****
+
+***** FILE 'gc.lua'*****
+testing incremental garbage collection
+...................................................................................................................creating many objects
+..............................................................functions with errors
+.long strings
+................................steps
+steps (2)
+....clearing tables
+.................weak tables
+...............................+
+........self-referenced threads
+...........OK
+    ---- total memory: 1.4M, max memory: 1.4M ----
+
+time: 0.067889 (+0.067874)
+
+***** FILE 'db.lua'*****
+testing debug library and debug information
+..........................................................................................................................................................................................................................................................................+
+....................................................................................................................................................testing inspection of parameters/returned values
++
++
+testing traceback sizes
+testing debug functions on chunk without debug info
+OK
+    ---- total memory: 163.9K, max memory: 1.4M ----
+
+time: 0.082007 (+0.014118)
+
+***** FILE 'calls.lua'*****
+testing functions and calls
++
++
+testing tail calls
+....+
++
+..................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................testing binary chunks
+OK
+testing strings and string library
+testing 'format %a %A'
+OK
+testing scanner
+.+
++
++
++
++
+OK
+    ---- total memory: 375.6K, max memory: 1.4M ----
+
+time: 0.126591 (+0.044584)
+
+***** FILE 'tpack.lua'*****
+testing pack/unpack
+platform:
+	short 2, int 4, long 8, size_t 8, float 4, double 8,
+	lua Integer 8, lua Number 8
+	little endian
+	alignment: 8
+testing invalid formats
+testing pack/unpack of floating-point numbers
+testing pack/unpack of strings
+testing alignment
+OK
+    ---- total memory: 389.5K, max memory: 1.4M ----
+
+time: 0.12721 (+0.000619)
+
+***** FILE 'attrib.lua'*****
+testing require
+package config: /|;|?|!|-|
+testing 'require' message
++
+testing assignments, logical operators, and constructors
++
+.OK
+    ---- total memory: 276.7K, max memory: 1.4M ----
+
+time: 0.128054 (+0.000844)
+
+***** FILE 'gengc.lua'*****
+testing generational garbage collection
+....+
+..OK
+    ---- total memory: 82.2K, max memory: 1.4M ----
+
+time: 0.128213 (+0.000159)
+
+***** FILE 'locals.lua'*****
+.testing local variables and environments
+.+
+testing to-be-closed variables
+testing errors in __close
+...to-be-closed variables in coroutines
+.OK
+    ---- total memory: 138.7K, max memory: 1.4M ----
+
+time: 0.171209 (+0.042996)
+
+***** FILE 'constructs.lua'*****
+testing syntax
+.+
+testing short-circuit optimizations (0)
+...+
+.OK
+    ---- total memory: 853.3K, max memory: 1.4M ----
+
+time: 0.18417 (+0.012961)
+
+***** FILE 'code.lua'*****
+    ---- total memory: 928.3K, max memory: 1.4M ----
+
+time: 0.184385 (+0.000215)
+
+***** FILE 'cstack.lua'*****
+testing stack overflow detection
+testing stack overflow in message handling
+.final count: 	250037
+testing recursion inside pattern matching
+testing stack-overflow in recursive 'gsub'
+final count: 	197
+testing stack-overflow in recursive 'gsub' with metatables
+final count: 	99
+testing limits in coroutines inside deep calls
+final count: 	196
+chain of 'coroutine.close'
+final count: 	197
+nesting of resuming yielded coroutines
+final count: 	195
+nesting coroutines running after recoverable errors
+final count: 	197
+OK
+    ---- total memory: 15.8M, max memory: 15.8M ----
+
+time: 0.210578 (+0.026193)
+
+***** FILE 'nextvar.lua'*****
+testing tables, next, and for
++
++
+............................................+
+.....testing next x GC of deleted keys
+.......+
+testing floats in numeric for
+.OK
+    ---- total memory: 119.2K, max memory: 15.8M ----
+
+time: 0.216751 (+0.006173)
+
+***** FILE 'pm.lua'*****
+testing pattern matching
++
+.+
++
++
+OK
+    ---- total memory: 121.6K, max memory: 15.8M ----
+
+time: 0.217794 (+0.001043)
+
+***** FILE 'utf8.lua'*****
+testing UTF-8 library
+ok
+    ---- total memory: 142.1K, max memory: 15.8M ----
+
+time: 0.218086 (+0.000292)
+
+***** FILE 'api.lua'*****
+.    ---- total memory: 304.8K, max memory: 15.8M ----
+
+time: 0.218701 (+0.000615)
+
+***** FILE 'events.lua'*****
+testing metatables
+.....................+
++
+OK
+    ---- total memory: 114.7K, max memory: 15.8M ----
+
+time: 0.21933 (+0.000629)
+
+***** FILE 'vararg.lua'*****
+testing vararg
++
++
++
+OK
+    ---- total memory: 132.8K, max memory: 15.8M ----
+
+time: 0.219472 (+0.000142)
+
+***** FILE 'closure.lua'*****
+testing closures
+...+
+OK
+    ---- total memory: 219.4K, max memory: 15.8M ----
+
+time: 0.219908 (+0.000436)
+
+***** FILE 'coroutine.lua'*****
+testing coroutines
+to-be-closed variables in coroutines
+testing 'coroutine.close'
+...+
+testing yields inside metamethods
++
+testing yields inside 'for' iterators
+OK
+    ---- total memory: 194.2K, max memory: 15.8M ----
+
+time: 0.220862 (+0.000954)
+
+***** FILE 'goto.lua'*****
+.OK
+    ---- total memory: 98.6K, max memory: 15.8M ----
+
+time: 0.221017 (+0.000155)
+
+***** FILE 'errors.lua'*****
+testing errors
+...+
+.testing tokens in error messages
++
+OK
+    ---- total memory: 323.7K, max memory: 15.8M ----
+
+time: 0.223594 (+0.002577)
+
+***** FILE 'math.lua'*****
+testing numbers and math lib
+64-bit integers, 53-bit (mantissa) floats
+testing order (floats cannot represent all integers)
+testing -0 and NaN
+testing 'math.random'
+random seeds: 1790196998, 94902012657688
+float random range in 26500 calls: [0.000045, 0.999997]
+integer random range in 51200 calls: [minint + 51ppm, maxint - 55ppm]
+OK
+    ---- total memory: 404.3K, max memory: 15.8M ----
+
+time: 0.231148 (+0.007554)
+
+***** FILE 'sort.lua'*****
+testing (parts of) table library
+testing unpack
+.testing pack
+testing sort
+.sorting 5000 random elements in 0.52 msec.
+re-sorting 5000 sorted elements in 0.26 msec.
+Invert-sorting other 5000 elements in 1.34 msec., with 66506 comparisons
+sorting 5000 equal elements in 0.78 msec.
+............OK
+    ---- total memory: 226.3K, max memory: 15.8M ----
+
+time: 0.24084 (+0.009692)
+
+***** FILE 'bitwise.lua'*****
+testing bitwise operations
++
+testing bitwise library
++
++
+OK
+    ---- total memory: 260.6K, max memory: 15.8M ----
+
+time: 0.241219 (+0.000379)
+
+***** FILE 'verybig.lua'*****
+testing RK
+.    ---- total memory: 88.9K, max memory: 15.8M ----
+
+time: 0.241316 (+9.7e-05)
+
+***** FILE 'files.lua'*****
+.testing i/o
+.+
+............................................................................................................................+
+.+
+..+
++
+..+
+testing date/time
+test done on 23/09/2026, at 16:56:38
+Lua 5.4
+(there should be two warnings now)
+Lua warning: #This is an expected warning
+Lua warning: #This is another one
+64-bit integers, 64-bit floats
+cleaning all!!!!
+......    ---- total memory: 55.8K, max memory: 15.8M ----
+
+
+
+total time: 0.25s (wall time: 0s)
+
+final OK !!!
+.>>> closing state <<<
+
