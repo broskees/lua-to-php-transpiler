@@ -371,8 +371,29 @@ final class StringFormat
                 return sprintf('0x5557%08x', $index * 16);
             }
         }
-        self::$addressedLongStrings[] = $s;
-        return sprintf('0x5557%08x', (\count(self::$addressedLongStrings) - 1) * 16);
+        self::$addressedLongStrings[] = $s;  // (keys are never reused, see forgetUnreferencedStrings)
+        return sprintf('0x5557%08x', array_key_last(self::$addressedLongStrings) * 16);
+    }
+
+    /**
+     * Drop the long strings that nothing but the address table refers to
+     * any more. The collector calls this at every cycle: C frees such a
+     * string, so keeping it would only leak memory.
+     */
+    public static function forgetUnreferencedStrings(): void
+    {
+        if (self::$addressedLongStrings === []) {
+            return;
+        }
+        // the count PHP reports for a string only the table holds
+        self::$addressedLongStrings['probe'] = str_repeat('.', Lua::LUAI_MAXSHORTLEN + 1);
+        $countWhenUnreferenced = self::referenceCount(self::$addressedLongStrings['probe']);
+        unset(self::$addressedLongStrings['probe']);
+        foreach (array_keys(self::$addressedLongStrings) as $index) {
+            if (self::referenceCount(self::$addressedLongStrings[$index]) === $countWhenUnreferenced) {
+                unset(self::$addressedLongStrings[$index]);
+            }
+        }
     }
 
     /**

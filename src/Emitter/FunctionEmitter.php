@@ -8,6 +8,7 @@ use LuaPhp\Compiler\ChunkId;
 use LuaPhp\Compiler\OpCodes;
 use LuaPhp\Compiler\Proto;
 use LuaPhp\Runtime\DebugInfo;
+use LuaPhp\Runtime\Gc\Collector;
 use LuaPhp\Runtime\LuaTable;
 use LuaPhp\Runtime\MetaMethods;
 
@@ -73,6 +74,12 @@ final class FunctionEmitter
                 . self::INDENT . '    $R += [' . implode(', ', array_fill(0, $proto->numparams, 'null')) . "];\n"
                 . self::INDENT . "}\n";
         }
+        // lvm.c: luaV_execute's 'trap' (see hookCheck)
+        $code .= self::lines('$trap = &$L->trap;');
+        if (!$proto->is_vararg) {
+            // ldebug.c: luaG_tracecall (vararg functions call the hook at OP_VARARGPREP)
+            $code .= self::lines('if ($L->hookmask !== 0) {', '    Hooks::hookCall($L, $ci, 0);', '}');
+        }
 
         $instructionCount = \count($proto->code);
         for ($pc = 0; $pc < $instructionCount; $pc++) {
@@ -102,14 +109,27 @@ final class FunctionEmitter
     }
 
     /**
-     * Where Phase 4 inserts line/count hook checks (ldebug.c:
-     * luaG_traceexec, called from lvm.c's vmfetch when 'trap' is set).
-     * Code returned here runs before every instruction, so a hook set
-     * while a function runs takes effect at its next instruction.
+     * The line/count hook check before instruction $pc (lvm.c: vmfetch
+     * calling ldebug.c: luaG_traceexec when 'trap' is set). $trap is a
+     * reference to $L->trap, so a hook set while the function runs takes
+     * effect at its next instruction.
+     *
+     * Hooks must see exactly the instructions C's vmfetch fetches. It never
+     * fetches OP_VARARGPREP with hooks on (luaG_tracecall turns 'trap' off
+     * until it has run), nor OP_TFORLOOP (OP_TFORCALL goes straight to it),
+     * nor instructions the previous one consumes: OP_EXTRAARG, the OP_MMBIN*
+     * after a successful arithmetic instruction (checked in
+     * metamethodFallback instead), the OP_JMP after a test when the jump is
+     * taken (conditionalJump jumps directly), OP_TFORCALL when entered from
+     * OP_TFORPREP (which jumps past this check, to T<pc>).
      */
     private function hookCheck(int $pc): string
     {
-        return '';
+        $opcode = OpCodes::GET_OPCODE($this->proto->code[$pc]);
+        if ($opcode === OpCodes::OP_VARARGPREP || $opcode === OpCodes::OP_TFORLOOP) {
+            return '';
+        }
+        return self::lines("if (\$trap) { Hooks::traceExec(\$L, \$ci, $pc); }");
     }
 
     /** marks every instruction some jump can reach */
@@ -128,9 +148,6 @@ final class FunctionEmitter
                     break;
                 case OpCodes::OP_FORPREP:
                     $this->jumpTargets[$pc + OpCodes::GETARG_Bx($instruction) + 2] = true;
-                    break;
-                case OpCodes::OP_TFORPREP:
-                    $this->jumpTargets[$pc + OpCodes::GETARG_Bx($instruction) + 1] = true;
                     break;
                 case OpCodes::OP_LFALSESKIP:
                 case OpCodes::OP_EQ:
@@ -216,6 +233,16 @@ final class FunctionEmitter
         return "\$ci->savedpc = $pc;";
     }
 
+    /**
+     * lvm.c: checkGC(L, top) after an allocation: charge its size (a PHP
+     * expression) to the collector's debt and run a collection step when
+     * the debt becomes positive; registers from $top up are dead.
+     */
+    private static function checkGc(int $pc, int $top, string $size): string
+    {
+        return "if ((\$L->globalState->gcDebt += $size) > 0) { " . self::savePc($pc) . " Collector::step(\$L, $top); }";
+    }
+
     /** lines of code, indented */
     private static function lines(string ...$lines): string
     {
@@ -249,7 +276,8 @@ final class FunctionEmitter
         if (!isset($this->consumed[$mmPc])) {
             return '';  // emitted on its own (it is a jump target)
         }
-        return $this->emitMetamethodCall($mmPc, $resultRegister);
+        // C's vmfetch fetches (and traces) the OP_MMBIN* only when the fast path fails
+        return "if (\$trap) { Hooks::traceExec(\$L, \$ci, $mmPc); } " . $this->emitMetamethodCall($mmPc, $resultRegister);
     }
 
     private function emitMetamethodCall(int $mmPc, int $resultRegister): string
@@ -399,7 +427,11 @@ final class FunctionEmitter
                 if ($k) {  // non-zero extra argument?
                     $arraySize += OpCodes::GETARG_Ax($proto->code[$pc + 1]) * (OpCodes::MAXARG_C + 1);
                 }
-                return self::lines("$ra = new LuaTable($arraySize);");
+                $hashSize = $b > 0 ? 1 << ($b - 1) : 0;  // size is 2^(b - 1)
+                return self::lines(
+                    "$ra = new LuaTable($arraySize);",
+                    self::checkGc($pc, $a + 1, (string) Collector::tableSize($arraySize, $hashSize)),
+                );
 
             case OpCodes::OP_SELF:
                 $key = $k ? $this->k($c) : self::r($c);
@@ -560,6 +592,7 @@ final class FunctionEmitter
                     '} else {',
                     '    ' . self::savePc($pc) . " $ra = Vm::concat(\$L, [" . implode(', ', $operands) . "], $a);",
                     '}',
+                    self::checkGc($pc, $a + 1, "(\\is_string($ra) ? " . Collector::STRING_OVERHEAD . " + \\strlen($ra) : 0)"),
                 );
 
             case OpCodes::OP_CLOSE:
@@ -630,13 +663,14 @@ final class FunctionEmitter
 
             case OpCodes::OP_TEST:
                 // jump (the next instruction) when truthiness equals k; else skip it
-                return self::lines('if ' . ($k ? self::falsy($ra) : self::truthy($ra)) . ' goto L' . ($pc + 2) . ';');
+                return self::lines('if ' . ($k ? self::falsy($ra) : self::truthy($ra)) . ' goto L' . ($pc + 2) . ';', $this->nextJump($pc));
 
             case OpCodes::OP_TESTSET:
                 return self::lines(
                     '$x = ' . self::r($b) . ';',
                     'if ' . ($k ? self::falsy('$x') : self::truthy('$x')) . ' goto L' . ($pc + 2) . ';',
                     "$ra = \$x;",
+                    $this->nextJump($pc),
                 );
 
             case OpCodes::OP_CALL:
@@ -648,7 +682,7 @@ final class FunctionEmitter
                     $code .= self::lines('if ($ci->openupval !== []) {', '    Upvalues::closeUpvalues($ci, 0);', '}');
                 }
                 $code .= $this->argumentList($a, $b);
-                $code .= self::lines("return Calls::tailCall(\$L, \$ci, $ra, \$args);");
+                $code .= self::lines("return Calls::tailCall(\$L, \$ci, $ra, \$args, $a);");
                 return $code;
 
             case OpCodes::OP_RETURN:
@@ -661,6 +695,7 @@ final class FunctionEmitter
                     );
                 }
                 if ($b === 0) {  // results up to top
+                    $code .= $this->returnHook($pc, $a, "\$top - $a");
                     $code .= self::lines(
                         '$ret = [];',
                         "for (\$i = $a; \$i < \$top; \$i++) {",
@@ -675,13 +710,14 @@ final class FunctionEmitter
                 for ($i = 0; $i < $b - 1; $i++) {
                     $results[] = self::r($a + $i);
                 }
-                return $code . self::lines('$L->ci = $ci->previous;', 'return [' . implode(', ', $results) . '];');
+                return $code . $this->returnHook($pc, $a, (string) ($b - 1))
+                    . self::lines('$L->ci = $ci->previous;', 'return [' . implode(', ', $results) . '];');
 
             case OpCodes::OP_RETURN0:
-                return self::lines('$L->ci = $ci->previous;', 'return [];');
+                return $this->returnHook($pc, $a, '0') . self::lines('$L->ci = $ci->previous;', 'return [];');
 
             case OpCodes::OP_RETURN1:
-                return self::lines('$L->ci = $ci->previous;', "return [$ra];");
+                return $this->returnHook($pc, $a, '1') . self::lines('$L->ci = $ci->previous;', "return [$ra];");
 
             case OpCodes::OP_FORLOOP:
                 $loopStart = $pc + 1 - OpCodes::GETARG_Bx($instruction);
@@ -715,11 +751,11 @@ final class FunctionEmitter
                     'if (' . self::r($a + 3) . ' !== null && ' . self::r($a + 3) . ' !== false) {',
                     '    ' . self::savePc($pc) . ' Upvalues::newTbc($L, $ci, ' . ($a + 3) . ');',
                     '}',
-                    'goto L' . ($pc + OpCodes::GETARG_Bx($instruction) + 1) . ';',
+                    'goto T' . ($pc + OpCodes::GETARG_Bx($instruction) + 1) . ';',  // to OP_TFORCALL, past its hook check
                 );
 
             case OpCodes::OP_TFORCALL:
-                $code = self::lines(
+                $code = "    T$pc:\n" . self::lines(
                     self::savePc($pc),
                     "\$ret = Calls::call(\$L, $ra, [" . self::r($a + 1) . ', ' . self::r($a + 2) . ']);',
                 );
@@ -775,7 +811,10 @@ final class FunctionEmitter
                     }
                 }
                 $childPath = $this->path . '_' . $childIndex;
-                return self::lines("$ra = new LuaClosure(\$proto_$childPath, \$function_$childPath, [" . implode(', ', $upvalues) . ']);');
+                return self::lines(
+                    "$ra = new LuaClosure(\$proto_$childPath, \$function_$childPath, [" . implode(', ', $upvalues) . ']);',
+                    self::checkGc($pc, $a + 1, (string) Collector::closureSize(\count($upvalues))),
+                );
 
             case OpCodes::OP_VARARG:
                 $wanted = $c - 1;  // required results
@@ -795,12 +834,33 @@ final class FunctionEmitter
                 return $code;
 
             case OpCodes::OP_VARARGPREP:
-                return self::lines("Calls::adjustVarargs(\$ci, \$R, {$proto->numparams});");
+                return self::lines(
+                    "Calls::adjustVarargs(\$ci, \$R, {$proto->numparams});",
+                    'if ($L->hookmask !== 0) {',
+                    '    Hooks::hookCall($L, $ci, 1);',
+                    '    $L->oldpc = 1;  // next opcode will be seen as a "new" line',
+                    '}',
+                );
 
             case OpCodes::OP_EXTRAARG:
                 return '';
         }
         throw new \LogicException('unknown opcode ' . $opcode);
+    }
+
+    /**
+     * ldo.c: luaD_poscall's return hook for OP_RETURN* (before the results
+     * are collected, so a hook changing them with debug.setlocal changes
+     * the returned values, as in C). The $count results start at register
+     * $a, slot $a + 1 in debug.getlocal's numbering.
+     */
+    private function returnHook(int $pc, int $a, string $count): string
+    {
+        return self::lines(
+            'if ($L->hookmask !== 0) {',
+            '    ' . self::savePc($pc) . ' Hooks::retHook($L, $ci, ' . ($a + 1) . ", $count);",
+            '}',
+        );
     }
 
     /** OP_GETTABUP / OP_GETFIELD: t[k] with a constant string key */
@@ -899,7 +959,17 @@ final class FunctionEmitter
     private function conditionalJump(int $pc, string $condition, int $k): string
     {
         $skip = 'goto L' . ($pc + 2) . ';';
-        return self::lines(($k ? "if (!$condition) " : "if ($condition) ") . $skip);
+        return self::lines(($k ? "if (!$condition) " : "if ($condition) ") . $skip, $this->nextJump($pc));
+    }
+
+    /**
+     * lvm.c: donextjump: do the jump at $pc + 1 without fetching it (so no
+     * hook sees that OP_JMP).
+     */
+    private function nextJump(int $pc): string
+    {
+        $jump = $this->proto->code[$pc + 1];
+        return 'goto L' . ($pc + 2 + OpCodes::GETARG_sJ($jump)) . ';';
     }
 
     /** builds $args from R[a+1 .. a+b-1], or up to $top when b is 0 */

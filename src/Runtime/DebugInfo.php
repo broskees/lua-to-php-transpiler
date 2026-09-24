@@ -584,8 +584,13 @@ final class DebugInfo
                     $info['name'] = $nameInfo[1] ?? null;
                     break;
                 case 'r':
-                    $info['ftransfer'] = 0;
-                    $info['ntransfer'] = 0;
+                    if ($ci === null || !($ci->callstatus & Lua::CIST_TRAN)) {
+                        $info['ftransfer'] = 0;
+                        $info['ntransfer'] = 0;
+                    } else {
+                        $info['ftransfer'] = $ci->ftransfer;
+                        $info['ntransfer'] = $ci->ntransfer;
+                    }
                     break;
                 case 'L':
                     $info['activelines'] = $closure === null ? null : self::collectValidLines($closure->proto);
@@ -654,13 +659,46 @@ final class DebugInfo
     }
 
     /**
+     * lapi.c: lua_getlocal's value (after findLocal found local $n): a
+     * register, a vararg (negative $n) or a native function's argument.
+     */
+    public static function localValue(CallInfo $ci, int $n): mixed
+    {
+        if ($n < 0) {
+            return $ci->varargs[-$n - 1] ?? null;
+        }
+        return $ci->R[$n - 1] ?? null;
+    }
+
+    /**
+     * lapi.c: lua_setlocal's store (after findLocal found local $n). Writes
+     * through $ci->R and $ci->varargs, which the running function uses.
+     */
+    public static function setLocalValue(CallInfo $ci, int $n, mixed $value): void
+    {
+        if ($n < 0) {
+            $ci->varargs[-$n - 1] = $value;
+        } else {
+            $ci->R[$n - 1] = $value;
+        }
+    }
+
+    /**
      * Number of valid stack slots of the frame in $ci (C: limit - base in
      * luaG_findlocal): up to the called function for a suspended Lua frame,
-     * all registers for the running one.
+     * all registers for the running one or one running a hook (plus the
+     * results being returned, for a return hook).
      */
     private static function frameLimit(Coroutine $L, CallInfo $ci): int
     {
         if ($ci->func instanceof LuaClosure) {
+            if ($ci->callstatus & Lua::CIST_HOOKED) {
+                $limit = $ci->func->proto->maxstacksize;
+                if ($ci->callstatus & Lua::CIST_TRAN) {
+                    $limit = max($limit, $ci->ftransfer + $ci->ntransfer - 1);
+                }
+                return $limit;
+            }
             if ($ci !== $L->ci) {
                 $instruction = $ci->func->proto->code[$ci->savedpc];
                 $opcode = OpCodes::GET_OPCODE($instruction);

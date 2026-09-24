@@ -9,6 +9,7 @@ use LuaPhp\Runtime\Calls;
 use LuaPhp\Runtime\ChunkLoader;
 use LuaPhp\Runtime\Coroutine;
 use LuaPhp\Runtime\DebugInfo;
+use LuaPhp\Runtime\Gc\Collector;
 use LuaPhp\Runtime\LightUserdata;
 use LuaPhp\Runtime\Lua;
 use LuaPhp\Runtime\LuaClosure;
@@ -117,7 +118,7 @@ final class PackageLib
         $clibs = self::registrySubtable($L, self::CLIBS);
         $metatable = new LuaTable();
         Auxiliary::setFunctions($metatable, ['__gc' => self::gctm(...)]);
-        $clibs->metatable = $metatable;
+        Collector::setMetatable($L, $clibs, $metatable);  // set CLIBS metatable
     }
 
     // loadlib.c: gctm (lsys_unloadlib does nothing without dynamic libraries)

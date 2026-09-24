@@ -67,7 +67,7 @@ final class Calls
     }
 
     // lstate.c: luaE_checkcstack
-    private static function checkCStack(Coroutine $L): void
+    public static function checkCStack(Coroutine $L): void
     {
         if ($L->nCcalls === Lua::LUAI_MAXCCALLS) {  // possible C stack overflow?
             DebugInfo::runError($L, 'C stack overflow');
@@ -78,14 +78,40 @@ final class Calls
     }
 
     /**
-     * ldo.c: luaD_call: call any value from PHP code (library functions,
-     * metamethods) and return all its results. Counts as a C call
-     * (LUAI_MAXCCALLS).
+     * Call any value from PHP code (library functions, metamethods) and
+     * return all its results. Counts as a C call (LUAI_MAXCCALLS).
+     *
+     * The callee may yield only when the running function is Lua code (the
+     * VM calling a metamethod or a 'for' iterator: ltm.c luaT_callTMres,
+     * lvm.c OP_TFORCALL). From a native function this is lapi.c's lua_call,
+     * which has no continuation, so the callee cannot yield
+     * (luaD_callnoyield): e.g. a yield inside a table.sort comparator is
+     * "attempt to yield across a C-call boundary". Natives that C gives a
+     * continuation (pcall, xpcall, dofile, pairs) use callk().
      *
      * @param list<mixed> $arguments
      * @return list<mixed>
      */
     public static function call(Coroutine $L, mixed $function, array $arguments): array
+    {
+        if (($L->ci->callstatus & (Lua::CIST_C | Lua::CIST_HOOKED)) === 0) {  // isLuacode(L->ci)
+            return self::callk($L, $function, $arguments);
+        }
+        $L->nny++;
+        $results = self::callk($L, $function, $arguments);
+        $L->nny--;
+        return $results;
+    }
+
+    /**
+     * ldo.c: luaD_call (lapi.c: lua_callk with a continuation): call any
+     * value; the callee may yield if the thread is yieldable. Counts as a
+     * C call (LUAI_MAXCCALLS).
+     *
+     * @param list<mixed> $arguments
+     * @return list<mixed>
+     */
+    public static function callk(Coroutine $L, mixed $function, array $arguments): array
     {
         if (++$L->nCcalls >= Lua::LUAI_MAXCCALLS) {
             self::checkCStack($L);
@@ -108,7 +134,7 @@ final class Calls
     public static function callNoYield(Coroutine $L, mixed $function, array $arguments): array
     {
         $L->nny++;
-        $results = self::call($L, $function, $arguments);
+        $results = self::callk($L, $function, $arguments);
         $L->nny--;
         return $results;
     }
@@ -147,9 +173,32 @@ final class Calls
     {
         $ci = CallInfo::push($L, $function, $callstatus | Lua::CIST_C, \count($arguments) + 1 + Lua::LUA_MINSTACK, self::NATIVE_FRAME_BYTES);
         $ci->R = $arguments;
+        if ($L->hookmask & Lua::LUA_MASKCALL) {
+            Hooks::hook($L, Lua::LUA_HOOKCALL, -1, 1, \count($arguments));
+        }
         $results = ($function->function)($L, $arguments);
+        if ($L->hookmask !== 0) {  // ldo.c: luaD_poscall
+            self::nativeReturnHook($L, $ci, $results);
+        }
         $L->ci = $ci->previous;
         return $results;
+    }
+
+    /**
+     * ldo.c: rethook for a native function. In C its results are the top
+     * slots of its stack; here they are appended to its arguments, so the
+     * hook can read them with debug.getlocal (the slot numbers can differ
+     * from C's, which depend on what the C function left on its stack).
+     *
+     * @param list<mixed> $results
+     */
+    private static function nativeReturnHook(Coroutine $L, CallInfo $ci, array $results): void
+    {
+        $firstResult = \count($ci->R) + 1;
+        foreach ($results as $result) {
+            $ci->R[] = $result;
+        }
+        Hooks::retHook($L, $ci, $firstResult, \count($results));
     }
 
     /**
@@ -157,16 +206,23 @@ final class Calls
      * of the Lua function doing 'return f(args)'. A Lua callee replaces that
      * frame: $ci is popped and the call is left pending for our caller
      * (returns null). A native callee runs on top of $ci, as in C, and its
-     * results are the frame's results.
+     * results are the frame's results. $functionRegister is the called
+     * function's register (where C moves a native callee's results).
      *
      * @param list<mixed> $arguments
      * @return list<mixed>|null
      */
-    public static function tailCall(Coroutine $L, CallInfo $ci, mixed $function, array $arguments): ?array
+    public static function tailCall(Coroutine $L, CallInfo $ci, mixed $function, array $arguments, int $functionRegister = 0): ?array
     {
         while (!($function instanceof LuaClosure)) {
             if ($function instanceof NativeFunction) {
                 $results = self::callNative($L, $function, $arguments, 0);
+                if ($L->hookmask !== 0) {  // luaD_poscall of the caller: its return hook
+                    foreach ($results as $i => $result) {
+                        $ci->R[$functionRegister + $i] = $result;
+                    }
+                    Hooks::retHook($L, $ci, $functionRegister + 1, \count($results));
+                }
                 $L->ci = $ci->previous;  // caller returns after the tail call
                 return $results;
             }
@@ -237,6 +293,19 @@ final class Calls
     }
 
     /**
+     * lapi.c: lua_pcallk with a continuation (pcall, xpcall): like
+     * protectedCall(), but the callee may yield (see callk()).
+     *
+     * @param list<mixed> $arguments
+     * @return array{int, mixed}
+     */
+    public static function protectedCallk(Coroutine $L, mixed $function, array $arguments, mixed $messageHandler = null): array
+    {
+        $yieldable = $L->nny === 0;  // lapi.c: k != NULL && yieldable(L)
+        return self::protectedRun($L, static fn (): array => self::callk($L, $function, $arguments), $messageHandler, $yieldable);
+    }
+
+    /**
      * ldo.c: luaD_pcall: run $body (PHP code, in the current frame) in
      * protected mode with $messageHandler as the current message handler
      * (C: L->errfunc). On error, the handler (if any) runs first, on top of
@@ -244,14 +313,19 @@ final class Calls
      * then the call stack is unwound to the current frame, closing
      * upvalues and to-be-closed variables of the abandoned frames.
      *
+     * $yieldable: a pcall with a continuation in a yieldable thread. C
+     * does not protect such a call itself: lua_resume catches the error
+     * and finishes the pcall (ldo.c: precover -> finishpcallk), where the
+     * '__close' methods may yield.
+     *
      * Returns [Lua::LUA_OK, $body's result] or [error status, error value].
      *
      * @return array{int, mixed}
      */
-    public static function protectedRun(Coroutine $L, \Closure $body, mixed $messageHandler = null): array
+    public static function protectedRun(Coroutine $L, \Closure $body, mixed $messageHandler = null, bool $yieldable = false): array
     {
         $oldCi = $L->ci;
-        $oldnCcalls = $L->nCcalls;
+        $oldnCcalls = $L->nCcalls - $L->nCcallsBase;  // relative: a coroutine may yield and be resumed from elsewhere in between
         $oldnny = $L->nny;
         $oldAllowhook = $L->allowhook;
         $oldErrfunc = $L->errfunc;
@@ -268,11 +342,11 @@ final class Calls
             }
             $errorCi = $L->ci;
             // ldo.c: luaD_rawrunprotected / luaD_pcall
-            $L->nCcalls = $oldnCcalls;
+            $L->nCcalls = $L->nCcallsBase + $oldnCcalls;
             $L->nny = $oldnny;
             $L->ci = $oldCi;
             $L->allowhook = $oldAllowhook;
-            [$status, $value] = self::closeProtected($L, $errorCi, $oldCi, $status, $value);
+            [$status, $value] = self::closeProtected($L, $errorCi, $oldCi, $status, $value, $messageHandler, $yieldable);
             self::unlinkAbandonedFrames($errorCi, $oldCi);
             self::shrinkStack($L);  // restore stack size in case of overflow
             $L->errfunc = $oldErrfunc;
@@ -307,13 +381,21 @@ final class Calls
      * ldo.c: luaD_closeprotected + lfunc.c: luaF_close for all frames from
      * $fromCi down to (not including) $downTo: close their upvalues, then
      * call pending '__close' methods (innermost first) with the error
-     * value. An error in a '__close' method becomes the new error value
-     * for the ones still to be called.
+     * value. An error in a '__close' method goes through $messageHandler,
+     * still the current handler (ldebug.c: luaG_errormsg), and becomes the
+     * new error value for the ones still to be called; the frames it
+     * abandons (the method's own, above the current one) are closed
+     * first. With $yieldable (see protectedRun) the methods may yield
+     * (lfunc.c: luaF_close with yy = 1).
      *
      * @return array{int, mixed}
      */
-    public static function closeProtected(Coroutine $L, CallInfo $fromCi, CallInfo $downTo, int $status, mixed $value): array
+    public static function closeProtected(Coroutine $L, CallInfo $fromCi, CallInfo $downTo, int $status, mixed $value, mixed $messageHandler = null, bool $yieldable = false): array
     {
+        $oldCi = $L->ci;
+        if ($yieldable) {  // a '__close' may yield: closeThread must find these frames
+            $L->pendingCloses[] = [$fromCi, $oldCi];
+        }
         for ($ci = $fromCi; $ci !== null && $ci !== $downTo; $ci = $ci->previous) {
             if ($ci->openupval !== []) {
                 Upvalues::closeUpvalues($ci, 0);
@@ -322,18 +404,29 @@ final class Calls
         for ($ci = $fromCi; $ci !== null && $ci !== $downTo; $ci = $ci->previous) {
             while ($ci->tbclist !== []) {
                 $register = array_pop($ci->tbclist);
-                $oldnCcalls = $L->nCcalls;
+                $oldnCcalls = $L->nCcalls - $L->nCcallsBase;  // relative, as in protectedRun
                 $oldnny = $L->nny;
+                $oldAllowhook = $L->allowhook;
                 try {
-                    Upvalues::callCloseMethod($L, $ci->R[$register], $value, false);
+                    Upvalues::callCloseMethod($L, $ci->R[$register], $value, $yieldable);
                 } catch (LuaError $error) {  // an error occurred; restore saved state and repeat
                     $status = $error->status;
                     $value = $error->value;
-                    $L->ci = $downTo;
-                    $L->nCcalls = $oldnCcalls;
+                    if ($messageHandler !== null && $status === Lua::LUA_ERRRUN) {
+                        [$status, $value] = self::callMessageHandler($L, $messageHandler, $value);
+                    }
+                    $errorCi = $L->ci;
+                    $L->ci = $oldCi;
+                    $L->nCcalls = $L->nCcallsBase + $oldnCcalls;
                     $L->nny = $oldnny;
+                    $L->allowhook = $oldAllowhook;
+                    [$status, $value] = self::closeProtected($L, $errorCi, $oldCi, $status, $value, $messageHandler, $yieldable);
+                    self::unlinkAbandonedFrames($errorCi, $oldCi);
                 }
             }
+        }
+        if ($yieldable) {
+            array_pop($L->pendingCloses);
         }
         return [$status, $value];
     }

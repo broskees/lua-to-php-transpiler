@@ -9,6 +9,7 @@ use LuaPhp\Runtime\Calls;
 use LuaPhp\Runtime\ChunkLoader;
 use LuaPhp\Runtime\Coroutine;
 use LuaPhp\Runtime\DebugInfo;
+use LuaPhp\Runtime\Gc\Collector;
 use LuaPhp\Runtime\Lua;
 use LuaPhp\Runtime\LuaClosure;
 use LuaPhp\Runtime\LuaError;
@@ -220,7 +221,7 @@ final class BaseLib
         if (Auxiliary::getMetafield($L, $table, '__metatable') !== null) {
             Auxiliary::error($L, 'cannot change a protected metatable');
         }
-        $table->metatable = $args[1] ?? null;
+        Collector::setMetatable($L, $table, $args[1] ?? null);
         return [$table];
     }
 
@@ -258,47 +259,102 @@ final class BaseLib
         return [$table];
     }
 
-    // lbaselib.c: luaB_collectgarbage (GC semantics are Phase 4; the answers are plausible)
+    /**
+     * lbaselib.c: luaB_collectgarbage with lapi.c: lua_gc. Inside a
+     * finalizer the collector is stopped and every option returns fail.
+     * Parameters are stored as C stores them (lgc.h: setgcparam keeps
+     * value / 4 in a byte; C int arguments).
+     */
     private static function collectgarbage(Coroutine $L, array $args): array
     {
         $options = ['stop', 'restart', 'collect', 'count', 'step', 'setpause', 'setstepmul', 'isrunning', 'generational', 'incremental'];
         $option = $options[Auxiliary::checkOption($L, $args, 1, 'collect', $options)];
         $G = $L->globalState;
+        $cInt = static fn (int $index): int => ((Auxiliary::optInteger($L, $args, $index, 0) & 0xFFFFFFFF) ^ 0x80000000) - 0x80000000;
+        $toByte = static fn (int $value): int => $value & 0xFF;  // C: assignment to lu_byte
+        $pushMode = static fn (int $previousMode): array => [$previousMode === Collector::KGC_INC ? 'incremental' : 'generational'];
         switch ($option) {
             case 'count':
-                return [memory_get_usage() / 1024];
+                if ($G->gcstp & Collector::GCSTPGC) {
+                    return [null];
+                }
+                return [Collector::totalBytes($G) / 1024.0];  // always a float, like C's lua_Number
             case 'step':
-                Auxiliary::optInteger($L, $args, 2, 0);
-                gc_collect_cycles();
-                return [$G->gcMode === 'incremental'];
+                $step = $cInt(2);
+                if ($G->gcstp & Collector::GCSTPGC) {
+                    return [null];
+                }
+                return [Collector::stepCommand($L, $step)];
             case 'setpause':
-                $previous = $G->libraryState['gc.pause'] ?? 200;
-                $G->libraryState['gc.pause'] = Auxiliary::optInteger($L, $args, 2, 0);
-                return [$previous];
             case 'setstepmul':
-                $previous = $G->libraryState['gc.stepmul'] ?? 100;
-                $G->libraryState['gc.stepmul'] = Auxiliary::optInteger($L, $args, 2, 0);
+                $value = $cInt(2);
+                if ($G->gcstp & Collector::GCSTPGC) {
+                    return [null];
+                }
+                if ($option === 'setpause') {
+                    $previous = $G->gcpause * 4;
+                    $G->gcpause = $toByte(intdiv($value, 4));
+                } else {
+                    $previous = $G->gcstepmul * 4;
+                    $G->gcstepmul = $toByte(intdiv($value, 4));
+                }
                 return [$previous];
             case 'isrunning':
-                return [$G->gcRunning];
-            case 'generational':
-            case 'incremental':
-                Auxiliary::optInteger($L, $args, 2, 0);
-                Auxiliary::optInteger($L, $args, 3, 0);
-                if ($option === 'incremental') {
-                    Auxiliary::optInteger($L, $args, 4, 0);
+                if ($G->gcstp & Collector::GCSTPGC) {
+                    return [null];
                 }
-                $previous = $G->gcMode;
-                $G->gcMode = $option;
-                return [$previous];
+                return [$G->gcstp === 0];
+            case 'generational':
+                $minormul = $cInt(2);
+                $majormul = $cInt(3);
+                if ($G->gcstp & Collector::GCSTPGC) {
+                    return [null];
+                }
+                $previousMode = $G->gckind;
+                if ($minormul !== 0) {
+                    $G->genminormul = $toByte($minormul);
+                }
+                if ($majormul !== 0) {
+                    $G->genmajormul = $toByte(intdiv($majormul, 4));
+                }
+                Collector::changeMode($L, Collector::KGC_GEN);
+                return $pushMode($previousMode);
+            case 'incremental':
+                $pause = $cInt(2);
+                $stepmul = $cInt(3);
+                $stepsize = $cInt(4);
+                if ($G->gcstp & Collector::GCSTPGC) {
+                    return [null];
+                }
+                $previousMode = $G->gckind;
+                if ($pause !== 0) {
+                    $G->gcpause = $toByte(intdiv($pause, 4));
+                }
+                if ($stepmul !== 0) {
+                    $G->gcstepmul = $toByte(intdiv($stepmul, 4));
+                }
+                if ($stepsize !== 0) {
+                    $G->gcstepsize = $toByte($stepsize);
+                }
+                Collector::changeMode($L, Collector::KGC_INC);
+                return $pushMode($previousMode);
             case 'stop':
-                $G->gcRunning = false;
+                if ($G->gcstp & Collector::GCSTPGC) {
+                    return [null];
+                }
+                $G->gcstp = Collector::GCSTPUSR;  // stopped by the user
                 return [0];
             case 'restart':
-                $G->gcRunning = true;
+                if ($G->gcstp & Collector::GCSTPGC) {
+                    return [null];
+                }
+                Collector::restart($G);
                 return [0];
             default:  // collect
-                gc_collect_cycles();
+                if ($G->gcstp & Collector::GCSTPGC) {
+                    return [null];
+                }
+                Collector::fullGc($L);
                 return [0];
         }
     }
@@ -329,7 +385,7 @@ final class BaseLib
         if ($metamethod === null) {  // no metamethod?
             return [$next, $args[0], null];  // generator, state, and initial value
         }
-        $results = Calls::call($L, $metamethod, [$args[0]]);  // get 3 values from metamethod
+        $results = Calls::callk($L, $metamethod, [$args[0]]);  // get 3 values from metamethod (lua_callk: may yield)
         return [$results[0] ?? null, $results[1] ?? null, $results[2] ?? null];
     }
 
@@ -429,7 +485,7 @@ final class BaseLib
     {
         $filename = Auxiliary::optString($L, $args, 1, null);
         $function = ChunkLoader::loadFile($L, $filename, null);
-        return Calls::call($L, $function, []);
+        return Calls::callk($L, $function, []);  // lua_callk with dofilecont: may yield
     }
 
     // lbaselib.c: luaB_assert
@@ -468,7 +524,7 @@ final class BaseLib
     {
         Auxiliary::checkAny($L, $args, 1);
         $function = array_shift($args);
-        [$status, $result] = Calls::protectedCall($L, $function, $args);
+        [$status, $result] = Calls::protectedCallk($L, $function, $args);
         if ($status === Lua::LUA_OK) {
             array_unshift($result, true);
             return $result;
@@ -482,7 +538,7 @@ final class BaseLib
         Auxiliary::checkType($L, $args, 2, Lua::LUA_TFUNCTION);  // check error function
         $function = $args[0];
         $handler = $args[1];
-        [$status, $result] = Calls::protectedCall($L, $function, \array_slice($args, 2), $handler);
+        [$status, $result] = Calls::protectedCallk($L, $function, \array_slice($args, 2), $handler);
         if ($status === Lua::LUA_OK) {
             array_unshift($result, true);
             return $result;

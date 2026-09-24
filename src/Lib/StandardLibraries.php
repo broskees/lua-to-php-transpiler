@@ -20,6 +20,7 @@ final class StandardLibraries
         Auxiliary::registerLoaded($L, Lua::LUA_GNAME, BaseLib::open($L));
         $libraries = [
             'package' => PackageLib::open(...),
+            'coroutine' => CoroutineLib::open(...),
             'table' => TableLib::open(...),
             'io' => IoLib::open(...),
             'os' => OsLib::open(...),

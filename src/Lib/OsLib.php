@@ -11,6 +11,7 @@ use LuaPhp\Runtime\Auxiliary;
 use LuaPhp\Runtime\Calls;
 use LuaPhp\Runtime\Coroutine;
 use LuaPhp\Runtime\DebugInfo;
+use LuaPhp\Runtime\Gc\Collector;
 use LuaPhp\Runtime\Lua;
 use LuaPhp\Runtime\LuaTable;
 use LuaPhp\Runtime\Standalone;
@@ -339,9 +340,8 @@ final class OsLib
         }
         $close = $args[1] ?? null;
         if ($close !== null && $close !== false) {
-            // lua_close: close the main thread's pending to-be-closed variables
-            $main = $L->globalState->mainThread;
-            Calls::closeProtected($main, $main->ci, $main->baseCi, Lua::LUA_OK, null);
+            // lua_close: close the main thread's pending to-be-closed variables, run pending finalizers
+            Collector::closeState($L);
         }
         // exit: flush all streams, then end the process
         CFile::flushAll();

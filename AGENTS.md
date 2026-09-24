@@ -94,6 +94,40 @@ Lua string keys and integer keys distinct.
   scripts run the whole session inside a Fiber with a large C stack
   (`Standalone::runOnLargeStack`: PHP frees nested data recursively), so ask
   `$L->fiber`, never `Fiber::getCurrent()`, whether code runs in a coroutine.
+- **Coroutines.** `Coroutine::newThread($L, $body)` (lua_newthread),
+  `$co->resume($from, $args)` (lua_resume: `[LUA_YIELD|LUA_OK|error status,
+  values|error value]`), `$L->yield($values)` (lua_yieldk: `Fiber::suspend`),
+  `$co->closeThread($from)` (lua_closethread); lcorolib.c is `Lib\CoroutineLib`.
+  The first resume starts `$co->fiber`; the fiber keeps the coroutine's whole
+  PHP stack across a yield, so the pcalls, metamethods and iterators between
+  resume and yield just continue (no continuations, unroll or precover).
+  Yields follow C's rule: allowed only when `$L->nny` (non-yieldable calls) is
+  0; the main thread starts at 1 ("attempt to yield from outside a
+  coroutine"), `Calls::callNoYield` and `Calls::call` from a native frame add
+  1 ("attempt to yield across a C-call boundary"). State: `status` (LUA_OK,
+  LUA_YIELD or the error that killed it), `ci !== baseCi` (running/normal),
+  `body` (the function of a coroutine not started yet; LUA_OK at base level
+  with no body = dead). While suspended, `$co->ci` is the CallInfo of the
+  native `coroutine.yield`; a coroutine that died with an error keeps its
+  CallInfo chain as it was at the raise point, and its `errorValue`, until
+  closeThread (as C). While a pcall in a coroutine runs the `__close`
+  methods of frames an error abandoned (they may yield), those frames are
+  listed in `pendingCloses`; closeThread splices them back where C's stack
+  has them. A resume sets `$co->nCcalls` to the resumer's + 1
+  (nested resumes hit "C stack overflow" at LUAI_MAXCCALLS as in C); the PHP
+  frames of a suspended coroutine undo their own increments when they
+  return, so a resume shifts nCcalls by the change of `nCcallsBase` and saved
+  counts (protectedRun, closeProtected) are relative to it. Each fiber gets a
+  C stack of `Coroutine::FIBER_STACK_BYTES` (256 MB of address space; only
+  touched pages count: a suspended coroutine costs about 10 KB RSS plus a 16
+  KB VM stack page; nested data freed inside a coroutine needs about 150
+  bytes of it per level: a Lua list of 1.7 million nodes, 2 million crash). Freeing: a finished coroutine's fiber is freed at
+  once; a suspended one that becomes unreachable (a cycle: Coroutine ->
+  Fiber -> its frames -> `$L`) is freed by PHP's cycle collector, and
+  closeThread drops it explicitly. PHP destroys a suspended Fiber by
+  unwinding it with a graceful exit: no catch block runs, so no Lua pcall or
+  `__close` sees it, but `finally` blocks and `__destruct` methods do: never
+  run Lua code from `finally` or `__destruct`.
 - **Chunks.** `ChunkLoader::load($L, $chunk, $chunkname, $mode)` (lua_load) ->
   `Compiler::compile`/`Undump::undump` -> `Emitter::emitChunk($proto)` -> eval ->
   a factory `static function (Proto $proto): \Closure` returning the main
@@ -114,8 +148,14 @@ Lua string keys and integer keys distinct.
   with `Calls::finishTailCall($L)`). Native: `($native->function)($L, $args):
   array`, arguments 0-based, run via `Calls::callNative` (pushes a C
   CallInfo). PHP code (libraries, metamethods) calls any value with
-  `Calls::call` / `Calls::callNoYield` (luaD_call: counts `$L->nCcalls`,
-  handles `__call` and tail calls). Lua->Lua calls do not count as C calls.
+  `Calls::call` / `Calls::callk` / `Calls::callNoYield` (luaD_call: counts
+  `$L->nCcalls`, handles `__call` and tail calls). Lua->Lua calls do not count
+  as C calls. `Calls::call` is yieldable only when the running frame is Lua
+  code (the VM calling a metamethod or iterator); from a native frame it is
+  lua_call without a continuation, so the callee cannot yield. `callk`
+  (lua_callk with a continuation) stays yieldable: in C only pcall/xpcall
+  (`Calls::protectedCallk`), dofile and pairs' `__pairs` have one, so only
+  they use it.
 - **CallInfo** chain: `$L->ci -> previous -> ... -> $L->baseCi`. Fields:
   `func`, `callstatus` (`Lua::CIST_*`; `CIST_TAIL` for tail-called frames,
   `CIST_C` for natives), `savedpc` (index of the current instruction = C's
@@ -131,7 +171,10 @@ Lua string keys and integer keys distinct.
   (luaD_pcall), runs the message handler on top of the chain as it was at the
   raise point (like luaG_errormsg), then resets `$L->ci`/`nCcalls`, closes
   upvalues and pending `__close` variables of the abandoned frames and unlinks
-  them. `$L->errfunc` is the current message handler (load's parser uses it).
+  them (`Calls::closeProtected`: an error in a `__close` also goes through the
+  handler; a pcall/xpcall in a yieldable coroutine closes with yieldable
+  calls, as C's precover/finishpcallk). `$L->errfunc` is the current message
+  handler (load's parser uses it).
   Variable names in messages come from ldebug.c's symbolic execution; helpers
   take "slots": register >= 0, `DebugInfo::upvalueSlot($i)`, or `NO_SLOT`.
 - **Limits.** "stack overflow" when a frame's approximate slot top exceeds
@@ -149,9 +192,61 @@ Lua string keys and integer keys distinct.
   (float, boolean, object keys); nil is never stored; `sizearray` is the
   border hint (C's alimit); `next()` keeps a cursor so traversal is O(1) and
   survives clearing fields. Light userdata: `LightUserdata::pointingTo($obj)`.
-- **Hooks (Phase 4).** `FunctionEmitter::hookCheck($pc)` returns code emitted
-  before every instruction (empty now); hook state lives on `Coroutine`
-  (`hook`, `hookmask`, `basehookcount`, `hookcount`, `allowhook`, `oldpc`).
+- **GC.** PHP frees memory (refcounting + its cycle collector); what Lua can
+  observe of its collector is `Gc\Collector`, lgc.c's atomic phase run in one
+  go: mark from C's roots (registry, `typeMetatables`, main thread, running
+  thread, pending finalizers, plus `$G->libraryState`), clear weak tables
+  (`__mode` read at every cycle; ephemerons; values cleared before
+  finalizers are separated, keys after resurrection), then call the `__gc`
+  of unreachable objects marked for finalization (`$G->finobj`, strongly
+  held; `$G->tobefnz`), last marked first, via protectedRun + callNoYield with
+  `CIST_FIN`, hooks off and `$G->gcstp |= GCSTPGC`; errors become "error in
+  __gc" warnings. Weak tables are ordinary tables (strong PHP references)
+  until a cycle removes entries, so emitted fast paths stay valid. Marking an
+  object for finalization happens only in `Collector::setMetatable` (every
+  lua_setmetatable site must use it: base/debug setmetatable, io handles,
+  CLIBS). Collectable = LuaTable, LuaClosure, Coroutine, Userdata, and
+  NativeFunction with `$upvalues` (a C closure); natives without upvalues
+  are light C functions. A native's Lua values must be in its `$upvalues`:
+  PHP `use` captures are invisible to the GC. A thread is traced through
+  its CallInfo chain (`func`, `R`, `varargs`), the abandoned frames in
+  `pendingCloses`, `tailCall*`, `errfunc`, `body`, `errorValue`. Liveness
+  is C's stack top: a Lua frame below the top whose `savedpc` is at
+  OP_CALL/OP_TAILCALL (OP_TFORCALL) owns registers below A (A+4), unless
+  `CIST_HOOKED`; the frame that triggered an automatic
+  cycle owns registers up to A of its allocation instruction; anything else
+  keeps all its registers. So `savedpc` must be exact before every call.
+  Every cycle is complete (atomic + all finalizers): `collectgarbage()` and
+  "step" (true in incremental mode, false in generational, like C), and
+  automatic cycles when emitted OP_NEWTABLE/OP_CONCAT/OP_CLOSURE push
+  `$G->gcDebt` (bytes C would allocate) above 0 (`Collector::step($L, A+1)`,
+  lvm.c checkGC). Pacing is lgc.c's setpause with a pause of at least 400%
+  and 1 MB (a full trace costs about twice the allocation it pays for).
+  "count" = C-size estimate of what the last cycle reached + max(charged
+  bytes, PHP memory growth) since. PHP's cycle collector is paused while
+  tracing (every touched object becomes a root candidate). lua_close is
+  `Collector::closeState` (bin/lua and lua2php scripts after the main chunk,
+  `os.exit(x, true)`): close the main thread's tbc variables, then finalize
+  everything still marked; objects marked while closing are not.
+- **Hooks.** Per thread, on `Coroutine`: `hook` (C's lua_Hook: a closure
+  `($L, $event, $line, $ci)`; debug.sethook installs `DebugLib::hookf`,
+  which calls registry `_HOOKKEY[thread]`), `hookmask`, `basehookcount`,
+  `hookcount`, `allowhook`, `oldpc`, and `trap` (true while a line or count
+  hook is set). Change them only with `Hooks::setHook` (lua_sethook). Every
+  emitted function binds `$trap = &$L->trap` in its prologue and emits
+  `if ($trap) { Hooks::traceExec($L, $ci, pc); }` (luaG_traceexec) before
+  exactly the instructions C's vmfetch fetches: not OP_VARARGPREP or
+  OP_TFORLOOP, not an OP_EXTRAARG, the OP_MMBIN* only on the metamethod
+  path, not the OP_JMP after a test (the test jumps to its target
+  directly: donextjump), not OP_TFORCALL when entered from OP_TFORPREP
+  (`goto T<pc>`, a label after its check). Call hooks: `Hooks::hookCall`
+  in the prologue (after OP_VARARGPREP for vararg functions) and in
+  `Calls::callNative`; return hooks: `Hooks::retHook` in OP_RETURN* (before
+  the results are collected), `Calls::callNative` (a native's results are
+  appended to its `$ci->R`) and `Calls::tailCall` for a native callee.
+  `Hooks::hook` (luaD_hook) marks the hooked CallInfo `CIST_HOOKED` (and
+  `CIST_TRAN` with `ftransfer`/`ntransfer` for getinfo's 'r') and clears
+  `allowhook` while the hook runs; `Calls::protectedRun` restores it.
 - **PHP hygiene.** `Standalone::configurePhp()`: PHP warnings become
   exceptions (a crash, never output), exception traces drop arguments, stdout
   is buffered (`print` echoes; `Standalone::flushStdout()` before stderr/exit).
@@ -207,12 +302,12 @@ files are run with `tests/official.sh`; once a file passes it must keep passing.
       functions + `bin/lua` + `bin/lua2php` + `tests/official.sh`. Gate:
       differential corpus green; official vararg passes; a transpiled
       `out.php` runs standalone and matches lua5.4.
-- [ ] Phase 2 — libraries in parallel lanes: string/utf8, math/table,
+- [x] Phase 2 — libraries in parallel lanes: string/utf8, math/table,
       io/os/package, coroutine (Fiber). Gate: strings, pm, tpack, utf8, math,
       sort, nextvar, files, attrib, constructs, bitwise, goto, closure,
       literals, events.
-- [ ] Phase 3 — errors, stack overflow, calls/string.dump, to-be-closed
+- [x] Phase 3 — errors, stack overflow, calls/string.dump, to-be-closed
       variables. Gate: errors, cstack, calls, locals, coroutine.
-- [ ] Phase 4 — debug library + hooks, GC semantics. Gate: db, gc, gengc,
+- [x] Phase 4 — debug library + hooks, GC semantics. Gate: db, gc, gengc,
       big, verybig.
 - [ ] Phase 5 — `all.lua` prints `final OK !!!` under `-e"_U=true"`.

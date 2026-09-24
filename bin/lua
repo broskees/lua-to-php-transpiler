@@ -16,6 +16,7 @@ use LuaPhp\Runtime\Auxiliary;
 use LuaPhp\Runtime\Calls;
 use LuaPhp\Runtime\ChunkLoader;
 use LuaPhp\Runtime\Coroutine;
+use LuaPhp\Runtime\Gc\Collector;
 use LuaPhp\Runtime\Lua;
 use LuaPhp\Runtime\LuaError;
 use LuaPhp\Runtime\LuaObject;
@@ -273,7 +274,8 @@ function pmain(Coroutine $L, string $programName, array $argv): bool
     }
     StandardLibraries::openAll($L);  // open standard libraries
     Standalone::createArgTable($L, $argv, $script);  // create table 'arg'
-    $L->globalState->gcMode = 'generational';  // lua.c: lua_gc(L, LUA_GCGEN, 0, 0)
+    Collector::restart($L->globalState);  // lua.c: lua_gc(L, LUA_GCRESTART): start GC...
+    Collector::changeMode($L, Collector::KGC_GEN);  // ...in generational mode
     if (!($args & HAS_CAPITAL_E)) {  // no option '-E'?
         if (Standalone::handleLuaInit($L, $programName) !== Lua::LUA_OK) {  // run LUA_INIT
             return false;  // error running LUA_INIT
@@ -303,9 +305,11 @@ function pmain(Coroutine $L, string $programName, array $argv): bool
 // lua.c: main (on a large C stack, see Standalone::runOnLargeStack)
 $exitStatus = Standalone::runOnLargeStack(static function () use ($programName, $argv): int {
     $L = Coroutine::newState();
+    $L->globalState->gcstp = Collector::GCSTPUSR;  // lua_gc(L, LUA_GCSTOP): stop GC while building state
     $pmain = new NativeFunction('pmain', static fn (Coroutine $L, array $args): array => [pmain($L, $programName, $argv)]);
     [$status, $result] = Calls::protectedCall($L, $pmain, []);  // do the call
     Standalone::report($programName, $status, $result);
+    Collector::closeState($L);  // lua_close
     Standalone::flushStdout();
     $succeeded = $status === Lua::LUA_OK && $result[0];
     unset($L, $pmain, $result);  // free the Lua state on this stack

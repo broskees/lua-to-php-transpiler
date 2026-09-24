@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace LuaPhp\Runtime;
 
 use LuaPhp\Lib\StandardLibraries;
+use LuaPhp\Runtime\Gc\Collector;
 
 /**
  * Pieces of lua.c (the stand-alone interpreter) shared by bin/lua and the
@@ -215,11 +216,13 @@ final class Standalone
         return self::runOnLargeStack(static function () use ($argv, $scriptName, $loadScript): int {
             $programName = $argv[0] ?? 'lua';
             $L = Coroutine::newState();
+            $L->globalState->gcstp = Collector::GCSTPUSR;  // lua_gc(L, LUA_GCSTOP): stop GC while building state
             $pmain = new NativeFunction('pmain', static function (Coroutine $L, array $args) use ($argv, $programName, $scriptName, $loadScript): array {
                 StandardLibraries::openAll($L);
                 $luaArgv = array_merge([$argv[0] ?? 'lua', $scriptName], \array_slice($argv, 1));
                 self::createArgTable($L, $luaArgv, 1);
-                $L->globalState->gcMode = 'generational';
+                Collector::restart($L->globalState);  // lua.c: lua_gc(L, LUA_GCRESTART): start GC...
+                Collector::changeMode($L, Collector::KGC_GEN);  // ...in generational mode
                 if (self::handleLuaInit($L, $programName) !== Lua::LUA_OK) {
                     return [false];
                 }
@@ -227,6 +230,7 @@ final class Standalone
             });
             [$status, $result] = Calls::protectedCall($L, $pmain, []);
             self::report($programName, $status, $result);
+            Collector::closeState($L);  // lua_close
             self::flushStdout();
             $succeeded = $status === Lua::LUA_OK && $result[0];
             unset($L, $pmain, $result);  // free the Lua state on this stack

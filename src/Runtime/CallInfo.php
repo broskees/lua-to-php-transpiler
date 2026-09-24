@@ -60,6 +60,14 @@ final class CallInfo
     public int $callstatus = 0;
 
     /**
+     * While a call or return hook runs with CIST_TRAN set: the values
+     * transferred are the frame's slots ftransfer .. ftransfer + ntransfer
+     * - 1, as numbered by debug.getlocal (C: ci->u2.transferinfo)
+     */
+    public int $ftransfer = 0;
+    public int $ntransfer = 0;
+
+    /**
      * Estimated PHP memory held by this frame and all frames below it (see
      * Calls::MAX_FRAME_BYTES).
      */

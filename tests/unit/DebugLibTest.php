@@ -76,3 +76,19 @@ function test_userdata_without_user_values(): void
         LUA, 0);
     assertSame([1, 'userdata'], $results);
 }
+
+/*
+ * debug.debug reads commands from standard input, which the differential
+ * cases leave empty; here bin/lua and lua5.4 get the same input lines.
+ */
+function test_debug_debug_runs_input_lines_until_cont(): void
+{
+    $directory = scratchDirectory();
+    file_put_contents("$directory/debug_debug.lua", "x = 1\nprint(debug.debug())\nprint('after', x)\n");
+    $input = "print('hello', x)\nx = x + 1\nerror('oops')\nerror({})\nerror(setmetatable({}, {__tostring = function () return 'meta' end}))\n"
+        . "this is not lua\nprint(debug.traceback())\nprint(x)\ncont\nprint('never')\n";
+    $normalize = static fn (array $result): array => preg_replace('/0x[0-9a-f]+/', '0x?', $result);
+    $ours = runCommand(['php', realpath(REPO_ROOT . '/bin/lua'), 'debug_debug.lua'], $input, $directory);
+    $reference = runCommand(['lua5.4', 'debug_debug.lua'], $input, $directory);
+    assertSame($normalize($reference), $normalize($ours));
+}

@@ -88,7 +88,7 @@ final class Upvalues
     {
         $tm = MetaMethods::getByObject($L, $object, MetaMethods::TM_CLOSE);
         if ($yieldable) {
-            Calls::call($L, $tm, [$object, $error]);
+            Calls::callk($L, $tm, [$object, $error]);
         } else {
             Calls::callNoYield($L, $tm, [$object, $error]);
         }

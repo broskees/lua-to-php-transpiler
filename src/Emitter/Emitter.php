@@ -31,6 +31,8 @@ final class Emitter
         . "use LuaPhp\\Runtime\\CallInfo;\n"
         . "use LuaPhp\\Runtime\\Calls;\n"
         . "use LuaPhp\\Runtime\\Coroutine;\n"
+        . "use LuaPhp\\Runtime\\Gc\\Collector;\n"
+        . "use LuaPhp\\Runtime\\Hooks;\n"
         . "use LuaPhp\\Runtime\\LuaClosure;\n"
         . "use LuaPhp\\Runtime\\LuaTable;\n"
         . "use LuaPhp\\Runtime\\MetaMethods;\n"

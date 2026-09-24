@@ -10,6 +10,7 @@ use LuaPhp\Lib\Io\LuaStream;
 use LuaPhp\Runtime\Auxiliary;
 use LuaPhp\Runtime\Coroutine;
 use LuaPhp\Runtime\DebugInfo;
+use LuaPhp\Runtime\Gc\Collector;
 use LuaPhp\Runtime\Lua;
 use LuaPhp\Runtime\LuaError;
 use LuaPhp\Runtime\LuaObject;
@@ -118,7 +119,7 @@ final class IoLib
     private static function newPreFile(Coroutine $L): Userdata
     {
         $handle = new Userdata(new LuaStream());
-        $handle->metatable = $L->globalState->registry->hash[self::LUA_FILEHANDLE];  // luaL_setmetatable
+        Collector::setMetatable($L, $handle, $L->globalState->registry->hash[self::LUA_FILEHANDLE]);  // luaL_setmetatable
         return $handle;
     }
 
