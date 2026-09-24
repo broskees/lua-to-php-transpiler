@@ -25,6 +25,13 @@ final class CoroutineLib
     private const COS_NORM = 3;
     private const STATUS_NAMES = ['running', 'dead', 'suspended', 'normal'];
 
+    /**
+     * the function of every wrap() closure: one PHP closure for all of
+     * them (each would cost about 750 bytes), which, like C's, finds its
+     * coroutine in its upvalue
+     */
+    private static ?\Closure $auxwrapFunction = null;
+
     // lcorolib.c: luaopen_coroutine
     public static function open(Coroutine $L): LuaTable
     {
@@ -85,8 +92,9 @@ final class CoroutineLib
     }
 
     // lcorolib.c: luaB_auxwrap
-    private static function auxwrap(Coroutine $L, Coroutine $co, array $args): array
+    private static function auxwrap(Coroutine $L, array $args): array
     {
+        $co = $L->ci->func->upvalues[0];  // getco: lua_upvalueindex(1) of the running C closure
         [$succeeded, $values] = self::auxresume($L, $co, $args);
         if ($succeeded) {
             return $values;
@@ -114,8 +122,8 @@ final class CoroutineLib
     {
         Auxiliary::checkType($L, $args, 1, Lua::LUA_TFUNCTION);
         $co = Coroutine::newThread($L, $args[0]);
-        $auxwrap = static fn (Coroutine $L, array $args): array => self::auxwrap($L, $co, $args);
-        return [new NativeFunction('auxwrap', $auxwrap, [$co])];  // C closure with the coroutine as upvalue
+        self::$auxwrapFunction ??= self::auxwrap(...);
+        return [new NativeFunction('auxwrap', self::$auxwrapFunction, [$co])];  // C closure with the coroutine as upvalue
     }
 
     // lcorolib.c: luaB_yield

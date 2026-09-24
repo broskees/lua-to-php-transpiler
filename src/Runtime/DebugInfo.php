@@ -570,7 +570,7 @@ final class DebugInfo
                         $info['isvararg'] = true;
                         $info['nparams'] = 0;
                     } else {
-                        $info['nups'] = \count($closure->upvals);
+                        $info['nups'] = \count($closure->proto->upvalues);
                         $info['isvararg'] = $closure->proto->is_vararg;
                         $info['nparams'] = $closure->proto->numparams;
                     }
@@ -588,8 +588,8 @@ final class DebugInfo
                         $info['ftransfer'] = 0;
                         $info['ntransfer'] = 0;
                     } else {
-                        $info['ftransfer'] = $ci->ftransfer;
-                        $info['ntransfer'] = $ci->ntransfer;
+                        $info['ftransfer'] = $L->ftransfer;
+                        $info['ntransfer'] = $L->ntransfer;
                     }
                     break;
                 case 'L':
@@ -695,7 +695,7 @@ final class DebugInfo
             if ($ci->callstatus & Lua::CIST_HOOKED) {
                 $limit = $ci->func->proto->maxstacksize;
                 if ($ci->callstatus & Lua::CIST_TRAN) {
-                    $limit = max($limit, $ci->ftransfer + $ci->ntransfer - 1);
+                    $limit = max($limit, $L->ftransfer + $L->ntransfer - 1);
                 }
                 return $limit;
             }

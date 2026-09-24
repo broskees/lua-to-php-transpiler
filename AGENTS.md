@@ -120,8 +120,10 @@ Lua string keys and integer keys distinct.
   return, so a resume shifts nCcalls by the change of `nCcallsBase` and saved
   counts (protectedRun, closeProtected) are relative to it. Each fiber gets a
   C stack of `Coroutine::FIBER_STACK_BYTES` = 256 KB of address space (only
-  touched pages cost memory: a suspended coroutine costs about 10 KB RSS
-  plus a 16 KB VM stack page). Lua depth never uses it (Lua calls,
+  touched pages cost memory: a suspended coroutine costs about 10 KB RSS,
+  8.4 KB of it PHP's Fiber itself: C stack pages and the first page of its
+  16 KB VM stack; all fibers share one PHP closure, `wrap` closures one
+  function). Lua depth never uses it (Lua calls,
   metamethods and library calls are PHP calls, on PHP's heap-allocated VM
   stack; deep data is freed by Teardown), so the size comes from what PHP
   itself needs, measured as the touched pages of fiber stacks: 36 KB for
@@ -147,8 +149,9 @@ Lua string keys and integer keys distinct.
   them and release the queue one value at a time): LuaTable, UpVal,
   NativeFunction, Userdata, Coroutine (which also unlinks its CallInfo
   chain, as `Calls::unlinkAbandonedFrames` does for frames an error
-  abandons). A LuaClosure leads only to UpVals; CallInfo chains hang only
-  off their Coroutine. A new class that can hold Lua values needs such a
+  abandons). A LuaClosure leads only to UpVals; a LuaTable hands its
+  `LuaTableExtra` over whole; CallInfo chains hang only off their
+  Coroutine. A new class that can hold Lua values needs such a
   destructor unless it always leads to one of these within a few steps.
   Destructors never run Lua code nor change what Lua can see: they run
   only on objects nothing reaches (or at shutdown). Each freed table pays
@@ -169,7 +172,11 @@ Lua string keys and integer keys distinct.
   '%p' tells long strings apart by PHP string identity, the Proto holds one
   PHP string per Lua string object (the Lexer and `Undump(..., true)` for
   lua2php share equal strings like llex.c), and opcache interns literals or
-  not. `OP_CLOSURE` is `new LuaClosure($proto_X, $function_X, [upvals])`.
+  not. A closure's class fits its Proto's upvalue count (see Upvalues), so
+  the function's `$cl` is typed with it, upvalue `i` is `$cl->u<i>` or
+  `$cl->upvals[i]`, and `OP_CLOSURE` is `new LuaClosure1($proto_X,
+  $function_X, $upval)` ... or `new LuaClosureN($proto_X, $function_X,
+  [upvals])`.
   Never use `array_slice`/array functions on `$R`: open upvalues make its
   elements PHP references.
 - **Calls.** Lua function: `($f->code)($L, $f, $args)` returns the result list,
@@ -222,12 +229,29 @@ Lua string keys and integer keys distinct.
   -> "C stack overflow".
 - **Upvalues.** An open `UpVal->v` is a PHP reference to `$R[$reg]`; one UpVal
   per register (`Upvalues::find`), closed by `Upvalues::close`/`closeUpvalues`
-  (OP_CLOSE, OP_RETURN/OP_TAILCALL with k, error unwinding).
+  (OP_CLOSE, OP_RETURN/OP_TAILCALL with k, error unwinding). `v` is UpVal's
+  only property. `LuaClosure` is abstract: like C's LClosure, a closure is
+  sized to its upvalue count, `LuaClosure1/2/3` in properties `u0..u2`,
+  `LuaClosureN` (none or more than 3) in the list `upvals`;
+  `LuaClosure::create` picks the class, other code uses
+  `getUpval/setUpval` and `count($closure->proto->upvalues)`.
 - **Tables.** `LuaTable`: `arr` (integer keys), `hash` (string keys; PHP may
-  store "10" as 10 there, it is still a string), `otherValues/otherKeys`
-  (float, boolean, object keys); nil is never stored; `sizearray` is the
-  border hint (C's alimit); `next()` keeps a cursor so traversal is O(1) and
-  survives clearing fields. Light userdata: `LightUserdata::pointingTo($obj)`.
+  store "10" as 10 there, it is still a string), `metatable`, `sizearray`
+  (the border hint, C's alimit) and `extra`: a `LuaTableExtra`, null until
+  needed, with `otherValues/otherKeys` (float, boolean, object keys) and
+  the cursor `next()` keeps so traversal is O(1) and survives clearing
+  fields; it is dropped when a traversal ends with no such keys. Nil is
+  never stored. Only `LuaTable::next` may use reset()/next() on a part:
+  by-reference array functions leave the property a PHP reference (+32
+  bytes), which `endTraversal` undoes. Light userdata:
+  `LightUserdata::pointingTo($obj)`.
+- **Object sizes.** Every instance pays 16 bytes per declared property
+  (40 + 16n, rounded up to Zend MM's bins: ..., 96, 112, 128, 160, 192,
+  224, 256, ...), and a non-empty PHP array at least 216 bytes (list) or
+  376 (string keys). A table is 128 bytes plus its arrays, a closure 96-128
+  plus 56 per closed UpVal, a CallInfo 224; `tests/unit/ObjectMemoryTest.php`
+  pins these budgets, so a new property on a hot class needs a reason (and
+  may move it to a bigger bin). Keep what few objects use in side objects.
 - **GC.** PHP frees memory (refcounting + its cycle collector); what Lua can
   observe of its collector is `Gc\Collector`, lgc.c's atomic phase run in one
   go: mark from C's roots (registry, `typeMetatables`, main thread, running
@@ -281,7 +305,8 @@ Lua string keys and integer keys distinct.
   the results are collected), `Calls::callNative` (a native's results are
   appended to its `$ci->R`) and `Calls::tailCall` for a native callee.
   `Hooks::hook` (luaD_hook) marks the hooked CallInfo `CIST_HOOKED` (and
-  `CIST_TRAN` with `ftransfer`/`ntransfer` for getinfo's 'r') and clears
+  `CIST_TRAN`, with the thread's `ftransfer`/`ntransfer`, for getinfo's
+  'r': hooks do not nest, so they live on the Coroutine) and clears
   `allowhook` while the hook runs; `Calls::protectedRun` restores it.
 - **PHP hygiene.** `Standalone::configurePhp()`: PHP warnings become
   exceptions (a crash, never output), exception traces drop arguments, stdout

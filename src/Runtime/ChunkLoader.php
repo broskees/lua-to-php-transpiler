@@ -60,8 +60,8 @@ final class ChunkLoader
             throw new LuaError($result, $status);
         }
         $closure = $result;
-        if ($closure->upvals !== []) {  // does it have an upvalue?
-            $closure->upvals[0]->v = $L->globalState->globals;  // set it to the global table
+        if ($closure->proto->upvalues !== []) {  // does it have an upvalue?
+            $closure->getUpval(0)->v = $L->globalState->globals;  // set it to the global table
         }
         return $closure;
     }
@@ -85,7 +85,7 @@ final class ChunkLoader
         foreach ($proto->upvalues as $unused) {
             $upvalues[] = UpVal::closed(null);
         }
-        return new LuaClosure($proto, $factory($proto), $upvalues);
+        return LuaClosure::create($proto, $factory($proto), $upvalues);
     }
 
     /** the compiled factory for a chunk whose main function is $proto */

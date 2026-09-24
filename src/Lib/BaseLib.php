@@ -425,8 +425,8 @@ final class BaseLib
         } catch (LuaError $error) {
             return [null, $error->value];  // return fail plus error message
         }
-        if ($environmentArgument <= \count($args) && $function->upvals !== []) {  // 'env' parameter?
-            $function->upvals[0]->v = $args[$environmentArgument - 1];  // set it as 1st upvalue
+        if ($environmentArgument <= \count($args) && $function->proto->upvalues !== []) {  // 'env' parameter?
+            $function->getUpval(0)->v = $args[$environmentArgument - 1];  // set it as 1st upvalue
         }
         return [$function];
     }

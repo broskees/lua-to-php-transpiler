@@ -37,6 +37,9 @@ final class Coroutine
      */
     public const FIBER_STACK_BYTES = 256 * 1024;
 
+    /** what every coroutine's fiber runs (see start) */
+    private static ?\Closure $fiberFunction = null;
+
     /** current CallInfo (top of this thread's call stack) */
     public ?CallInfo $ci = null;
 
@@ -91,6 +94,16 @@ final class Coroutine
     public int $hookcount = 0;
     public bool $allowhook = true;
     public int $oldpc = 0;
+
+    /**
+     * While a call or return hook runs on a CallInfo of this thread with
+     * CIST_TRAN set: the values transferred are that frame's slots
+     * ftransfer .. ftransfer + ntransfer - 1, as numbered by debug.getlocal
+     * (C: ci->u2.transferinfo; kept here, as hooks do not nest, so that
+     * every CallInfo is two properties smaller)
+     */
+    public int $ftransfer = 0;
+    public int $ntransfer = 0;
 
     /**
      * true while a line or count hook is set (C: the 'trap' of every Lua
@@ -257,7 +270,9 @@ final class Coroutine
     {
         $body = $this->body;
         $this->body = null;
-        $this->fiber = new \Fiber(static function (Coroutine $L, mixed $body, array $arguments): array {
+        // one PHP closure for all fibers: PHP makes a new closure object
+        // (about 400 bytes, kept by the fiber) each time it evaluates one
+        $this->fiber = new \Fiber(self::$fiberFunction ??= static function (Coroutine $L, mixed $body, array $arguments): array {
             if ($L->nCcalls >= Lua::LUAI_MAXCCALLS) {  // ccall checks even when it adds nothing
                 Calls::checkCStack($L);
             }

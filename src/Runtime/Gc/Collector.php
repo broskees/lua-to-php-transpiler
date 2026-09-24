@@ -419,7 +419,7 @@ final class Collector
     {
         while (($object = array_pop($this->gray)) !== null) {
             if ($object instanceof LuaTable) {
-                if ($object->metatable !== null || $object->hash !== [] || $object->otherValues !== []) {
+                if ($object->metatable !== null || $object->hash !== [] || $object->extra !== null) {
                     $this->traverseTable($object);
                     continue;
                 }
@@ -458,7 +458,7 @@ final class Collector
     private function traverseTable(LuaTable $table): void
     {
         $this->estimate += self::TABLE_SIZE + self::TVALUE_SIZE * \count($table->arr)
-            + self::NODE_SIZE * (\count($table->hash) + \count($table->otherValues));
+            + self::NODE_SIZE * (\count($table->hash) + \count($table->extra->otherValues ?? []));
         $metatable = $table->metatable;
         if ($metatable !== null) {
             $this->markValue($metatable);
@@ -500,7 +500,7 @@ final class Collector
                 $this->estimate += self::STRING_OVERHEAD + \strlen($value);
             }
         }
-        foreach ($table->otherValues as $value) {
+        foreach ($table->extra->otherValues ?? [] as $value) {
             if (\is_string($value)) {
                 $this->estimate += self::STRING_OVERHEAD + \strlen($value);
             }
@@ -523,9 +523,10 @@ final class Collector
                 $this->estimate += self::STRING_OVERHEAD + \strlen($value);
             }
         }
-        if ($table->otherValues !== []) {
-            $this->markValues($table->otherKeys);
-            $this->markValues($table->otherValues);
+        $extra = $table->extra;
+        if ($extra !== null) {
+            $this->markValues($extra->otherKeys);
+            $this->markValues($extra->otherValues);
         }
     }
 
@@ -535,7 +536,7 @@ final class Collector
      */
     private function traverseWeakValue(LuaTable $table): void
     {
-        $this->markValues($table->otherKeys);  // markkey (integer and string keys are not objects)
+        $this->markValues($table->extra->otherKeys ?? []);  // markkey (integer and string keys are not objects)
         $this->weak[] = $table;  // has to be cleared later
     }
 
@@ -565,9 +566,11 @@ final class Collector
             }
         }
         // if 'inverse', traverse descending (see 'convergeEphemerons')
-        $entries = $inverse ? array_reverse($table->otherValues, true) : $table->otherValues;
+        $otherKeys = $table->extra->otherKeys ?? [];
+        $otherValues = $table->extra->otherValues ?? [];
+        $entries = $inverse ? array_reverse($otherValues, true) : $otherValues;
         foreach ($entries as $encodedKey => $value) {
-            if ($this->isCleared($table->otherKeys[$encodedKey])) {  // key is not marked (yet)?
+            if ($this->isCleared($otherKeys[$encodedKey])) {  // key is not marked (yet)?
                 $hasClears = true;  // table must be cleared
                 if ($this->isCleared($value)) {  // value not marked yet?
                     $hasWhiteWhite = true;  // white-white entry
@@ -576,7 +579,7 @@ final class Collector
                 $marked = true;
                 $this->markValue($value);  // mark it now
             } else {
-                $this->markValue($table->otherKeys[$encodedKey]);  // a non-collectable key (boolean, float, light function)
+                $this->markValue($otherKeys[$encodedKey]);  // a non-collectable key (boolean, float, light function)
             }
         }
         if ($hasWhiteWhite) {  // table has white->white entries?
@@ -611,9 +614,11 @@ final class Collector
     /** lgc.c: traverseLclosure (with its prototype and upvalues) */
     private function traverseLuaClosure(LuaClosure $closure): void
     {
-        $this->estimate += self::LCLOSURE_SIZE + self::UPVALUE_POINTER * \count($closure->upvals);
+        $upvalueCount = \count($closure->proto->upvalues);
+        $this->estimate += self::LCLOSURE_SIZE + self::UPVALUE_POINTER * $upvalueCount;
         $this->markProto($closure->proto);
-        foreach ($closure->upvals as $upvalue) {
+        for ($index = 0; $index < $upvalueCount; $index++) {
+            $upvalue = $closure->getUpval($index);
             $id = spl_object_id($upvalue);
             if (!isset($this->marked[$id])) {  // lgc.c: reallymarkobject for an upvalue marks its value
                 $this->marked[$id] = true;
@@ -736,35 +741,43 @@ final class Collector
             foreach ($deadKeys as $key) {
                 unset($table->hash[$key]);
             }
+            $extra = $table->extra;
+            if ($extra === null) {
+                continue;
+            }
             $deadKeys = [];
-            foreach ($table->otherValues as $key => $value) {
+            foreach ($extra->otherValues as $key => $value) {
                 if ($this->isCleared($value)) {
                     $deadKeys[] = $key;
                 }
             }
             foreach ($deadKeys as $key) {
-                unset($table->otherValues[$key], $table->otherKeys[$key]);
+                unset($extra->otherValues[$key], $extra->otherKeys[$key]);
             }
         }
     }
 
     /**
      * lgc.c: clearbykeys: remove the entries whose keys were not marked.
-     * Only keys that are objects can be; they live in 'otherKeys'.
+     * Only keys that are objects can be; they live in 'extra->otherKeys'.
      *
      * @param list<LuaTable> $tables
      */
     private function clearByKeys(array $tables): void
     {
         foreach ($tables as $table) {
+            $extra = $table->extra;
+            if ($extra === null) {
+                continue;
+            }
             $deadKeys = [];
-            foreach ($table->otherKeys as $encodedKey => $key) {
+            foreach ($extra->otherKeys as $encodedKey => $key) {
                 if ($this->isCleared($key)) {  // unmarked key?
                     $deadKeys[] = $encodedKey;
                 }
             }
             foreach ($deadKeys as $encodedKey) {
-                unset($table->otherValues[$encodedKey], $table->otherKeys[$encodedKey]);  // remove entry
+                unset($extra->otherValues[$encodedKey], $extra->otherKeys[$encodedKey]);  // remove entry
             }
         }
     }

@@ -10,6 +10,7 @@ use LuaPhp\Compiler\Proto;
 use LuaPhp\Runtime\DebugInfo;
 use LuaPhp\Runtime\Gc\Collector;
 use LuaPhp\Runtime\Lua;
+use LuaPhp\Runtime\LuaClosure;
 use LuaPhp\Runtime\LuaTable;
 use LuaPhp\Runtime\MetaMethods;
 
@@ -55,7 +56,8 @@ final class FunctionEmitter
         $useClause = $uses === [] ? '' : ' use (' . implode(', ', $uses) . ')';
 
         $sourceName = PhpLiteral::commentText(ChunkId::of($proto->source ?? '=?'), 60);
-        $code = "    \$function_{$this->path} = static function (Coroutine \$L, LuaClosure \$cl, array \$R, int \$callstatus = 0)$useClause: ?array {\n";
+        $closureClass = self::closureClass($proto);
+        $code = "    \$function_{$this->path} = static function (Coroutine \$L, $closureClass \$cl, array \$R, int \$callstatus = 0)$useClause: ?array {\n";
         $code .= self::INDENT . "// function <$sourceName:{$proto->linedefined},{$proto->lastlinedefined}>"
             . " numparams={$proto->numparams}" . ($proto->is_vararg ? ' vararg' : '')
             . " maxstacksize={$proto->maxstacksize} instructions=" . \count($proto->code) . "\n";
@@ -207,6 +209,23 @@ final class FunctionEmitter
     private static function r(int $register): string
     {
         return "\$R[$register]";
+    }
+
+    /**
+     * The class (short name) of the closures of $proto: the one holding its
+     * number of upvalues in properties, if any, else LuaClosureN (see
+     * LuaClosure).
+     */
+    private static function closureClass(Proto $proto): string
+    {
+        $count = \count($proto->upvalues);
+        return ($count >= 1 && $count <= LuaClosure::MAX_UPVALUE_PROPERTIES) ? "LuaClosure$count" : 'LuaClosureN';
+    }
+
+    /** PHP expression of upvalue $index (an UpVal) of the running closure */
+    private function upval(int $index): string
+    {
+        return self::closureClass($this->proto) === 'LuaClosureN' ? "\$cl->upvals[$index]" : "\$cl->u$index";
     }
 
     /**
@@ -376,13 +395,13 @@ final class FunctionEmitter
                 return self::lines(implode(' = ', $targets) . ' = null;');
 
             case OpCodes::OP_GETUPVAL:
-                return self::lines("$ra = \$cl->upvals[$b]->v;");
+                return self::lines("$ra = " . $this->upval($b) . '->v;');
 
             case OpCodes::OP_SETUPVAL:
-                return self::lines("\$cl->upvals[$b]->v = $ra;");
+                return self::lines($this->upval($b) . "->v = $ra;");
 
             case OpCodes::OP_GETTABUP:
-                return $this->emitGetField($pc, $ra, "\$cl->upvals[$b]->v", $this->k($c), DebugInfo::upvalueSlot($b));
+                return $this->emitGetField($pc, $ra, $this->upval($b) . '->v', $this->k($c), DebugInfo::upvalueSlot($b));
 
             case OpCodes::OP_GETTABLE:
                 return self::lines(
@@ -408,7 +427,7 @@ final class FunctionEmitter
                 return $this->emitGetField($pc, $ra, self::r($b), $this->k($c), $b);
 
             case OpCodes::OP_SETTABUP:
-                return $this->emitSetField($pc, "\$cl->upvals[$a]->v", $this->k($b), $this->rkC($instruction), DebugInfo::upvalueSlot($a), $k && $this->proto->k[$c] !== null);
+                return $this->emitSetField($pc, $this->upval($a) . '->v', $this->k($b), $this->rkC($instruction), DebugInfo::upvalueSlot($a), $k && $this->proto->k[$c] !== null);
 
             case OpCodes::OP_SETTABLE:
                 return self::lines(
@@ -820,12 +839,14 @@ final class FunctionEmitter
                     if ($upvalueDescription->instack) {  // upvalue refers to local variable?
                         $upvalues[] = "Upvalues::find(\$ci, {$upvalueDescription->idx})";
                     } else {  // get upvalue from enclosing function
-                        $upvalues[] = "\$cl->upvals[{$upvalueDescription->idx}]";
+                        $upvalues[] = $this->upval($upvalueDescription->idx);
                     }
                 }
                 $childPath = $this->path . '_' . $childIndex;
+                $childClass = self::closureClass($child);
+                $upvalueArguments = $childClass === 'LuaClosureN' ? '[' . implode(', ', $upvalues) . ']' : implode(', ', $upvalues);
                 return self::lines(
-                    "$ra = new LuaClosure(\$proto_$childPath, \$function_$childPath, [" . implode(', ', $upvalues) . ']);',
+                    "$ra = new $childClass(\$proto_$childPath, \$function_$childPath, $upvalueArguments);",
                     self::checkGc($pc, $a + 1, (string) Collector::closureSize(\count($upvalues))),
                 );
 

@@ -459,7 +459,7 @@ final class DebugLib
         if ($name === null) {
             return [];
         }
-        $value = $function instanceof LuaClosure ? $function->upvals[$n - 1]->v : $function->upvalues[$n - 1];
+        $value = $function instanceof LuaClosure ? $function->getUpval($n - 1)->v : $function->upvalues[$n - 1];
         return [$name, $value];
     }
 
@@ -475,7 +475,7 @@ final class DebugLib
             return [];
         }
         if ($function instanceof LuaClosure) {
-            $function->upvals[$n - 1]->v = $args[2];
+            $function->getUpval($n - 1)->v = $args[2];
         } else {
             $function->upvalues[$n - 1] = $args[2];
         }
@@ -492,7 +492,7 @@ final class DebugLib
         Auxiliary::checkType($L, $args, $functionArgument, Lua::LUA_TFUNCTION);  // closure
         $function = $args[$functionArgument - 1];
         if ($function instanceof LuaClosure) {
-            return ($n >= 1 && $n <= \count($function->proto->upvalues)) ? $function->upvals[$n - 1] : null;
+            return ($n >= 1 && $n <= \count($function->proto->upvalues)) ? $function->getUpval($n - 1) : null;
         }
         if ($n >= 1 && $n <= \count($function->upvalues)) {
             // a C closure's upvalue slot: identify it by (function, index)
@@ -517,7 +517,7 @@ final class DebugLib
         Auxiliary::argCheck($L, self::upvalueIdentity($L, $args, 3, 4) !== null, 4, 'invalid upvalue index');
         Auxiliary::argCheck($L, !($args[0] instanceof NativeFunction), 1, 'Lua function expected');
         Auxiliary::argCheck($L, !($args[2] instanceof NativeFunction), 3, 'Lua function expected');
-        $args[0]->upvals[$n1 - 1] = $args[2]->upvals[$n2 - 1];
+        $args[0]->setUpval($n1 - 1, $args[2]->getUpval($n2 - 1));
         return [];
     }
 }

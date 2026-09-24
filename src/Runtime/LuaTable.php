@@ -14,19 +14,26 @@ namespace LuaPhp\Runtime;
  * - $hash: string keys. PHP stores canonical decimal strings ("10") as int
  *   keys here, but everything in $hash is a Lua string; next() converts
  *   such keys back to strings;
- * - $otherValues/$otherKeys: float (non-integral), boolean and object
- *   keys, by an encoded string key (see otherKey()).
+ * - $extra->otherValues/otherKeys: float (non-integral), boolean and
+ *   object keys, by an encoded string key (see otherKey()).
  * Nil values are never stored: assigning nil removes the entry.
  *
  * Emitted code and runtime helpers read and write $arr and $hash directly
  * for the fast paths; everything else goes through the methods here.
  *
+ * Memory: a table is one PHP object of 5 properties (40 + 5 * 16 bytes, a
+ * 128-byte block), plus a PHP array for each of $arr and $hash that is not
+ * empty (56 bytes, plus at least 8 slots: 160 bytes for a list, 320 with
+ * string keys). What most tables never need (other keys, the traversal
+ * cursor) lives in $extra, a LuaTableExtra created on demand.
+ *
  * Traversal (next): PHP arrays keep their order, so the "position" of a key
- * is its place in its part. A cursor remembers the last key returned; its
- * part's PHP internal array pointer stays on that key, so next() during a
- * pairs() loop is amortized O(1). Clearing the current field during the
- * traversal (allowed in Lua) makes PHP advance the internal pointer to the
- * following entry, which the cursor recognizes.
+ * is its place in its part. next() leaves the PHP internal array pointer of
+ * the part of the key it returns on that key, so the following call finds
+ * its place at once: a pairs() loop is amortized O(1). Clearing the current
+ * field during the traversal (allowed in Lua) makes PHP advance the
+ * internal pointer to the following entry; the cursor ($extra->cursorKey,
+ * the last key returned) recognizes that case.
  *
  * Border (#): $sizearray plays the role of C's 'alimit': OP_NEWTABLE and
  * OP_SETLIST set it like the array part of a constructor, and length()
@@ -41,22 +48,13 @@ final class LuaTable
     /** @var array<int|string, mixed> */
     public array $hash = [];
 
-    /** @var array<string, mixed> */
-    public array $otherValues = [];
-
-    /** @var array<string, mixed> */
-    public array $otherKeys = [];
-
     public ?LuaTable $metatable = null;
 
     /** border hint (C: alimit); see class comment */
     public int $sizearray = 0;
 
-    /** part (0 = $arr, 1 = $hash, 2 = $otherValues) whose internal pointer is on the last key returned by next() */
-    private int $cursorPart = -1;
-
-    /** the last key returned by next() (a Lua value) */
-    private mixed $cursorKey = null;
+    /** keys that are neither integers nor strings, and the traversal cursor; null until needed */
+    public ?LuaTableExtra $extra = null;
 
     public function __construct(int $sizearray = 0)
     {
@@ -73,21 +71,17 @@ final class LuaTable
             if ($this->hash !== []) {
                 Teardown::$pending[] = $this->hash;
             }
-            if ($this->otherValues !== []) {
-                Teardown::$pending[] = $this->otherValues;
-                Teardown::$pending[] = $this->otherKeys;
-            }
             if ($this->metatable !== null) {
                 Teardown::$pending[] = $this->metatable;
             }
-            if (\is_object($this->cursorKey)) {
-                Teardown::$pending[] = $this->cursorKey;
+            if ($this->extra !== null) {
+                Teardown::$pending[] = $this->extra;
             }
             return;
         }
         Teardown::$releasing = true;
-        $this->arr = $this->hash = $this->otherValues = $this->otherKeys = [];
-        $this->metatable = $this->cursorKey = null;
+        $this->arr = $this->hash = [];
+        $this->metatable = $this->extra = null;
         if (Teardown::$pending === []) {  // nothing queued, the usual case (inline: tables are freed all the time)
             Teardown::$releasing = false;
             return;
@@ -95,12 +89,6 @@ final class LuaTable
         Teardown::release();
     }
 
-    /**
-     * A table with the given values at keys 1..n (nils skipped), like the
-     * table built by '{...}'.
-     *
-     * @param list<mixed> $values
-     */
     public static function fromList(array $values): self
     {
         $table = new self(\count($values));
@@ -115,7 +103,7 @@ final class LuaTable
     }
 
     /**
-     * Encoded key for $otherValues/$otherKeys: booleans, non-integral finite
+     * Encoded key for $extra->otherValues/otherKeys: booleans, non-integral finite
      * or infinite floats, and objects (tables, functions, threads, userdata).
      */
     public static function otherKey(mixed $key): string
@@ -168,7 +156,7 @@ final class LuaTable
         } elseif ($key === null) {
             return null;
         }
-        return $this->otherValues[self::otherKey($key)] ?? null;
+        return $this->extra?->otherValues[self::otherKey($key)] ?? null;
     }
 
     /**
@@ -207,11 +195,12 @@ final class LuaTable
             return;
         }
         $encodedKey = self::otherKey($key);
-        if ($value === null) {
-            unset($this->otherValues[$encodedKey], $this->otherKeys[$encodedKey]);
-        } else {
-            $this->otherValues[$encodedKey] = $value;
-            $this->otherKeys[$encodedKey] = $key;
+        if ($value !== null) {
+            $extra = $this->extra ??= new LuaTableExtra();
+            $extra->otherValues[$encodedKey] = $value;
+            $extra->otherKeys[$encodedKey] = $key;
+        } elseif ($this->extra !== null) {
+            unset($this->extra->otherValues[$encodedKey], $this->extra->otherKeys[$encodedKey]);
         }
     }
 
@@ -299,27 +288,29 @@ final class LuaTable
             // never equal to a stored key with an integral value
             return false;
         }
+        $extra = $this->extra;
         if (\is_int($key)) {
             $part = 0;
             $phpKey = $key;
         } elseif (\is_string($key)) {
             $part = 1;
             $phpKey = $key;
+        } elseif ($extra === null) {
+            return false;  // no key of another type was ever returned or is present
         } else {
             $part = 2;
             $phpKey = self::otherKey($key);
         }
 
-        if ($this->cursorPart === $part) {
-            $currentKey = $this->currentPhpKey($part);
-            if ($currentKey !== null && self::samePhpKey($part, $currentKey, $phpKey)) {
-                $this->advancePart($part);
-                return $this->currentOrFollowing($part);
-            }
-            if ($this->cursorKey === $key && !$this->hasPhpKey($part, $phpKey)) {
-                // the entry under the cursor was cleared; PHP already moved the pointer past it
-                return $this->currentOrFollowing($part);
-            }
+        // the part's internal pointer is on the key, where the next() that returned it left it
+        $currentKey = $this->currentPhpKey($part);
+        if ($currentKey !== null && self::samePhpKey($part, $currentKey, $phpKey)) {
+            $this->advancePart($part);
+            return $this->currentOrFollowing($part);
+        }
+        if ($extra !== null && $extra->cursorKey === $key && !$this->hasPhpKey($part, $phpKey)) {
+            // the entry under the cursor was cleared; PHP already moved the pointer past it
+            return $this->currentOrFollowing($part);
         }
 
         // slow path: find the key's position
@@ -354,7 +345,7 @@ final class LuaTable
         return match ($part) {
             0 => isset($this->arr[$phpKey]),
             1 => isset($this->hash[$phpKey]),
-            default => isset($this->otherValues[$phpKey]),
+            default => isset($this->extra->otherValues[$phpKey]),
         };
     }
 
@@ -363,7 +354,7 @@ final class LuaTable
         return match ($part) {
             0 => key($this->arr),
             1 => key($this->hash),
-            default => key($this->otherValues),
+            default => key($this->extra->otherValues),
         };
     }
 
@@ -372,7 +363,7 @@ final class LuaTable
         match ($part) {
             0 => next($this->arr),
             1 => next($this->hash),
-            default => next($this->otherValues),
+            default => next($this->extra->otherValues),
         };
     }
 
@@ -381,9 +372,10 @@ final class LuaTable
         match ($part) {
             0 => reset($this->arr),
             1 => reset($this->hash),
-            default => reset($this->otherValues),
+            default => reset($this->extra->otherValues),
         };
     }
+
 
     /**
      * The entry under $part's internal pointer, or the first entry of a
@@ -400,15 +392,27 @@ final class LuaTable
         return $this->entryAt($part, $phpKey);
     }
 
-    /** @return array{mixed, mixed}|null */
+    /**
+     * The first entry of $part or of a following part. (An empty part is
+     * skipped without reset(), which would copy an empty array into a new
+     * one: see endTraversal.)
+     *
+     * @return array{mixed, mixed}|null
+     */
     private function firstFromPart(int $part): ?array
     {
-        for (; $part <= 2; $part++) {
-            $this->resetPart($part);
-            $phpKey = $this->currentPhpKey($part);
-            if ($phpKey !== null) {
-                return $this->entryAt($part, $phpKey);
-            }
+        if ($part === 0 && $this->arr !== []) {
+            reset($this->arr);
+            return $this->entryAt(0, key($this->arr));
+        }
+        if ($part <= 1 && $this->hash !== []) {
+            reset($this->hash);
+            return $this->entryAt(1, key($this->hash));
+        }
+        $extra = $this->extra;
+        if ($extra !== null && $extra->otherValues !== []) {
+            reset($extra->otherValues);
+            return $this->entryAt(2, key($extra->otherValues));
         }
         return $this->endTraversal();
     }
@@ -423,18 +427,40 @@ final class LuaTable
             $key = (string) $phpKey;
             $value = $this->hash[$phpKey];
         } else {
-            $key = $this->otherKeys[$phpKey];
-            $value = $this->otherValues[$phpKey];
+            $key = $this->extra->otherKeys[$phpKey];
+            $value = $this->extra->otherValues[$phpKey];
         }
-        $this->cursorPart = $part;
-        $this->cursorKey = $key;
+        $extra = $this->extra ??= new LuaTableExtra();
+        $extra->cursorKey = $key;
         return [$key, $value];
     }
 
+    /**
+     * No more entries: forget the cursor. reset() and next() take the PHP
+     * array by reference, which leaves the property holding it a PHP
+     * reference (32 bytes more for as long as the table lives), so turn the
+     * parts back into plain arrays too.
+     */
     private function endTraversal(): null
     {
-        $this->cursorPart = -1;
-        $this->cursorKey = null;
+        $arr = $this->arr;
+        unset($this->arr);
+        $this->arr = $arr;
+        $hash = $this->hash;
+        unset($this->hash);
+        $this->hash = $hash;
+        $extra = $this->extra;
+        if ($extra === null) {
+            return null;
+        }
+        if ($extra->otherValues === []) {
+            $this->extra = null;  // it only held the cursor
+            return null;
+        }
+        $otherValues = $extra->otherValues;
+        unset($extra->otherValues);
+        $extra->otherValues = $otherValues;
+        $extra->cursorKey = null;
         return null;
     }
 }

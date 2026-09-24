@@ -27,7 +27,6 @@ final class Upvalues
         }
         $upvalue = new UpVal();
         $upvalue->v = &$ci->R[$register];  // current value lives in the register
-        $upvalue->isOpen = true;
         $ci->openupval[$register] = $upvalue;
         return $upvalue;
     }
@@ -42,7 +41,6 @@ final class Upvalues
             $value = $upvalue->v;
             unset($upvalue->v);  // break the reference to the register
             $upvalue->v = $value;  // now current value lives here
-            $upvalue->isOpen = false;
             unset($ci->openupval[$register]);
         }
     }

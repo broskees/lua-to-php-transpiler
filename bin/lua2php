@@ -131,8 +131,8 @@ $preamble
 
 exit(\LuaPhp\Runtime\Standalone::runCompiledScript(\$argv, $scriptName, static function (\LuaPhp\Runtime\Coroutine \$L) use (\$factory, \$binaryChunk): \LuaPhp\Runtime\LuaClosure {
     \$main = \LuaPhp\Runtime\ChunkLoader::instantiate(\LuaPhp\Compiler\Undump::undump(\$binaryChunk, '=?', $shareEqualStrings), \$factory);
-    if (\$main->upvals !== []) {
-        \$main->upvals[0]->v = \$L->globalState->globals;  // _ENV
+    if (\$main->proto->upvalues !== []) {
+        \$main->getUpval(0)->v = \$L->globalState->globals;  // _ENV
     }
     return \$main;
 }));

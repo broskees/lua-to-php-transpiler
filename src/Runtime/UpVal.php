@@ -17,21 +17,24 @@ namespace LuaPhp\Runtime;
  */
 final class UpVal
 {
-    /** the value (a reference to the register while open) */
+    /**
+     * the value; while the upvalue is open, a PHP reference to the register
+     * it lives in (Upvalues::find makes it one, Upvalues::closeUpvalues
+     * breaks it). The only property: an UpVal takes 56 bytes (an open one
+     * 32 more for the reference).
+     */
     public mixed $v = null;
-
-    /** true while $v refers to a live register */
-    public bool $isOpen = false;
 
     /**
      * Freeing a long chain of closures, each capturing the next, must not
      * recurse: see Teardown. (A LuaClosure refers to more Lua values only
-     * through its UpVals.) An open upvalue's value lives in the registers
-     * of its frame, which free it.
+     * through its UpVals.) An open upvalue is freed only with its frame
+     * (CallInfo::$openupval holds it until it is closed), whose registers
+     * hold the same value: queueing it only delays that value's release.
      */
     public function __destruct()
     {
-        if ($this->isOpen || !\is_object($this->v)) {
+        if (!\is_object($this->v)) {
             return;
         }
         if (Teardown::$releasing) {
@@ -39,7 +42,7 @@ final class UpVal
             return;
         }
         Teardown::$releasing = true;
-        $this->v = null;
+        unset($this->v);  // (not "= null", which would write through an open upvalue's reference)
         Teardown::release();
     }
 

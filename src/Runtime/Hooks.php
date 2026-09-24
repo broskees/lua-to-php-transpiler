@@ -60,8 +60,8 @@ final class Hooks
         $ci = $L->ci;
         if ($ntransfer !== 0) {
             $mask |= Lua::CIST_TRAN;  // 'ci' has transfer information
-            $ci->ftransfer = $ftransfer;
-            $ci->ntransfer = $ntransfer;
+            $L->ftransfer = $ftransfer;
+            $L->ntransfer = $ntransfer;
         }
         $L->allowhook = false;  // cannot call hooks inside a hook
         $ci->callstatus |= $mask;

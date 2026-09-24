@@ -42,7 +42,7 @@ function test_emitted_code_is_shared_by_all_closures_of_a_proto(): void
     assertSame(Lua::LUA_OK, $status);
     assertSame(3, count($results));
     assertTrue($results[0]->code === $results[1]->code && $results[1]->code === $results[2]->code, 'one PHP closure per Proto');
-    assertTrue($results[0]->upvals[0] !== $results[1]->upvals[0], 'fresh upvalue per iteration');
+    assertTrue($results[0]->getUpval(0) !== $results[1]->getUpval(0), 'fresh upvalue per iteration');
 }
 
 function test_loading_the_same_chunk_repeatedly_does_not_grow_memory(): void
