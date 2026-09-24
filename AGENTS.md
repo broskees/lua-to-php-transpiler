@@ -157,7 +157,20 @@ Lua string keys and integer keys distinct.
   is buffered (`print` echoes; `Standalone::flushStdout()` before stderr/exit).
 - **Reference build.** lua5.4 is built with LUA_COMPAT_5_3: `__le` falls back
   to `not __lt(b, a)`, and math has pow, ldexp, frexp, cosh, sinh, tanh, log10,
-  atan2.
+  atan2. Its package.path/cpath defaults include the distribution's `/usr/`
+  directories (PackageLib uses the same); it has dlopen, we do not
+  (package.loadlib returns fail, DLMSG, "absent").
+- **Files and processes.** A file handle is a `Userdata` (metatable
+  registry["FILE*"]) whose payload is `Lib\Io\LuaStream` (luaL_Stream) holding
+  a `Lib\Io\CFile`, the emulated C `FILE *` with glibc's buffering rules
+  (Lua can observe them through a second handle). Standard output writes go
+  through PHP's output buffer like `print`. C's `errno` is `Lib\Io\Errno`
+  (recovered from PHP's warning text); `Errno::fileResult/execResult` are
+  luaL_fileresult/luaL_execresult. Never pass PHP's STDIN/STDOUT/STDERR to
+  `proc_open`: PHP seeks the descriptor to that stream's cached position;
+  leave the descriptors out so the child inherits them. Dates/times:
+  `Lib\Os\CTime` (glibc gmtime/localtime/mktime/strftime, zone from TZ or
+  /etc/localtime, never PHP's default zone).
 
 ## Testing
 

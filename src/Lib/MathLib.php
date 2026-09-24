@@ -8,13 +8,13 @@ use LuaPhp\Runtime\Auxiliary;
 use LuaPhp\Runtime\Coroutine;
 use LuaPhp\Runtime\Lua;
 use LuaPhp\Runtime\LuaTable;
+use LuaPhp\Runtime\NativeFunction;
+use LuaPhp\Runtime\Userdata;
 use LuaPhp\Runtime\Vm;
 
 /**
  * Port of lmathlib.c: the math library, including the LUA_COMPAT_MATHLIB
  * functions (the reference build defines LUA_COMPAT_5_3).
- *
- * Not ported yet: math.random and math.randomseed (xoshiro256**, Phase 2).
  */
 final class MathLib
 {
@@ -58,6 +58,7 @@ final class MathLib
         $library->hash['huge'] = INF;
         $library->hash['maxinteger'] = Lua::LUA_MAXINTEGER;
         $library->hash['mininteger'] = Lua::LUA_MININTEGER;
+        self::setRandomFunctions($library);
         return $library;
     }
 
@@ -165,25 +166,12 @@ final class MathLib
         }
         $base = (float) Auxiliary::checkNumber($L, $args, 2);
         if ($base == 2.0) {
-            return [self::log2($x)];
+            return [log($x, 2.0)];  // PHP's log() uses C's log2 for base 2
         }
         if ($base == 10.0) {
             return [log10($x)];
         }
-        return [log($x) / log($base)];
-    }
-
-    /** C log2, exact for powers of two */
-    private static function log2(float $x): float
-    {
-        if (!($x > 0) || is_infinite($x)) {
-            return log($x) / M_LN2;  // nan, -inf or inf
-        }
-        [$mantissa, $exponent] = self::frexp($x);
-        if ($mantissa === 0.5) {
-            return (float) ($exponent - 1);
-        }
-        return $exponent + log($mantissa) / M_LN2;
+        return [fdiv(log($x), log($base))];
     }
 
     // lmathlib.c: math_min
@@ -227,6 +215,155 @@ final class MathLib
         Auxiliary::checkAny($L, $args, 1);
         return [null];
     }
+
+    /*
+    ** {==================================================================
+    ** Pseudo-Random Number Generator based on 'xoshiro256**'.
+    ** The state is four 64-bit words (C: Rand64 with 'unsigned long'); PHP
+    ** ints hold the same bits, so shifts that must be logical are masked
+    ** and additions/multiplications wrap through Vm helpers.
+    ** ===================================================================
+    */
+
+    /** lmathlib.c: rotl: rotate left 'x' by 'n' bits (0 < n < 64) */
+    private static function rotateLeft(int $x, int $n): int
+    {
+        return ($x << $n) | (($x >> (64 - $n)) & ~(-1 << $n));
+    }
+
+    /** lmathlib.c: nextrand: advance $state and return the next random value */
+    private static function nextRandom(array &$state): int
+    {
+        $state0 = $state[0];
+        $state1 = $state[1];
+        $state2 = $state[2] ^ $state0;
+        $state3 = $state[3] ^ $state1;
+        $timesFive = Vm::addWrap($state1 << 2, $state1);  // state1 * 5
+        $rotated = self::rotateLeft($timesFive, 7);
+        $result = Vm::addWrap($rotated << 3, $rotated);  // rotl(state1 * 5, 7) * 9
+        $state[0] = $state0 ^ $state3;
+        $state[1] = $state1 ^ $state2;
+        $state[2] = $state2 ^ ($state1 << 17);
+        $state[3] = self::rotateLeft($state3, 45);
+        return $result;
+    }
+
+    /**
+     * lmathlib.c: I2d: a float in [0, 1) from the higher FIGS (53) bits of
+     * a random value (the shifted value is never negative).
+     */
+    private static function randomToFloat(int $x): float
+    {
+        $bits = ($x >> 11) & 0x1FFFFFFFFFFFFF;  // trim64(x) >> shift64_FIG
+        return (float) $bits * (0.5 / (1 << 52));  // scaleFIG = 2^-53
+    }
+
+    /**
+     * lmathlib.c: project: project the random integer $random into the
+     * interval [0, n] (both unsigned).
+     */
+    private static function project(int $random, int $n, array &$state): int
+    {
+        if (($n & Vm::addWrap($n, 1)) === 0) {  // is 'n + 1' a power of 2?
+            return $random & $n;  // no bias
+        }
+        $limit = $n;
+        // compute the smallest (2^b - 1) not smaller than 'n' (when the top bit
+        // of 'n' is set, the arithmetic shifts give all ones, like the logical ones)
+        $limit |= ($limit >> 1);
+        $limit |= ($limit >> 2);
+        $limit |= ($limit >> 4);
+        $limit |= ($limit >> 8);
+        $limit |= ($limit >> 16);
+        $limit |= ($limit >> 32);  // integer type has more than 32 bits
+        while (Vm::unsignedLess($n, $random &= $limit)) {  // project 'ran' into [0..lim]
+            $random = self::nextRandom($state);  // not inside [0..n]? try again
+        }
+        return $random;
+    }
+
+    // lmathlib.c: math_random
+    private static function random(Coroutine $L, array $args, Userdata $randomState): array
+    {
+        $state = &$randomState->payload;
+        $randomValue = self::nextRandom($state);  // next pseudo-random value
+        switch (\count($args)) {  // check number of arguments
+            case 0:  // no arguments
+                return [self::randomToFloat($randomValue)];  // float between 0 and 1
+            case 1:  // only upper limit
+                $low = 1;
+                $up = Auxiliary::checkInteger($L, $args, 1);
+                if ($up === 0) {  // single 0 as argument?
+                    return [$randomValue];  // full random integer
+                }
+                break;
+            case 2:  // lower and upper limits
+                $low = Auxiliary::checkInteger($L, $args, 1);
+                $up = Auxiliary::checkInteger($L, $args, 2);
+                break;
+            default:
+                Auxiliary::error($L, 'wrong number of arguments');
+        }
+        // random integer in the interval [low, up]
+        Auxiliary::argCheck($L, $low <= $up, 1, 'interval is empty');
+        // project random integer into the interval [0, up - low]
+        $projected = self::project($randomValue, Vm::subWrap($up, $low), $state);
+        return [Vm::addWrap($projected, $low)];
+    }
+
+    /** lmathlib.c: setseed: returns the seeds, as C pushes them */
+    private static function setSeed(array &$state, int $n1, int $n2): array
+    {
+        $state = [$n1, 0xff, $n2, 0];  // 0xff: avoid a zero state
+        for ($i = 0; $i < 16; $i++) {
+            self::nextRandom($state);  // discard initial values to "spread" seed
+        }
+        return [$n1, $n2];
+    }
+
+    /**
+     * lmathlib.c: randseed: seed with the current time and the address of
+     * 'L', which address space layout randomization makes unpredictable.
+     * PHP has no addresses; random bits play that role.
+     */
+    private static function seedRandomly(array &$state): array
+    {
+        return self::setSeed($state, time(), random_int(PHP_INT_MIN, PHP_INT_MAX));
+    }
+
+    // lmathlib.c: math_randomseed
+    private static function randomseed(Coroutine $L, array $args, Userdata $randomState): array
+    {
+        $state = &$randomState->payload;
+        if ($args === []) {  // lua_isnone(L, 1)
+            return self::seedRandomly($state);
+        }
+        $n1 = Auxiliary::checkInteger($L, $args, 1);
+        $n2 = Auxiliary::optInteger($L, $args, 2, 0);
+        return self::setSeed($state, $n1, $n2);  // return seeds
+    }
+
+    /**
+     * lmathlib.c: setrandfunc: register the random functions with their
+     * state (a full userdata, their shared upvalue) randomly seeded.
+     */
+    private static function setRandomFunctions(LuaTable $library): void
+    {
+        $randomState = new Userdata([0, 0, 0, 0]);
+        self::seedRandomly($randomState->payload);  // initialize with a "random" seed
+        $library->hash['random'] = new NativeFunction(
+            'random',
+            static fn (Coroutine $L, array $args): array => self::random($L, $args, $randomState),
+            [$randomState],
+        );
+        $library->hash['randomseed'] = new NativeFunction(
+            'randomseed',
+            static fn (Coroutine $L, array $args): array => self::randomseed($L, $args, $randomState),
+            [$randomState],
+        );
+    }
+
+    /* }================================================================== */
 
     /**
      * C frexp: [m, e] with x = m * 2^e and 0.5 <= |m| < 1 (x itself and 0

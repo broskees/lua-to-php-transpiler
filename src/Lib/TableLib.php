@@ -15,8 +15,6 @@ use LuaPhp\Runtime\Vm;
 
 /**
  * Port of ltablib.c: the table library.
- *
- * Not ported yet: table.sort (Phase 2).
  */
 final class TableLib
 {
@@ -37,6 +35,7 @@ final class TableLib
             'unpack' => self::unpack(...),
             'remove' => self::remove(...),
             'move' => self::move(...),
+            'sort' => self::sort(...),
         ]);
         return $library;
     }
@@ -232,4 +231,167 @@ final class TableLib
         $results[] = self::getIndex($L, $table, $end);
         return $results;
     }
+
+    /*
+    ** {======================================================
+    ** Quicksort
+    ** (based on 'Algorithms in MODULA-3', Robert Sedgewick;
+    **  Addison-Wesley, 1993.)
+    ** The C code keeps the values it works on in the Lua stack; here they are
+    ** PHP locals. Indices are C's 'IdxT' (unsigned int); they stay below
+    ** INT_MAX, so PHP ints hold them exactly.
+    ** =======================================================
+    */
+
+    // ltablib.c: arrays larger than 'RANLIMIT' may use randomized pivots
+    private const RANLIMIT = 100;
+
+    /**
+     * ltablib.c: l_randomizePivot: a "random" unsigned int from 'clock' and
+     * 'time', summing their values as arrays of unsigned ints.
+     */
+    private static function randomizePivot(): int
+    {
+        $usage = getrusage();  // C clock(): processor time in microseconds
+        $clock = ($usage['ru_utime.tv_sec'] + $usage['ru_stime.tv_sec']) * 1000000
+            + $usage['ru_utime.tv_usec'] + $usage['ru_stime.tv_usec'];
+        $time = time();
+        return (($clock & 0xFFFFFFFF) + (($clock >> 32) & 0xFFFFFFFF)
+            + ($time & 0xFFFFFFFF) + (($time >> 32) & 0xFFFFFFFF)) & 0xFFFFFFFF;
+    }
+
+    /**
+     * ltablib.c: sort_comp: is $a less than $b according to the order of
+     * the sort ($comparator, or '<' when it is nil)?
+     */
+    private static function sortLess(Coroutine $L, mixed $comparator, mixed $a, mixed $b): bool
+    {
+        if ($comparator === null) {  // no function?
+            return Vm::lessThan($L, $a, $b);  // a < b
+        }
+        $result = Calls::callNoYield($L, $comparator, [$a, $b])[0] ?? null;  // call function
+        return $result !== null && $result !== false;
+    }
+
+    /**
+     * ltablib.c: partition. Pivot $pivot is a[up - 1];
+     * precondition: a[lo] <= P == a[up-1] <= a[up],
+     * so it only needs to do the partition from lo + 1 to up - 2.
+     * Pos-condition: a[lo .. i - 1] <= a[i] == P <= a[i + 1 .. up]
+     * returns 'i'.
+     */
+    private static function partition(Coroutine $L, mixed $table, mixed $comparator, int $lo, int $up, mixed $pivot): int
+    {
+        $i = $lo;  // will be incremented before first use
+        $j = $up - 1;  // will be decremented before first use
+        // loop invariant: a[lo .. i] <= P <= a[j .. up]
+        while (true) {
+            // next loop: repeat ++i while a[i] < P
+            while (self::sortLess($L, $comparator, $valueI = self::getIndex($L, $table, ++$i), $pivot)) {
+                if ($i === $up - 1) {  // a[i] < P  but a[up - 1] == P  ??
+                    Auxiliary::error($L, 'invalid order function for sorting');
+                }
+            }
+            // after the loop, a[i] >= P and a[lo .. i - 1] < P
+            // next loop: repeat --j while P < a[j]
+            while (self::sortLess($L, $comparator, $pivot, $valueJ = self::getIndex($L, $table, --$j))) {
+                if ($j < $i) {  // j < i  but  a[j] > P ??
+                    Auxiliary::error($L, 'invalid order function for sorting');
+                }
+            }
+            // after the loop, a[j] <= P and a[j + 1 .. up] >= P
+            if ($j < $i) {  // no elements out of place?
+                // a[lo .. i - 1] <= P <= a[j + 1 .. i .. up]
+                // swap pivot (a[up - 1]) with a[i] to satisfy pos-condition
+                self::setIndex($L, $table, $up - 1, $valueI);
+                self::setIndex($L, $table, $i, $pivot);
+                return $i;
+            }
+            // otherwise, swap a[i] - a[j] to restore invariant and repeat
+            self::setIndex($L, $table, $i, $valueJ);
+            self::setIndex($L, $table, $j, $valueI);
+        }
+    }
+
+    /**
+     * ltablib.c: choosePivot: choose an element in the middle (2nd-3th
+     * quarters) of [lo,up] "randomized" by 'rnd'
+     */
+    private static function choosePivot(int $lo, int $up, int $rnd): int
+    {
+        $r4 = intdiv($up - $lo, 4);  // range/4
+        return $rnd % ($r4 * 2) + ($lo + $r4);
+    }
+
+    // ltablib.c: auxsort: quicksort algorithm (recursive function)
+    private static function auxsort(Coroutine $L, mixed $table, mixed $comparator, int $lo, int $up, int $rnd): void
+    {
+        while ($lo < $up) {  // loop for tail recursion
+            // sort elements 'lo', 'p', and 'up'
+            $valueLo = self::getIndex($L, $table, $lo);
+            $valueUp = self::getIndex($L, $table, $up);
+            if (self::sortLess($L, $comparator, $valueUp, $valueLo)) {  // a[up] < a[lo]?
+                self::setIndex($L, $table, $lo, $valueUp);  // swap a[lo] - a[up]
+                self::setIndex($L, $table, $up, $valueLo);
+            }
+            if ($up - $lo === 1) {  // only 2 elements?
+                return;  // already sorted
+            }
+            if ($up - $lo < self::RANLIMIT || $rnd === 0) {  // small interval or no randomize?
+                $p = intdiv($lo + $up, 2);  // middle element is a good pivot
+            } else {  // for larger intervals, it is worth a random pivot
+                $p = self::choosePivot($lo, $up, $rnd);
+            }
+            $valueP = self::getIndex($L, $table, $p);
+            $valueLo = self::getIndex($L, $table, $lo);
+            if (self::sortLess($L, $comparator, $valueP, $valueLo)) {  // a[p] < a[lo]?
+                self::setIndex($L, $table, $p, $valueLo);  // swap a[p] - a[lo]
+                self::setIndex($L, $table, $lo, $valueP);
+            } else {
+                $valueUp = self::getIndex($L, $table, $up);
+                if (self::sortLess($L, $comparator, $valueUp, $valueP)) {  // a[up] < a[p]?
+                    self::setIndex($L, $table, $p, $valueUp);  // swap a[up] - a[p]
+                    self::setIndex($L, $table, $up, $valueP);
+                }
+            }
+            if ($up - $lo === 2) {  // only 3 elements?
+                return;  // already sorted
+            }
+            $pivot = self::getIndex($L, $table, $p);  // get middle element (Pivot)
+            $valueUpMinus1 = self::getIndex($L, $table, $up - 1);
+            self::setIndex($L, $table, $p, $valueUpMinus1);  // swap Pivot (a[p]) with a[up - 1]
+            self::setIndex($L, $table, $up - 1, $pivot);
+            $p = self::partition($L, $table, $comparator, $lo, $up, $pivot);
+            // a[lo .. p - 1] <= a[p] == P <= a[p + 1 .. up]
+            if ($p - $lo < $up - $p) {  // lower interval is smaller?
+                self::auxsort($L, $table, $comparator, $lo, $p - 1, $rnd);  // call recursively for lower interval
+                $n = $p - $lo;  // size of smaller interval
+                $lo = $p + 1;  // tail call for [p + 1 .. up] (upper interval)
+            } else {
+                self::auxsort($L, $table, $comparator, $p + 1, $up, $rnd);  // call recursively for upper interval
+                $n = $up - $p;  // size of smaller interval
+                $up = $p - 1;  // tail call for [lo .. p - 1]  (lower interval)
+            }
+            // (C computes 'up - lo' unsigned; when it would be negative the loop ends anyway)
+            if (intdiv($up - $lo, 128) > $n) {  // partition too imbalanced?
+                $rnd = self::randomizePivot();  // try a new randomization
+            }
+        }  // tail call auxsort(L, lo, up, rnd)
+    }
+
+    // ltablib.c: sort
+    private static function sort(Coroutine $L, array $args): array
+    {
+        $n = self::lengthOf($L, $args, 1, self::TAB_RW);
+        if ($n > 1) {  // non-trivial interval?
+            Auxiliary::argCheck($L, $n < 2147483647, 1, 'array too big');  // n < INT_MAX
+            if (($args[1] ?? null) !== null) {  // is there a 2nd argument?
+                Auxiliary::checkType($L, $args, 2, Lua::LUA_TFUNCTION);  // must be a function
+            }
+            self::auxsort($L, $args[0], $args[1] ?? null, 1, $n, 0);
+        }
+        return [];
+    }
+
+    /* }====================================================== */
 }

@@ -15,13 +15,152 @@ namespace LuaPhp\Runtime;
  * in the default rounding mode. inf, -inf, nan and -nan are spelled as
  * glibc spells them; the sign of a NaN is its sign bit.
  *
- * Not yet ported: flags, field width, uppercase conversions and '%a'
- * (string.format will need them).
+ * formatFloat() is the whole of glibc's printf for one double conversion
+ * (a A e E f F g G with flags, field width and precision), as
+ * string.format needs it.
  */
 final class NumberFormat
 {
     private const LIMB_BASE = 1000000000;  // 9 decimal digits per limb
     private const LIMB_DIGITS = 9;
+
+    /**
+     * glibc printf of one double: conversion $conversion (one of
+     * "aAeEfFgG"), $flags (any of "-+ #0"), minimum field width $width
+     * (0 for none) and $precision (null when the format has none).
+     */
+    public static function formatFloat(float $value, string $conversion, string $flags, int $width, ?int $precision): string
+    {
+        $uppercase = ctype_upper($conversion);
+        $alternateForm = str_contains($flags, '#');
+        if (self::hasSignBit($value)) {
+            $sign = '-';
+        } elseif (str_contains($flags, '+')) {
+            $sign = '+';
+        } elseif (str_contains($flags, ' ')) {
+            $sign = ' ';
+        } else {
+            $sign = '';
+        }
+        $prefix = '';  // "0x" of %a: zero padding goes after it
+        if (!is_finite($value)) {
+            $body = is_nan($value) ? 'nan' : 'inf';
+            $flags = str_replace('0', '', $flags);  // glibc pads inf and nan with spaces
+        } else {
+            $absoluteValue = abs($value);
+            switch (strtolower($conversion)) {
+                case 'a':
+                    $prefix = '0x';
+                    $body = self::hexStyle($absoluteValue, $precision, $alternateForm);
+                    break;
+                case 'e':
+                    [$digits, $fractionDigitCount] = self::exactDecimal($absoluteValue);
+                    $precision ??= 6;
+                    $body = self::eStyle($digits, $fractionDigitCount, $precision);
+                    if ($alternateForm && $precision === 0) {  // '#': always a decimal point
+                        $body = substr_replace($body, '.', 1, 0);
+                    }
+                    break;
+                case 'f':
+                    [$digits, $fractionDigitCount] = self::exactDecimal($absoluteValue);
+                    $precision ??= 6;
+                    $body = self::fStyle($digits, $fractionDigitCount, $precision);
+                    if ($alternateForm && $precision === 0) {
+                        $body .= '.';
+                    }
+                    break;
+                default:  // 'g'
+                    $body = self::gStyle($absoluteValue, $precision ?? 6, $alternateForm);
+                    break;
+            }
+        }
+        if ($uppercase) {
+            $body = strtoupper($body);
+            $prefix = strtoupper($prefix);
+        }
+        $padding = $width - \strlen($sign) - \strlen($prefix) - \strlen($body);
+        if ($padding <= 0) {
+            return $sign . $prefix . $body;
+        }
+        if (str_contains($flags, '-')) {  // left-justify
+            return $sign . $prefix . $body . str_repeat(' ', $padding);
+        }
+        if (str_contains($flags, '0')) {  // pad with zeros after sign and prefix
+            return $sign . $prefix . str_repeat('0', $padding) . $body;
+        }
+        return str_repeat(' ', $padding) . $sign . $prefix . $body;
+    }
+
+    /**
+     * "%.<precision>g" of a finite non-negative value, keeping trailing
+     * zeros and the decimal point with the '#' flag.
+     */
+    private static function gStyle(float $absoluteValue, int $precision, bool $alternateForm): string
+    {
+        if ($precision === 0) {
+            $precision = 1;
+        }
+        [$digits, $fractionDigitCount] = self::exactDecimal($absoluteValue);
+        [, $exponent] = self::roundToSignificantDigits($digits, $fractionDigitCount, $precision);
+        if ($precision > $exponent && $exponent >= -4) {
+            $formatted = self::fStyle($digits, $fractionDigitCount, $precision - 1 - $exponent);
+            if (!$alternateForm) {
+                return self::removeTrailingZeros($formatted);
+            }
+            return str_contains($formatted, '.') ? $formatted : $formatted . '.';
+        }
+        $formatted = self::eStyle($digits, $fractionDigitCount, $precision - 1);
+        $exponentPosition = strpos($formatted, 'e');
+        $mantissaText = substr($formatted, 0, $exponentPosition);
+        $exponentText = substr($formatted, $exponentPosition);
+        if (!$alternateForm) {
+            return self::removeTrailingZeros($mantissaText) . $exponentText;
+        }
+        return (str_contains($mantissaText, '.') ? $mantissaText : $mantissaText . '.') . $exponentText;
+    }
+
+    /**
+     * glibc "%a" of a finite non-negative double, without the "0x": one
+     * leading hex digit (1 for normal numbers, 0 for zero and subnormals,
+     * which keep the exponent -1022), then the 52 mantissa bits as 13 hex
+     * digits (trailing zeros removed when there is no precision), rounded
+     * to nearest, ties to even, when a precision is given; a carry can
+     * make the leading digit 2.
+     */
+    private static function hexStyle(float $absoluteValue, ?int $precision, bool $alternateForm): string
+    {
+        $bits = unpack('P', pack('e', $absoluteValue))[1];
+        $biasedExponent = ($bits >> 52) & 0x7ff;
+        $mantissa = $bits & 0xFFFFFFFFFFFFF;
+        if ($biasedExponent === 0) {  // zero or subnormal
+            $leadingDigit = 0;
+            $exponent = $mantissa === 0 ? 0 : -1022;
+        } else {
+            $leadingDigit = 1;
+            $exponent = $biasedExponent - 1023;
+        }
+        $fractionDigits = sprintf('%013x', $mantissa);
+        if ($precision === null) {
+            $fractionDigits = rtrim($fractionDigits, '0');
+        } elseif ($precision >= 13) {
+            $fractionDigits = str_pad($fractionDigits, $precision, '0');
+        } else {
+            $nextDigit = hexdec($fractionDigits[$precision]);
+            $moreBits = trim(substr($fractionDigits, $precision + 1), '0') !== '';
+            $lastDigit = $precision > 0 ? hexdec($fractionDigits[$precision - 1]) : $leadingDigit;
+            $fraction = $precision > 0 ? hexdec(substr($fractionDigits, 0, $precision)) : 0;
+            if ($nextDigit > 8 || ($nextDigit === 8 && ($moreBits || $lastDigit % 2 === 1))) {
+                $fraction++;
+                if ($fraction === 1 << (4 * $precision)) {  // carry into the leading digit
+                    $fraction = 0;
+                    $leadingDigit++;
+                }
+            }
+            $fractionDigits = $precision > 0 ? sprintf('%0' . $precision . 'x', $fraction) : '';
+        }
+        $pointText = ($fractionDigits !== '' || $alternateForm) ? '.' : '';
+        return $leadingDigit . $pointText . $fractionDigits . 'p' . ($exponent < 0 ? '-' : '+') . abs($exponent);
+    }
 
     /**
      * lobject.c: tostringbuff (float case): "%.14g", plus ".0" when the

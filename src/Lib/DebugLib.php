@@ -9,12 +9,16 @@ use LuaPhp\Runtime\Coroutine;
 use LuaPhp\Runtime\LightUserdata;
 use LuaPhp\Runtime\Lua;
 use LuaPhp\Runtime\LuaClosure;
+use LuaPhp\Runtime\LuaObject;
 use LuaPhp\Runtime\LuaTable;
+use LuaPhp\Runtime\MetaMethods;
 use LuaPhp\Runtime\NativeFunction;
+use LuaPhp\Runtime\Userdata;
 
 /**
- * Port of ldblib.c (the debug library). Phase 1B provides the upvalue
- * functions; the rest (getinfo, getlocal, sethook, ...) is Phase 4.
+ * Port of ldblib.c (the debug library). Provided so far: the upvalue,
+ * metatable, registry and user value functions; the rest (getinfo,
+ * getlocal, sethook, ...) is Phase 4.
  */
 final class DebugLib
 {
@@ -23,12 +27,85 @@ final class DebugLib
     {
         $library = new LuaTable();
         Auxiliary::setFunctions($library, [
+            'getuservalue' => self::getuservalue(...),
+            'getregistry' => self::getregistry(...),
+            'getmetatable' => self::getmetatable(...),
             'getupvalue' => self::getupvalue(...),
+            'setmetatable' => self::setmetatable(...),
             'setupvalue' => self::setupvalue(...),
+            'setuservalue' => self::setuservalue(...),
             'upvalueid' => self::upvalueid(...),
             'upvaluejoin' => self::upvaluejoin(...),
         ]);
         return $library;
+    }
+
+    // ldblib.c: db_getregistry
+    private static function getregistry(Coroutine $L, array $args): array
+    {
+        return [$L->globalState->registry];
+    }
+
+    // ldblib.c: db_getmetatable (lua_getmetatable: the raw metatable, ignoring '__metatable')
+    private static function getmetatable(Coroutine $L, array $args): array
+    {
+        Auxiliary::checkAny($L, $args, 1);
+        return [MetaMethods::metatableOf($L, $args[0])];  // nil if no metatable
+    }
+
+    /**
+     * ldblib.c: db_setmetatable with lapi.c: lua_setmetatable: tables and
+     * full userdata have their own metatable; any other value sets the
+     * metatable shared by all values of its type.
+     */
+    private static function setmetatable(Coroutine $L, array $args): array
+    {
+        $metatableType = Auxiliary::argumentType($args, 2);
+        Auxiliary::argExpected($L, $metatableType === Lua::LUA_TNIL || $metatableType === Lua::LUA_TTABLE, $args, 2, 'nil or table');
+        $value = $args[0];
+        $metatable = $args[1];
+        if ($value instanceof LuaTable || $value instanceof Userdata) {
+            $value->metatable = $metatable;
+        } elseif ($metatable === null) {
+            unset($L->globalState->typeMetatables[LuaObject::type($value)]);
+        } else {
+            $L->globalState->typeMetatables[LuaObject::type($value)] = $metatable;
+        }
+        return [$value];  // return 1st argument
+    }
+
+    /** C's (int) cast of a lua_Integer (keeps the low 32 bits, signed) */
+    private static function toCInt(int $value): int
+    {
+        return (($value & 0xFFFFFFFF) ^ 0x80000000) - 0x80000000;
+    }
+
+    // ldblib.c: db_getuservalue (lapi.c: lua_getiuservalue)
+    private static function getuservalue(Coroutine $L, array $args): array
+    {
+        $n = self::toCInt(Auxiliary::optInteger($L, $args, 2, 1));
+        $userdata = $args[0] ?? null;
+        if (!($userdata instanceof Userdata)) {
+            return [null];  // fail
+        }
+        if ($n <= 0 || $n > \count($userdata->userValues)) {
+            return [null];  // LUA_TNONE: no such user value
+        }
+        return [$userdata->userValues[$n - 1], true];
+    }
+
+    // ldblib.c: db_setuservalue (lapi.c: lua_setiuservalue)
+    private static function setuservalue(Coroutine $L, array $args): array
+    {
+        $n = self::toCInt(Auxiliary::optInteger($L, $args, 3, 1));
+        Auxiliary::checkType($L, $args, 1, Lua::LUA_TUSERDATA);
+        Auxiliary::checkAny($L, $args, 2);
+        $userdata = $args[0];
+        if (!($n >= 1 && $n <= \count($userdata->userValues))) {
+            return [null];  // fail: 'n' not in [1, uvalue(o)->nuvalue]
+        }
+        $userdata->userValues[$n - 1] = $args[1];
+        return [$userdata];
     }
 
     /**

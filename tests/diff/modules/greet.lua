@@ -1,0 +1,3 @@
+local name, path = ...
+loads = (loads or 0) + 1
+return {name = name, path = path, loads = loads}

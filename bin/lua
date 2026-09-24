@@ -268,10 +268,10 @@ function pmain(Coroutine $L, string $programName, array $argv): bool
     if ($args & HAS_V) {  // option '-v'?
         echo Lua::LUA_COPYRIGHT, "\n";
     }
-    StandardLibraries::openAll($L);  // open standard libraries
     if ($args & HAS_CAPITAL_E) {  // option '-E'?
         $L->globalState->registry->hash['LUA_NOENV'] = true;  // signal for libraries to ignore env. vars.
     }
+    StandardLibraries::openAll($L);  // open standard libraries
     Standalone::createArgTable($L, $argv, $script);  // create table 'arg'
     $L->globalState->gcMode = 'generational';  // lua.c: lua_gc(L, LUA_GCGEN, 0, 0)
     if (!($args & HAS_CAPITAL_E)) {  // no option '-E'?

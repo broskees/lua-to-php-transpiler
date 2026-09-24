@@ -19,9 +19,13 @@ final class StandardLibraries
         // linit.c: loadedlibs order
         Auxiliary::registerLoaded($L, Lua::LUA_GNAME, BaseLib::open($L));
         $libraries = [
+            'package' => PackageLib::open(...),
             'table' => TableLib::open(...),
+            'io' => IoLib::open(...),
+            'os' => OsLib::open(...),
             'string' => StringLib::open(...),
             'math' => MathLib::open(...),
+            'utf8' => Utf8Lib::open(...),
             'debug' => DebugLib::open(...),
         ];
         foreach ($libraries as $name => $opener) {

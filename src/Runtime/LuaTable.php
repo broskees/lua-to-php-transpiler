@@ -262,11 +262,10 @@ final class LuaTable
         if ($key === null) {
             return $this->firstFromPart(0);
         }
-        if (\is_float($key)) {
-            $integerKey = self::floatToInteger($key);
-            if ($integerKey !== null) {
-                $key = $integerKey;
-            }
+        if (\is_float($key) && self::floatToInteger($key) !== null) {
+            // ltable.c: findindex does not normalize the key: a float is
+            // never equal to a stored key with an integral value
+            return false;
         }
         if (\is_int($key)) {
             $part = 0;
