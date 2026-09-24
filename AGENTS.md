@@ -140,7 +140,11 @@ Lua string keys and integer keys distinct.
   (inline `CallInfo::push`) and binds `$ci->R = &$R`. Each instruction is
   `// [pc] OPNAME args ; line N` plus code; jump targets are labels `L<pc>`;
   arithmetic carries its OP_MMBIN* fallback in its `else`. Constants are PHP
-  literals. `OP_CLOSURE` is `new LuaClosure($proto_X, $function_X, [upvals])`.
+  literals, except long strings (over 40 bytes), read as `$cl->proto->k[i]`:
+  '%p' tells long strings apart by PHP string identity, the Proto holds one
+  PHP string per Lua string object (the Lexer and `Undump(..., true)` for
+  lua2php share equal strings like llex.c), and opcache interns literals or
+  not. `OP_CLOSURE` is `new LuaClosure($proto_X, $function_X, [upvals])`.
   Never use `array_slice`/array functions on `$R`: open upvalues make its
   elements PHP references.
 - **Calls.** Lua function: `($f->code)($L, $f, $args)` returns the result list,
@@ -249,7 +253,9 @@ Lua string keys and integer keys distinct.
   `allowhook` while the hook runs; `Calls::protectedRun` restores it.
 - **PHP hygiene.** `Standalone::configurePhp()`: PHP warnings become
   exceptions (a crash, never output), exception traces drop arguments, stdout
-  is buffered (`print` echoes; `Standalone::flushStdout()` before stderr/exit).
+  is buffered (PHP's output buffer is C's stdout buffer: `print` echoes and
+  then flushes, like lua_writeline; `Standalone::flushStdout()` before
+  stderr/exit).
 - **Reference build.** lua5.4 is built with LUA_COMPAT_5_3: `__le` falls back
   to `not __lt(b, a)`, and math has pow, ldexp, frexp, cosh, sinh, tanh, log10,
   atan2. Its package.path/cpath defaults include the distribution's `/usr/`
@@ -310,4 +316,4 @@ files are run with `tests/official.sh`; once a file passes it must keep passing.
       variables. Gate: errors, cstack, calls, locals, coroutine.
 - [x] Phase 4 — debug library + hooks, GC semantics. Gate: db, gc, gengc,
       big, verybig.
-- [ ] Phase 5 — `all.lua` prints `final OK !!!` under `-e"_U=true"`.
+- [x] Phase 5 — `all.lua` prints `final OK !!!` under `-e"_U=true"`.

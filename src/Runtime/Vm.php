@@ -766,9 +766,22 @@ final class Vm
             self::LUA_OPDIV => fdiv($v1, $v2),
             self::LUA_OPPOW => self::floatPow($v1, $v2),
             self::LUA_OPIDIV => self::floatIdiv($v1, $v2),
-            self::LUA_OPUNM => -$v1,
+            self::LUA_OPUNM => self::floatNegate($v1),
             self::LUA_OPMOD => self::modf($v1, $v2),
         };
+    }
+
+    /**
+     * llimits.h: luai_numunm, C's unary minus: flips the sign bit, also of
+     * a NaN. PHP compiles -$x as $x * -1, which leaves a NaN as it is, so
+     * the emitted OP_UNM calls this for NaNs.
+     */
+    public static function floatNegate(float $x): float
+    {
+        if (!is_nan($x)) {
+            return -$x;
+        }
+        return unpack('E', pack('E', $x) ^ "\x80\0\0\0\0\0\0\0")[1];  // big-endian: the sign is the first bit
     }
 
     /** lobject.c: luaO_rawarith; null when the operands are not suitable numbers */

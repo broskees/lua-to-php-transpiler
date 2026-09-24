@@ -127,6 +127,14 @@ final class Lexer
      */
     public array $constantCache = [];
 
+    /**
+     * The strings llex.c: luaX_newstring anchors in 'h': contents -> the
+     * chunk's one string with those contents.
+     *
+     * @var array<string, string>
+     */
+    private array $strings = [];
+
     /** lstate.h: getCcalls(L), the C-stack depth that enterlevel counts */
     public int $nCcalls;
 
@@ -168,6 +176,17 @@ final class Lexer
     private function currIsNewline(): bool
     {
         return $this->current === 10 || $this->current === 13;
+    }
+
+    /**
+     * llex.c: luaX_newstring: equal strings of one chunk are one string
+     * object. Lua can tell long strings apart (string.format('%p')), and
+     * the emitted code reads long string constants from the Proto (see
+     * FunctionEmitter::k), so they keep this identity at run time.
+     */
+    private function newString(string $contents): string
+    {
+        return $this->strings[$contents] ??= $contents;
     }
 
     // llex.c: save
@@ -358,7 +377,7 @@ final class Lexer
             }
         }
         if ($token !== null) {
-            $token->seminfo = substr($this->buffer, $sep, strlen($this->buffer) - 2 * $sep);
+            $token->seminfo = $this->newString(substr($this->buffer, $sep, strlen($this->buffer) - 2 * $sep));
         }
     }
 
@@ -520,7 +539,7 @@ final class Lexer
             }
         }
         $this->save_and_next();  // skip delimiter
-        $token->seminfo = substr($this->buffer, 1, strlen($this->buffer) - 2);
+        $token->seminfo = $this->newString(substr($this->buffer, 1, strlen($this->buffer) - 2));
     }
 
     // llex.c: llex
@@ -626,7 +645,7 @@ final class Lexer
                         do {
                             $this->save_and_next();
                         } while (self::lislalnum($this->current));
-                        $name = $this->buffer;  // luaX_newstring
+                        $name = $this->newString($this->buffer);
                         $token->seminfo = $name;
                         return self::RESERVED_WORDS[$name] ?? self::TK_NAME;
                     }

@@ -17,6 +17,7 @@ use LuaPhp\Runtime\LuaObject;
 use LuaPhp\Runtime\LuaTable;
 use LuaPhp\Runtime\MetaMethods;
 use LuaPhp\Runtime\NativeFunction;
+use LuaPhp\Runtime\Standalone;
 use LuaPhp\Runtime\StringToNumber;
 use LuaPhp\Runtime\Vm;
 
@@ -76,6 +77,7 @@ final class BaseLib
             echo $i > 0 ? "\t" . $text : $text;
         }
         echo "\n";
+        Standalone::flushStdout();  // lauxlib.h: lua_writeline flushes stdout
         return [];
     }
 

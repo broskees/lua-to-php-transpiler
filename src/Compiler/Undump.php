@@ -36,9 +36,13 @@ final class Undump
 
     private int $position = 1;
 
+    /** @var array<string, string> contents -> the one string (see undump's $shareEqualStrings) */
+    private array $sharedStrings = [];
+
     private function __construct(
         private readonly string $bytes,
         private readonly string $nameForErrors,
+        private readonly bool $shareEqualStrings,
     ) {
     }
 
@@ -49,9 +53,14 @@ final class Undump
      * (ldo.c: f_parser) already used to decide the chunk is binary, so it is
      * skipped unchecked, as in C. $chunkname only feeds error messages.
      *
+     * Each string loaded is a new string, as C's long strings are
+     * (loadStringN). $shareEqualStrings makes equal strings one string
+     * instead, as the lexer does (llex.c: luaX_newstring): for bin/lua2php,
+     * whose binary chunk stands for the source it compiled.
+     *
      * @throws CompileError "<name>: bad binary format (<why>)"
      */
-    public static function undump(string $bytes, string $chunkname): Proto
+    public static function undump(string $bytes, string $chunkname, bool $shareEqualStrings = false): Proto
     {
         if ($chunkname !== '' && ($chunkname[0] === '@' || $chunkname[0] === '=')) {
             $nameForErrors = substr($chunkname, 1);
@@ -60,7 +69,7 @@ final class Undump
         } else {
             $nameForErrors = $chunkname;
         }
-        $loadState = new self($bytes, $nameForErrors);
+        $loadState = new self($bytes, $nameForErrors, $shareEqualStrings);
         $loadState->checkHeader();
         // Number of upvalues of the main closure; the runtime takes it from
         // the Proto instead (C asserts both agree).
@@ -148,7 +157,11 @@ final class Undump
         if ($size < 0) {
             $this->error('truncated chunk');
         }
-        return $this->loadBlock($size - 1);
+        $string = $this->loadBlock($size - 1);
+        if ($this->shareEqualStrings) {
+            return $this->sharedStrings[$string] ??= $string;
+        }
+        return $string;
     }
 
     // lundump.c: loadString (non-nullable string)

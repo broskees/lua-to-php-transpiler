@@ -359,7 +359,13 @@ final class StringFormat
      * strings have no observable identity except through their reference
      * count, so each long string handed to '%p' is kept, and a later one
      * gets the same address only if it is the same PHP string (see
-     * isSameString).
+     * isSameString). Copies of a PHP string share it, so a Lua long string
+     * is one PHP string: long string constants come from the Proto, one
+     * PHP string per constant (never from a PHP literal, which opcache
+     * may intern or not: see FunctionEmitter::k), and operations that make
+     * a new string make a new PHP string. (Exceptions: PHP functions that
+     * return an unchanged argument, such as substr of a whole string, so
+     * string.sub(s, 1) keeps the address of a long s, where C makes a copy.)
      */
     private static function stringAddress(string $s): string
     {

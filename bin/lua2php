@@ -9,8 +9,8 @@ declare(strict_types=1);
 //
 // `php out.php args...` then behaves like `lua5.4 in.lua args...`. The
 // output holds the emitted PHP functions, the script's Proto as a binary
-// chunk (for debug information) and a bootstrap that loads the LuaPhp
-// runtime; its header says how the runtime is found.
+// chunk (for debug information and long string constants) and a bootstrap
+// that loads the LuaPhp runtime; its header says how the runtime is found.
 
 require __DIR__ . '/../src/autoload.php';
 
@@ -67,8 +67,9 @@ if (($contents[$position] ?? '') === '#') {
 }
 $chunk = substr($contents, $position);
 $chunkname = '@' . $inputFile;
+$isBinaryInput = ($chunk[0] ?? '') === Undump::LUA_SIGNATURE[0];
 try {
-    $proto = ($chunk[0] ?? '') === Undump::LUA_SIGNATURE[0]
+    $proto = $isBinaryInput
         ? Undump::undump($chunk, $chunkname)
         : Compiler::compile($prefix . $chunk, $chunkname);
 } catch (CompileError $error) {
@@ -78,6 +79,8 @@ try {
 $runtimeAutoload = realpath(__DIR__ . '/../src/autoload.php');
 $scriptName = PhpLiteral::string($inputFile);
 $binaryChunk = PhpLiteral::string(Dump::dump($proto, false));
+// a chunk compiled from source has one string per contents (llex.c: luaX_newstring)
+$shareEqualStrings = $isBinaryInput ? 'false' : 'true';
 $factory = Emitter::emitChunk($proto);
 $preamble = Emitter::PREAMBLE;
 $runtimeLiteral = PhpLiteral::string($runtimeAutoload);
@@ -122,11 +125,12 @@ $preamble
 // the script's main function and all nested functions
 \$factory = $factory;
 
-// the script's function prototypes (a Lua 5.4 binary chunk) for debug information
+// the script's function prototypes (a Lua 5.4 binary chunk) for debug
+// information and long string constants
 \$binaryChunk = $binaryChunk;
 
 exit(\LuaPhp\Runtime\Standalone::runCompiledScript(\$argv, $scriptName, static function (\LuaPhp\Runtime\Coroutine \$L) use (\$factory, \$binaryChunk): \LuaPhp\Runtime\LuaClosure {
-    \$main = \LuaPhp\Runtime\ChunkLoader::instantiate(\LuaPhp\Compiler\Undump::undump(\$binaryChunk, '=?'), \$factory);
+    \$main = \LuaPhp\Runtime\ChunkLoader::instantiate(\LuaPhp\Compiler\Undump::undump(\$binaryChunk, '=?', $shareEqualStrings), \$factory);
     if (\$main->upvals !== []) {
         \$main->upvals[0]->v = \$L->globalState->globals;  // _ENV
     }

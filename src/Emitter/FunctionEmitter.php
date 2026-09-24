@@ -9,6 +9,7 @@ use LuaPhp\Compiler\OpCodes;
 use LuaPhp\Compiler\Proto;
 use LuaPhp\Runtime\DebugInfo;
 use LuaPhp\Runtime\Gc\Collector;
+use LuaPhp\Runtime\Lua;
 use LuaPhp\Runtime\LuaTable;
 use LuaPhp\Runtime\MetaMethods;
 
@@ -208,10 +209,22 @@ final class FunctionEmitter
         return "\$R[$register]";
     }
 
-    /** PHP literal of constant $index */
+    /**
+     * PHP expression of constant $index: a literal, except for a long
+     * string. Each long string is its own object in Lua (string.format('%p')
+     * tells them apart, lapi.c: lua_topointer), and the Proto holds exactly
+     * the chunk's strings (llex.c: luaX_newstring makes equal ones one
+     * object, lundump.c: loadStringN makes each a new one), while PHP
+     * literals are one string per occurrence or one per contents depending
+     * on opcache. So the code reads long strings from the Proto.
+     */
     private function k(int $index): string
     {
-        return PhpLiteral::of($this->proto->k[$index]);
+        $constant = $this->proto->k[$index];
+        if (\is_string($constant) && \strlen($constant) > Lua::LUAI_MAXSHORTLEN) {
+            return "\$cl->proto->k[$index]";
+        }
+        return PhpLiteral::of($constant);
     }
 
     /** a numeric literal usable as an operand (negative numbers parenthesized) */
@@ -546,7 +559,7 @@ final class FunctionEmitter
                     'if (\is_int($x)) {',
                     "    $ra = \$x === \\PHP_INT_MIN ? \$x : -\$x;",
                     '} elseif (\is_float($x)) {',
-                    "    $ra = -\$x;",
+                    "    $ra = \$x === \$x ? -\$x : Vm::floatNegate(\$x);",  // (only a NaN differs from itself; PHP's -$x keeps its sign)
                     '} else {',
                     '    ' . self::savePc($pc) . " $ra = MetaMethods::tryBinTM(\$L, \$x, \$x, " . MetaMethods::TM_UNM . ", $b, $b);",
                     '}',
