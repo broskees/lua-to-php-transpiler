@@ -78,6 +78,29 @@ final class Calls
     }
 
     /**
+     * PHP's guard against exhausting the C stack as a Lua error. PHP throws
+     * an \Error ("Maximum call stack size of N bytes reached") when PHP
+     * code recursing through internal functions (or PHP's compiler) nears
+     * the end of the main thread's or a fiber's C stack; C Lua raises "C
+     * stack overflow" before its C stack can overflow (lstate.c:
+     * luaE_checkcstack, a luaG_runerror with the position of the running
+     * Lua function). Protected calls and resume catch the \Error and use
+     * this; any other \Error is a bug and is rethrown.
+     */
+    public static function cStackOverflowError(Coroutine $L, \Error $error): LuaError
+    {
+        if ($error::class !== \Error::class || !str_starts_with($error->getMessage(), 'Maximum call stack size of ')) {
+            throw $error;
+        }
+        $message = 'C stack overflow';
+        $ci = $L->ci;
+        if ($ci->func instanceof LuaClosure) {  // if Lua function, add source:line information
+            $message = DebugInfo::addInfo($message, $ci->func->proto->source, DebugInfo::currentLine($ci));
+        }
+        return new LuaError($message);
+    }
+
+    /**
      * Call any value from PHP code (library functions, metamethods) and
      * return all its results. Counts as a C call (LUAI_MAXCCALLS).
      *
@@ -334,7 +357,10 @@ final class Calls
             $result = $body();
             $L->errfunc = $oldErrfunc;
             return [Lua::LUA_OK, $result];
-        } catch (LuaError $error) {
+        } catch (LuaError|\Error $error) {
+            if ($error instanceof \Error) {
+                $error = self::cStackOverflowError($L, $error);
+            }
             $status = $error->status;
             $value = $error->value;
             if ($messageHandler !== null && $status === Lua::LUA_ERRRUN) {
@@ -368,7 +394,10 @@ final class Calls
             try {
                 $results = self::callNoYield($L, $handler, [$value]);
                 return [Lua::LUA_ERRRUN, $results[0] ?? null];
-            } catch (LuaError $error) {
+            } catch (LuaError|\Error $error) {
+                if ($error instanceof \Error) {
+                    $error = self::cStackOverflowError($L, $error);
+                }
                 if ($error->status !== Lua::LUA_ERRRUN) {
                     return [$error->status, $error->value];
                 }
@@ -409,7 +438,10 @@ final class Calls
                 $oldAllowhook = $L->allowhook;
                 try {
                     Upvalues::callCloseMethod($L, $ci->R[$register], $value, $yieldable);
-                } catch (LuaError $error) {  // an error occurred; restore saved state and repeat
+                } catch (LuaError|\Error $error) {  // an error occurred; restore saved state and repeat
+                    if ($error instanceof \Error) {
+                        $error = self::cStackOverflowError($L, $error);
+                    }
                     $status = $error->status;
                     $value = $error->value;
                     if ($messageHandler !== null && $status === Lua::LUA_ERRRUN) {

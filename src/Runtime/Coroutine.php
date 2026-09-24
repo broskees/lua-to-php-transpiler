@@ -19,14 +19,23 @@ namespace LuaPhp\Runtime;
 final class Coroutine
 {
     /**
-     * C stack of every coroutine's fiber. It is only reserved address space
-     * (pages are committed when used, about 10 KB for a suspended coroutine
-     * whatever this size), and PHP frees nested data recursively on the
-     * stack of the fiber that drops it, about 150 bytes per level: 256 MB
-     * frees a Lua list of 1.7 million nodes (measured; 2 million crash).
-     * See AGENTS.md "Coroutines".
+     * C stack of every coroutine's fiber: 256 KB of address space each
+     * (only touched pages cost memory, but address space is what `ulimit
+     * -v` limits). Lua code does not use it as it goes deeper: Lua calls,
+     * metamethods and library calls are PHP calls, which live on PHP's VM
+     * stack (heap), and deep data is freed one link at a time (Teardown).
+     * Measured high-water marks inside coroutines: 36 KB for the whole
+     * official test suite (also with every file run inside a coroutine),
+     * 40 KB when the first load() autoloads and compiles the compiler's
+     * classes, 60 KB compiling a 190-operand concatenation (PHP's compiler
+     * recurses per operand; about 80 KB for the 255 a binary chunk
+     * allows), 84 KB with opcache's JIT compiling traces. PHP keeps the
+     * last 48 KB in reserve: its guard throws "Maximum call stack size"
+     * (a Lua "C stack overflow", see Calls::cStackOverflowError) or, while
+     * compiling, fails fatally, when less remains. 256 KB leaves 208 KB,
+     * 2.5 times the worst measured case. See AGENTS.md "Coroutines".
      */
-    public const FIBER_STACK_BYTES = 256 * 1024 * 1024;
+    public const FIBER_STACK_BYTES = 256 * 1024;
 
     /** current CallInfo (top of this thread's call stack) */
     public ?CallInfo $ci = null;
@@ -125,6 +134,39 @@ final class Coroutine
         $this->baseCi = CallInfo::push($this, null, Lua::CIST_C, 1 + Lua::LUA_MINSTACK, 0);
     }
 
+    /**
+     * Freeing a dropped coroutine must not recurse (see Teardown): its
+     * CallInfo chain (kept by a coroutine dead by an error, or suspended
+     * and collected with its fiber) is as deep as its Lua stack was, so it
+     * is unlinked one frame at a time; the values it keeps outside its
+     * stack go to Teardown.
+     */
+    public function __destruct()
+    {
+        if ($this->ci !== $this->baseCi) {
+            Calls::unlinkAbandonedFrames($this->ci, $this->baseCi);
+        }
+        foreach ($this->pendingCloses as [$abandonedTop, $protectedCi]) {
+            Calls::unlinkAbandonedFrames($abandonedTop, $protectedCi);
+        }
+        if ($this->body === null && $this->errorValue === null && $this->errfunc === null
+            && $this->tailCallFunction === null && $this->tailCallArguments === []) {
+            return;
+        }
+        if (Teardown::$releasing) {
+            Teardown::$pending[] = $this->body;
+            Teardown::$pending[] = $this->errorValue;
+            Teardown::$pending[] = $this->errfunc;
+            Teardown::$pending[] = $this->tailCallFunction;
+            Teardown::$pending[] = $this->tailCallArguments;
+            return;
+        }
+        Teardown::$releasing = true;
+        $this->body = $this->errorValue = $this->errfunc = $this->tailCallFunction = null;
+        $this->tailCallArguments = [];
+        Teardown::release();
+    }
+
     /** lstate.c: lua_newstate: a new global state and its main thread */
     public static function newState(): self
     {
@@ -183,7 +225,10 @@ final class Coroutine
             } else {  // resuming from previous yield: yield() returns the arguments
                 $values = $this->fiber->resume($arguments);
             }
-        } catch (LuaError $error) {  // unrecoverable error
+        } catch (LuaError|\Error $error) {  // unrecoverable error
+            if ($error instanceof \Error) {
+                $error = Calls::cStackOverflowError($this, $error);
+            }
             // the thread is dead; like C, its CallInfo chain stays as it was
             // when the error was raised (for debug.traceback) until closeThread()
             $this->status = $error->status;

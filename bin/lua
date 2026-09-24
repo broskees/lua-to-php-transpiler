@@ -302,8 +302,9 @@ function pmain(Coroutine $L, string $programName, array $argv): bool
     return true;
 }
 
-// lua.c: main (on a large C stack, see Standalone::runOnLargeStack)
-$exitStatus = Standalone::runOnLargeStack(static function () use ($programName, $argv): int {
+// lua.c: main
+function main(string $programName, array $argv): int
+{
     $L = Coroutine::newState();
     $L->globalState->gcstp = Collector::GCSTPUSR;  // lua_gc(L, LUA_GCSTOP): stop GC while building state
     $pmain = new NativeFunction('pmain', static fn (Coroutine $L, array $args): array => [pmain($L, $programName, $argv)]);
@@ -311,8 +312,7 @@ $exitStatus = Standalone::runOnLargeStack(static function () use ($programName, 
     Standalone::report($programName, $status, $result);
     Collector::closeState($L);  // lua_close
     Standalone::flushStdout();
-    $succeeded = $status === Lua::LUA_OK && $result[0];
-    unset($L, $pmain, $result);  // free the Lua state on this stack
-    return $succeeded ? 0 : 1;
-});
-exit($exitStatus);
+    return $status === Lua::LUA_OK && $result[0] ? 0 : 1;
+}
+
+exit(main($programName, $argv));

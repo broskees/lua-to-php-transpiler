@@ -63,6 +63,38 @@ final class LuaTable
         $this->sizearray = $sizearray;
     }
 
+    /** freeing a long chain of tables must not recurse: see Teardown */
+    public function __destruct()
+    {
+        if (Teardown::$releasing) {
+            if ($this->arr !== []) {
+                Teardown::$pending[] = $this->arr;
+            }
+            if ($this->hash !== []) {
+                Teardown::$pending[] = $this->hash;
+            }
+            if ($this->otherValues !== []) {
+                Teardown::$pending[] = $this->otherValues;
+                Teardown::$pending[] = $this->otherKeys;
+            }
+            if ($this->metatable !== null) {
+                Teardown::$pending[] = $this->metatable;
+            }
+            if (\is_object($this->cursorKey)) {
+                Teardown::$pending[] = $this->cursorKey;
+            }
+            return;
+        }
+        Teardown::$releasing = true;
+        $this->arr = $this->hash = $this->otherValues = $this->otherKeys = [];
+        $this->metatable = $this->cursorKey = null;
+        if (Teardown::$pending === []) {  // nothing queued, the usual case (inline: tables are freed all the time)
+            Teardown::$releasing = false;
+            return;
+        }
+        Teardown::release();
+    }
+
     /**
      * A table with the given values at keys 1..n (nils skipped), like the
      * table built by '{...}'.

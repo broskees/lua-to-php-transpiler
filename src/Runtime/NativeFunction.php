@@ -27,6 +27,21 @@ final class NativeFunction
     ) {
     }
 
+    /** freeing a long chain of upvalues must not recurse: see Teardown */
+    public function __destruct()
+    {
+        if ($this->upvalues === []) {
+            return;
+        }
+        if (Teardown::$releasing) {
+            Teardown::$pending[] = $this->upvalues;
+            return;
+        }
+        Teardown::$releasing = true;
+        $this->upvalues = [];
+        Teardown::release();
+    }
+
     /** @var array<int, \stdClass> */
     private array $upvalueSlotIdentities = [];
 

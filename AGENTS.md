@@ -48,6 +48,7 @@ agent can diff behavior against C. Never edit anything under `reference/`.
     src/Runtime/       values, tables, calls, errors, coroutines, metamethods, debug info
     src/Lib/           standard libraries (one file per C lib)
     tests/             our own tests + harness scripts (see Testing)
+    bench/             memory/speed benchmarks against lua5.4 (see bench/README.md)
     reference/         Lua 5.4.9 C source and official test suites (read-only)
 
 ## Value representation
@@ -90,10 +91,10 @@ Lua string keys and integer keys distinct.
   (`Coroutine` = C's `lua_State`; the main thread is one too). Shared state is
   `$L->globalState` (registry, globals, `typeMetatables[Lua::LUA_T*]` such as
   the string metatable). There is no global "current thread": a coroutine is
-  code running with another `$L` (on its own Fiber). bin/lua and lua2php
-  scripts run the whole session inside a Fiber with a large C stack
-  (`Standalone::runOnLargeStack`: PHP frees nested data recursively), so ask
-  `$L->fiber`, never `Fiber::getCurrent()`, whether code runs in a coroutine.
+  code running with another `$L` (on its own Fiber). The main thread runs
+  on the process's own C stack (no fiber); ask `$L->fiber`, never
+  `Fiber::getCurrent()`, whether code runs in a coroutine (PHP's cycle
+  collector runs destructors in a fiber of its own).
 - **Coroutines.** `Coroutine::newThread($L, $body)` (lua_newthread),
   `$co->resume($from, $args)` (lua_resume: `[LUA_YIELD|LUA_OK|error status,
   values|error value]`), `$L->yield($values)` (lua_yieldk: `Fiber::suspend`),
@@ -118,16 +119,40 @@ Lua string keys and integer keys distinct.
   frames of a suspended coroutine undo their own increments when they
   return, so a resume shifts nCcalls by the change of `nCcallsBase` and saved
   counts (protectedRun, closeProtected) are relative to it. Each fiber gets a
-  C stack of `Coroutine::FIBER_STACK_BYTES` (256 MB of address space; only
-  touched pages count: a suspended coroutine costs about 10 KB RSS plus a 16
-  KB VM stack page; nested data freed inside a coroutine needs about 150
-  bytes of it per level: a Lua list of 1.7 million nodes, 2 million crash). Freeing: a finished coroutine's fiber is freed at
+  C stack of `Coroutine::FIBER_STACK_BYTES` = 256 KB of address space (only
+  touched pages cost memory: a suspended coroutine costs about 10 KB RSS
+  plus a 16 KB VM stack page). Lua depth never uses it (Lua calls,
+  metamethods and library calls are PHP calls, on PHP's heap-allocated VM
+  stack; deep data is freed by Teardown), so the size comes from what PHP
+  itself needs, measured as the touched pages of fiber stacks: 36 KB for
+  the official suite (also with every file run inside a coroutine), 40 KB
+  for a first load() that autoloads the compiler, 60 KB compiling a
+  190-operand concatenation (PHP's compiler recurses per operand of emitted
+  expressions: never emit expressions nested deeper than a bounded amount),
+  84 KB with opcache's JIT on. PHP keeps the last 48 KB in reserve; 256 KB
+  leaves 2.5 times the worst case. Linux allows about 65530 mappings per
+  process by default and each fiber stack takes 2, so about 32000 live
+  coroutines at most. Freeing: a finished coroutine's fiber is freed at
   once; a suspended one that becomes unreachable (a cycle: Coroutine ->
   Fiber -> its frames -> `$L`) is freed by PHP's cycle collector, and
   closeThread drops it explicitly. PHP destroys a suspended Fiber by
   unwinding it with a graceful exit: no catch block runs, so no Lua pcall or
   `__close` sees it, but `finally` blocks and `__destruct` methods do: never
   run Lua code from `finally` or `__destruct`.
+- **Teardown.** PHP frees what an object refers to recursively on the C
+  stack (a dropped list of a million tables would need about 150 MB of it,
+  and PHP crashes without a guard). Every class whose objects can link to
+  more Lua values has a destructor following `Teardown`'s protocol (hand
+  the fields to `Teardown::$pending` when a release is running, else clear
+  them and release the queue one value at a time): LuaTable, UpVal,
+  NativeFunction, Userdata, Coroutine (which also unlinks its CallInfo
+  chain, as `Calls::unlinkAbandonedFrames` does for frames an error
+  abandons). A LuaClosure leads only to UpVals; CallInfo chains hang only
+  off their Coroutine. A new class that can hold Lua values needs such a
+  destructor unless it always leads to one of these within a few steps.
+  Destructors never run Lua code nor change what Lua can see: they run
+  only on objects nothing reaches (or at shutdown). Each freed table pays
+  about 60 ns for it (a destructor call).
 - **Chunks.** `ChunkLoader::load($L, $chunk, $chunkname, $mode)` (lua_load) ->
   `Compiler::compile`/`Undump::undump` -> `Emitter::emitChunk($proto)` -> eval ->
   a factory `static function (Proto $proto): \Closure` returning the main
@@ -181,6 +206,13 @@ Lua string keys and integer keys distinct.
   handler (load's parser uses it).
   Variable names in messages come from ldebug.c's symbolic execution; helpers
   take "slots": register >= 0, `DebugInfo::upvalueSlot($i)`, or `NO_SLOT`.
+  PHP's C-stack guard (`\Error` "Maximum call stack size of N bytes
+  reached", when PHP code recursing through internal functions nears the
+  end of a stack) becomes Lua's "C stack overflow" where Lua errors are
+  caught (`Calls::cStackOverflowError` in protectedRun, the message
+  handler loop, closeProtected, `Coroutine::resume`); load() compiles the
+  emitted PHP inside its protected parser. Running out while PHP compiles
+  is a fatal error that cannot be caught (see Coroutines).
 - **Limits.** "stack overflow" when a frame's approximate slot top exceeds
   LUAI_MAXSTACK, or when the estimated PHP memory of the frames
   (`FunctionEmitter::frameBytes`: PHP frames of eval'd code grow with the
@@ -282,6 +314,8 @@ interpreter `lua5.4` (5.4.9) and compiler `luac5.4`, both installed.
     tests/bytecode.sh [file...]  diff `bin/luac -l -l -p` vs `luac5.4 -l -l -p` for official test files
     tests/official.sh [name...]  run official test files one at a time through bin/lua with
                                  -e"_U=true _soft=true _port=true _nomsg=true"; PASS/FAIL per file
+    php bench/run.php <label>    memory/speed/virtual-memory benchmarks vs lua5.4 (not a test;
+                                 results in bench/results/<label>.md, see bench/README.md)
 
 - Differential cases live in `tests/diff/*.lua`: each runs under `lua5.4` and
   under `bin/lua` from `tests/diff`; exit status, stdout and stderr must match

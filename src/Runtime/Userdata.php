@@ -20,4 +20,28 @@ final class Userdata
         public array $userValues = [],
     ) {
     }
+
+    /** freeing a long chain through userdata must not recurse: see Teardown */
+    public function __destruct()
+    {
+        if ($this->payload === null && $this->userValues === [] && $this->metatable === null) {
+            return;
+        }
+        if (Teardown::$releasing) {
+            if ($this->payload !== null) {
+                Teardown::$pending[] = $this->payload;
+            }
+            if ($this->userValues !== []) {
+                Teardown::$pending[] = $this->userValues;
+            }
+            if ($this->metatable !== null) {
+                Teardown::$pending[] = $this->metatable;
+            }
+            return;
+        }
+        Teardown::$releasing = true;
+        $this->payload = $this->metatable = null;
+        $this->userValues = [];
+        Teardown::release();
+    }
 }

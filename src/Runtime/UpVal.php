@@ -23,6 +23,26 @@ final class UpVal
     /** true while $v refers to a live register */
     public bool $isOpen = false;
 
+    /**
+     * Freeing a long chain of closures, each capturing the next, must not
+     * recurse: see Teardown. (A LuaClosure refers to more Lua values only
+     * through its UpVals.) An open upvalue's value lives in the registers
+     * of its frame, which free it.
+     */
+    public function __destruct()
+    {
+        if ($this->isOpen || !\is_object($this->v)) {
+            return;
+        }
+        if (Teardown::$releasing) {
+            Teardown::$pending[] = $this->v;
+            return;
+        }
+        Teardown::$releasing = true;
+        $this->v = null;
+        Teardown::release();
+    }
+
     /** a closed upvalue holding $value (lfunc.c: luaF_initupvals style) */
     public static function closed(mixed $value): self
     {

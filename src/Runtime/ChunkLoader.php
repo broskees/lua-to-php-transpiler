@@ -35,15 +35,17 @@ final class ChunkLoader
     {
         // ldo.c: luaD_protectedparser: parse in protected mode, with the
         // current message handler for errors the parser raises as runtime
-        // errors ("C stack overflow" and the like)
-        [$status, $result] = Calls::protectedRun($L, static function () use ($L, $chunk, $chunkname, $mode): Proto {
+        // errors ("C stack overflow" and the like; PHP compiling the emitted
+        // code can exhaust the C stack too, see Calls::cStackOverflowError)
+        [$status, $result] = Calls::protectedRun($L, static function () use ($L, $chunk, $chunkname, $mode): LuaClosure {
             try {
                 if ($chunk !== '' && $chunk[0] === Undump::LUA_SIGNATURE[0]) {
                     self::checkMode($mode, 'binary');
-                    return Undump::undump($chunk, $chunkname);
+                    $proto = Undump::undump($chunk, $chunkname);
+                } else {
+                    self::checkMode($mode, 'text');
+                    $proto = Compiler::compile($chunk, $chunkname, $L->nCcalls);
                 }
-                self::checkMode($mode, 'text');
-                return Compiler::compile($chunk, $chunkname, $L->nCcalls);
             } catch (CompileError $error) {
                 $status = match ($error->getCode()) {
                     Lua::LUA_ERRRUN => Lua::LUA_ERRRUN,
@@ -52,11 +54,12 @@ final class ChunkLoader
                 };
                 throw new LuaError($error->getMessage(), $status);
             }
+            return self::instantiate($proto);
         }, $L->errfunc);
         if ($status !== Lua::LUA_OK) {
             throw new LuaError($result, $status);
         }
-        $closure = self::instantiate($result);
+        $closure = $result;
         if ($closure->upvals !== []) {  // does it have an upvalue?
             $closure->upvals[0]->v = $L->globalState->globals;  // set it to the global table
         }

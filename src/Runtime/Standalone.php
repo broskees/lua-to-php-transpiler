@@ -34,34 +34,6 @@ final class Standalone
         ob_start(null, 8192);
     }
 
-    /** C stack for runOnLargeStack (virtual; pages are committed only when used) */
-    private const LARGE_STACK_BYTES = 1024 * 1024 * 1024;
-
-    /**
-     * Run $body on a PHP Fiber with a large C stack and return its result.
-     * PHP frees nested data recursively on the C stack (a Lua linked list
-     * of a million nodes nests a million levels deep), so a Lua session
-     * runs, and drops its state, here rather than on the process's stack.
-     */
-    public static function runOnLargeStack(\Closure $body): mixed
-    {
-        $previousStackSize = ini_get('fiber.stack_size');
-        $restoreStackSize = static function () use ($previousStackSize): void {
-            if ($previousStackSize === false || $previousStackSize === '') {
-                ini_restore('fiber.stack_size');  // no explicit setting: PHP's default
-            } else {
-                ini_set('fiber.stack_size', $previousStackSize);
-            }
-        };
-        $fiber = new \Fiber(static function () use ($body, $restoreStackSize): mixed {
-            $restoreStackSize();  // this fiber's stack exists now; later fibers get the usual size
-            return $body();
-        });
-        ini_set('fiber.stack_size', (string) self::LARGE_STACK_BYTES);  // read when the fiber starts
-        $fiber->start();
-        return $fiber->getReturn();
-    }
-
     /** lauxlib.c: luaL_newstate + linit.c: luaL_openlibs */
     public static function newStateWithLibraries(): Coroutine
     {
@@ -213,29 +185,25 @@ final class Standalone
      */
     public static function runCompiledScript(array $argv, string $scriptName, \Closure $loadScript): int
     {
-        return self::runOnLargeStack(static function () use ($argv, $scriptName, $loadScript): int {
-            $programName = $argv[0] ?? 'lua';
-            $L = Coroutine::newState();
-            $L->globalState->gcstp = Collector::GCSTPUSR;  // lua_gc(L, LUA_GCSTOP): stop GC while building state
-            $pmain = new NativeFunction('pmain', static function (Coroutine $L, array $args) use ($argv, $programName, $scriptName, $loadScript): array {
-                StandardLibraries::openAll($L);
-                $luaArgv = array_merge([$argv[0] ?? 'lua', $scriptName], \array_slice($argv, 1));
-                self::createArgTable($L, $luaArgv, 1);
-                Collector::restart($L->globalState);  // lua.c: lua_gc(L, LUA_GCRESTART): start GC...
-                Collector::changeMode($L, Collector::KGC_GEN);  // ...in generational mode
-                if (self::handleLuaInit($L, $programName) !== Lua::LUA_OK) {
-                    return [false];
-                }
-                return [self::handleScript($L, $programName, static fn (): LuaClosure => $loadScript($L)) === Lua::LUA_OK];
-            });
-            [$status, $result] = Calls::protectedCall($L, $pmain, []);
-            self::report($programName, $status, $result);
-            Collector::closeState($L);  // lua_close
-            self::flushStdout();
-            $succeeded = $status === Lua::LUA_OK && $result[0];
-            unset($L, $pmain, $result);  // free the Lua state on this stack
-            return $succeeded ? 0 : 1;
+        $programName = $argv[0] ?? 'lua';
+        $L = Coroutine::newState();
+        $L->globalState->gcstp = Collector::GCSTPUSR;  // lua_gc(L, LUA_GCSTOP): stop GC while building state
+        $pmain = new NativeFunction('pmain', static function (Coroutine $L, array $args) use ($argv, $programName, $scriptName, $loadScript): array {
+            StandardLibraries::openAll($L);
+            $luaArgv = array_merge([$argv[0] ?? 'lua', $scriptName], \array_slice($argv, 1));
+            self::createArgTable($L, $luaArgv, 1);
+            Collector::restart($L->globalState);  // lua.c: lua_gc(L, LUA_GCRESTART): start GC...
+            Collector::changeMode($L, Collector::KGC_GEN);  // ...in generational mode
+            if (self::handleLuaInit($L, $programName) !== Lua::LUA_OK) {
+                return [false];
+            }
+            return [self::handleScript($L, $programName, static fn (): LuaClosure => $loadScript($L)) === Lua::LUA_OK];
         });
+        [$status, $result] = Calls::protectedCall($L, $pmain, []);
+        self::report($programName, $status, $result);
+        Collector::closeState($L);  // lua_close
+        self::flushStdout();
+        return $status === Lua::LUA_OK && $result[0] ? 0 : 1;
     }
 
     public static function flushStdout(): void
