@@ -217,6 +217,14 @@ final class BaseLib
     // lbaselib.c: luaB_setmetatable
     private static function setmetatable(Coroutine $L, array $args): array
     {
+        $table = $args[0] ?? null;
+        $metatable = $args[1] ?? null;
+        // Fast path: giving a table without a metatable (so no protected
+        // one) a table: every check below passes.
+        if ($table instanceof LuaTable && $metatable instanceof LuaTable && $table->metatable === null) {
+            Collector::setMetatable($L, $table, $metatable);
+            return [$table];
+        }
         $metatableType = Auxiliary::argumentType($args, 2);
         $table = Auxiliary::checkTable($L, $args, 1);
         Auxiliary::argExpected($L, $metatableType === Lua::LUA_TNIL || $metatableType === Lua::LUA_TTABLE, $args, 2, 'nil or table');
@@ -371,6 +379,14 @@ final class BaseLib
     // lbaselib.c: luaB_next
     private static function next(Coroutine $L, array $args): array
     {
+        $table = $args[0] ?? null;
+        // Fast path: luaL_checktype passes for a table
+        if ($table instanceof LuaTable) {
+            $entry = $table->next($args[1] ?? null);
+            if ($entry !== false) {
+                return $entry ?? [null];
+            }
+        }
         $table = Auxiliary::checkTable($L, $args, 1);
         $entry = $table->next($args[1] ?? null);
         if ($entry === false) {
@@ -394,8 +410,21 @@ final class BaseLib
     // lbaselib.c: ipairsaux
     private static function ipairsAux(Coroutine $L, array $args): array
     {
-        $index = Vm::addWrap(Auxiliary::checkInteger($L, $args, 2), 1);
         $table = $args[0] ?? null;
+        $index = $args[1] ?? null;
+        // Fast path: an integer control value i below maxinteger and a
+        // table with t[i + 1] present raw, or without a metatable: what
+        // luaL_checkinteger and lua_geti below give.
+        if (\is_int($index) && $index < PHP_INT_MAX && $table instanceof LuaTable) {
+            $value = $table->arr[$index + 1] ?? null;
+            if ($value !== null) {
+                return [$index + 1, $value];
+            }
+            if ($table->metatable === null) {
+                return [null];
+            }
+        }
+        $index = Vm::addWrap(Auxiliary::checkInteger($L, $args, 2), 1);
         if ($table instanceof LuaTable) {
             $value = $table->arr[$index] ?? null;
             if ($value === null && $table->metatable !== null) {
@@ -551,6 +580,12 @@ final class BaseLib
     // lbaselib.c: luaB_tostring
     private static function tostring(Coroutine $L, array $args): array
     {
+        $value = $args[0] ?? null;
+        // Fast path for an integer when numbers have no metatable: no
+        // '__tostring' to call, so luaL_tolstring formats it with "%d".
+        if (\is_int($value) && !isset($L->globalState->typeMetatables[Lua::LUA_TNUMBER])) {
+            return [(string) $value];
+        }
         Auxiliary::checkAny($L, $args, 1);
         return [Auxiliary::toLString($L, $args[0])];
     }

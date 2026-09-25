@@ -85,6 +85,10 @@ final class StringFormat
                     break;
                 case 'd':
                 case 'i':
+                    if ($form === '%d' && \is_int($value)) {  // fast path: no flags, width or precision
+                        $result .= $value;
+                        break;
+                    }
                     $result .= self::formatInteger($L, $args, $arg, $form, $conversion, self::L_FMTFLAGSI);
                     break;
                 case 'u':
@@ -123,7 +127,10 @@ final class StringFormat
                     $result .= self::literal($L, $args, $arg);
                     break;
                 case 's':
-                    $string = Auxiliary::toLString($L, $value);
+                    // fast path: a string, when strings have no '__tostring'
+                    $string = \is_string($value) && !isset($L->globalState->typeMetatables[Lua::LUA_TSTRING]->hash['__tostring'])
+                        ? $value
+                        : Auxiliary::toLString($L, $value);
                     if (\strlen($form) === 2) {  // no modifiers?
                         $result .= $string;  // keep entire string
                         break;

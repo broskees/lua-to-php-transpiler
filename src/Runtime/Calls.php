@@ -118,7 +118,18 @@ final class Calls
     public static function call(Coroutine $L, mixed $function, array $arguments): array
     {
         if (($L->ci->callstatus & (Lua::CIST_C | Lua::CIST_HOOKED)) === 0) {  // isLuacode(L->ci)
-            return self::callk($L, $function, $arguments);
+            // callk($L, $function, $arguments), inline: a PHP call less per
+            // metamethod or 'for' iterator the VM calls
+            if (++$L->nCcalls >= Lua::LUAI_MAXCCALLS) {
+                self::checkCStack($L);
+            }
+            if ($function instanceof LuaClosure) {
+                $results = ($function->code)($L, $function, $arguments) ?? self::finishTailCall($L);
+            } else {
+                $results = self::callNonLua($L, $function, $arguments);
+            }
+            $L->nCcalls--;
+            return $results;
         }
         $L->nny++;
         $results = self::callk($L, $function, $arguments);
@@ -171,6 +182,28 @@ final class Calls
      */
     public static function callNonLua(Coroutine $L, mixed $function, array $arguments): array
     {
+        if ($function instanceof NativeFunction) {  // callNative($L, $function, $arguments, 0), inline: a PHP call less per native call
+            $ci = new CallInfo();
+            $ci->func = $function;
+            $ci->callstatus = Lua::CIST_C;
+            $ci->previous = $previous = $L->ci;
+            $ci->top = $previous->top + \count($arguments) + 1 + Lua::LUA_MINSTACK;
+            $ci->frameBytes = $previous->frameBytes + self::NATIVE_FRAME_BYTES;
+            if ($ci->top > $L->stackLimit || $ci->frameBytes > $L->frameBytesLimit) {
+                self::stackOverflow($L);
+            }
+            $L->ci = $ci;
+            $ci->R = $arguments;
+            if ($L->hookmask & Lua::LUA_MASKCALL) {
+                Hooks::hook($L, Lua::LUA_HOOKCALL, -1, 1, \count($arguments));
+            }
+            $results = ($function->function)($L, $arguments);
+            if ($L->hookmask !== 0) {  // ldo.c: luaD_poscall
+                self::nativeReturnHook($L, $ci, $results);
+            }
+            $L->ci = $ci->previous;
+            return $results;
+        }
         while (!($function instanceof NativeFunction)) {
             if ($function instanceof LuaClosure) {
                 return ($function->code)($L, $function, $arguments) ?? self::finishTailCall($L);
@@ -187,14 +220,25 @@ final class Calls
     }
 
     /**
-     * ldo.c: precallC: run a native function in a new CallInfo.
+     * ldo.c: precallC: run a native function in a new CallInfo. callNonLua
+     * does the same inline for the usual call of a native: keep them alike.
      *
      * @param list<mixed> $arguments
      * @return list<mixed>
      */
     public static function callNative(Coroutine $L, NativeFunction $function, array $arguments, int $callstatus): array
     {
-        $ci = CallInfo::push($L, $function, $callstatus | Lua::CIST_C, \count($arguments) + 1 + Lua::LUA_MINSTACK, self::NATIVE_FRAME_BYTES);
+        // CallInfo::push, inline (a PHP call less per native call; $L->ci is never null here)
+        $ci = new CallInfo();
+        $ci->func = $function;
+        $ci->callstatus = $callstatus | Lua::CIST_C;
+        $ci->previous = $previous = $L->ci;
+        $ci->top = $previous->top + \count($arguments) + 1 + Lua::LUA_MINSTACK;
+        $ci->frameBytes = $previous->frameBytes + self::NATIVE_FRAME_BYTES;
+        if ($ci->top > $L->stackLimit || $ci->frameBytes > $L->frameBytesLimit) {
+            self::stackOverflow($L);
+        }
+        $L->ci = $ci;
         $ci->R = $arguments;
         if ($L->hookmask & Lua::LUA_MASKCALL) {
             Hooks::hook($L, Lua::LUA_HOOKCALL, -1, 1, \count($arguments));
