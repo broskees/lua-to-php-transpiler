@@ -373,7 +373,12 @@ Lua string keys and integer keys distinct.
   (Lua can observe them through a second handle). Standard output writes go
   through PHP's output buffer like `print`. C's `errno` is `Lib\Io\Errno`
   (recovered from PHP's warning text); `Errno::fileResult/execResult` are
-  luaL_fileresult/luaL_execresult. Never pass PHP's STDIN/STDOUT/STDERR to
+  luaL_fileresult/luaL_execresult. Hosts may disable posix and pcntl
+  (disable_functions: a disabled function is undefined, a fatal no pcall
+  sees), so use them only behind `function_exists` with a fallback:
+  `Errno::strerror` falls back to glibc's texts, `CFile::waitForProcess`
+  polls proc_get_status (`tests/unit/DisabledFunctionsTest.php`).
+  Never pass PHP's STDIN/STDOUT/STDERR to
   `proc_open`: PHP seeks the descriptor to that stream's cached position;
   leave the descriptors out so the child inherits them. Dates/times:
   `Lib\Os\CTime` (glibc gmtime/localtime/mktime/strftime, zone from TZ or

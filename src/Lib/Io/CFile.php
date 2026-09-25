@@ -594,7 +594,8 @@ final class CFile
 
     /**
      * Wait for a proc_open child and decode its status (loslib.c:
-     * l_inspectstat).
+     * l_inspectstat). Hosts may disable pcntl (disable_functions): then
+     * proc_get_status is polled until the child has terminated.
      *
      * @param resource $process
      * @return array{string, int}|null
@@ -602,10 +603,22 @@ final class CFile
     public static function waitForProcess($process): ?array
     {
         $status = proc_get_status($process);
-        if (!$status['running']) {  // already reaped by PHP
+        $pcntlAvailable = \function_exists('pcntl_waitpid') && \function_exists('pcntl_get_last_error')
+            && \function_exists('pcntl_wifsignaled') && \function_exists('pcntl_wtermsig') && \function_exists('pcntl_wexitstatus');
+        if ($status['running'] && !$pcntlAvailable) {
+            for ($delayMicroseconds = 100; $status['running']; $status = proc_get_status($process)) {
+                usleep($delayMicroseconds);
+                $delayMicroseconds = min(2 * $delayMicroseconds, 20000);
+            }
+        }
+        if (!$status['running']) {  // terminated, and reaped by proc_get_status
             proc_close($process);
             if ($status['signaled']) {
                 return ['signal', $status['termsig']];
+            }
+            if ($status['exitcode'] === -1) {  // no status: waitpid failed (SIGCHLD ignored: reaped at once)
+                Errno::$errno = Errno::ECHILD;
+                return null;
             }
             return ['exit', $status['exitcode']];
         }
