@@ -246,8 +246,7 @@ final class StringLib
                     break;
                 }
             }
-            $ms->reprepstate();
-            $end = $ms->match($start, 0);
+            $end = $ms->matchAt($start);  // reprepstate + match
             if ($end !== -1) {
                 if ($find) {
                     return [$start + 1, $end, ...$ms->captures(-1, 0)];
@@ -279,8 +278,7 @@ final class StringLib
                 if ($start === -1) {
                     break;
                 }
-                $ms->reprepstate();
-                $end = $ms->match($start, 0);
+                $end = $ms->matchAt($start);  // reprepstate + match
                 if ($end !== -1 && $end !== $lastMatch) {
                     $source = $lastMatch = $end;
                     return $ms->captures($start, $end);
@@ -354,8 +352,7 @@ final class StringLib
                 $result .= substr($source, $position, $candidate - $position);
                 $position = $candidate;
             }
-            $ms->reprepstate();  // (re)prepare state for new match
-            $end = $ms->match($position, 0);
+            $end = $ms->matchAt($position);  // (re)prepare state for new match, and match
             if ($end !== -1 && $end !== $lastMatch) {  // match?
                 $count++;
                 // lstrlib.c: add_value

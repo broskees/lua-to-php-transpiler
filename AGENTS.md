@@ -245,6 +245,15 @@ Lua string keys and integer keys distinct.
   by-reference array functions leave the property a PHP reference (+32
   bytes), which `endTraversal` undoes. Light userdata:
   `LightUserdata::pointingTo($obj)`.
+- **Patterns.** `Lib\String\MatchState` ports lstrlib.c's matcher; the
+  drivers (str_find_aux, gmatch_aux, str_gsub) stay C's and ask it only
+  `nextCandidate`/`matchAt`, which run the pattern's exactly equivalent
+  PCRE translation (`Lib\String\PatternRegex`: from a pattern's second use,
+  or at once on a subject of 64+ bytes) when there is one. Patterns that
+  could make match() raise, and any PCRE failure at run time, run the port.
+  `tests/fuzz/patterns.php` checks lua5.4 vs translation vs port
+  (`MatchState::$forcePort`); its fixed-seed corpus is the diff case
+  `string_pattern_corpus.lua`.
 - **Object sizes.** Every instance pays 16 bytes per declared property
   (40 + 16n, rounded up to Zend MM's bins: ..., 96, 112, 128, 160, 192,
   224, 256, ...), and a non-empty PHP array at least 216 bytes (list) or
