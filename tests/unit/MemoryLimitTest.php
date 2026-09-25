@@ -180,7 +180,7 @@ function commands(string $name): array
 {
     return [
         'lua5.4' => ['sh', '-c', 'ulimit -v 163840 && exec lua5.4 "$1"', 'sh', "$name.lua"],
-        'lua2php' => ['php', '-d', 'memory_limit=128M', "php/$name.php"],
+        'lua2php' => ['php', ...OPCACHE_ON_NEW_FILES, '-d', 'memory_limit=128M', "php/$name.php"],
         'bin/lua' => ['php', '-d', 'memory_limit=64M', '-d', 'max_memory_limit=128M', REPO_ROOT . '/bin/lua', "$name.lua"],
     ];
 }
@@ -233,7 +233,7 @@ function test_memory_limit_policy(): void
         'bin/lua, memory_limit=128M' => [['-d', 'memory_limit=128M', REPO_ROOT . '/bin/lua', 'big.lua'], "true\t150000000\n"],
     ];
     foreach ($cases as $label => [$phpArguments, $expectedOutput]) {
-        assertSame([0, $expectedOutput, ''], runCommand(['php', ...$phpArguments], '', $directory), $label);
+        assertSame([0, $expectedOutput, ''], runCommand(['php', ...OPCACHE_ON_NEW_FILES, ...$phpArguments], '', $directory), $label);
     }
 }
 

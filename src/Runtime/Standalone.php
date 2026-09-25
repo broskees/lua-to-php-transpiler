@@ -40,8 +40,10 @@ final class Standalone
      * more than PHP's default 128M, so raise memory_limit to 4G (never
      * lower it; -1 is no limit). PHP 8.5's max_memory_limit caps what
      * memory_limit may be set to, and asking for more warns: ask for at
-     * most the cap. Scripts bin/lua2php generates, and other programs
-     * that embed the runtime, keep the limit PHP was started with.
+     * most the cap. bin/lua2php raises it too (a build tool: transpiling a
+     * big file needs more than the default). Scripts bin/lua2php
+     * generates, and other programs that embed the runtime, keep the limit
+     * PHP was started with.
      */
     public static function raiseMemoryLimit(): void
     {

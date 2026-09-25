@@ -38,6 +38,42 @@ final class FunctionEmitter
     /** @var array<int, true> instructions already emitted as part of the previous one */
     private array $consumed = [];
 
+    /**
+     * Constant table constructors emitted as runs (emitConstructorRun):
+     * first instruction => last instruction (see constructorRunEnd).
+     *
+     * @var array<int, int>
+     */
+    private array $constructorRuns = [];
+
+    /** whether the constructor runs of this function get a fast path of literals (see emitConstructorRun) */
+    private bool $constructorLiterals = false;
+
+    /**
+     * Tests only: emit constant constructors inline, one instruction at a
+     * time, as if they were ordinary code (TableConstructorTest checks that
+     * runs behave the same).
+     */
+    public static bool $inlineConstructors = false;
+
+    /**
+     * The fewest instructions a constant constructor needs to be emitted as
+     * a run rather than inline. Measured in a loop: the fast path of
+     * literals takes 0.86 times the time of the inline code for {x = 1}
+     * (3 instructions), 0.3 times for 16 fields; {} (2) is 1.08 times.
+     */
+    private const CONSTRUCTOR_RUN_MINIMUM = 3;
+
+    /**
+     * The most instructions the constructor runs of one function may have
+     * in all to get fast paths of literals (each about 20 bytes of PHP per
+     * instruction). A function with more, like a data module, gets only the
+     * calls: PHP needs 183 MB to compile the literals of 131,100 rows (and
+     * 146 ms without opcache), where stepping through their 790,000
+     * instructions takes 70 ms and no memory but the tables.
+     */
+    private const CONSTRUCTOR_LITERALS_MAXIMUM = 4096;
+
     public function __construct(
         private readonly Proto $proto,
         private readonly string $path,
@@ -48,6 +84,7 @@ final class FunctionEmitter
     {
         $proto = $this->proto;
         $this->findJumpTargets();
+        $this->findConstructorRuns();
 
         $uses = [];
         foreach (array_keys($proto->p) as $childIndex) {
@@ -65,7 +102,7 @@ final class FunctionEmitter
         // ldo.c: luaD_precall for a Lua function (CallInfo::push, inline)
         $code .= self::lines(
             '$ci = new CallInfo(); $ci->func = $cl; $ci->callstatus = $callstatus;',
-            '$ci->previous = $previous = $L->ci; $ci->top = $previous->top + ' . ($proto->maxstacksize + 1) . '; $ci->frameBytes = $previous->frameBytes + ' . self::frameBytes($proto) . ';',
+            '$ci->previous = $previous = $L->ci; $ci->top = $previous->top + ' . ($proto->maxstacksize + 1) . '; $ci->frameBytes = $previous->frameBytes + ' . $this->frameBytes() . ';',
             'if ($ci->top > $L->stackLimit || $ci->frameBytes > $L->frameBytesLimit) {',
             '    Calls::stackOverflow($L);',
             '}',
@@ -90,6 +127,12 @@ final class FunctionEmitter
             if (isset($this->jumpTargets[$pc])) {
                 $code .= "    L$pc:\n";
             }
+            if (isset($this->constructorRuns[$pc])) {
+                $last = $this->constructorRuns[$pc];
+                $code .= $this->emitConstructorRun($pc, $last);
+                $pc = $last;
+                continue;
+            }
             $code .= $this->comment($pc);
             if (isset($this->consumed[$pc])) {
                 continue;
@@ -102,14 +145,21 @@ final class FunctionEmitter
     }
 
     /**
-     * Estimated PHP memory of one activation of $proto's function: the
-     * CallInfo and register array, plus the PHP frame, which for eval'd
-     * (unoptimized) code has a slot for every temporary and so grows with
-     * the code (measured: about 150-190 bytes per instruction).
+     * Estimated PHP memory of one activation of the function: the CallInfo
+     * and register array, plus the PHP frame, which for eval'd (unoptimized)
+     * code has a slot for every temporary and so grows with the code
+     * (measured: about 150-190 bytes per instruction emitted inline). A
+     * constructor run without literals is one call.
      */
-    public static function frameBytes(Proto $proto): int
+    private function frameBytes(): int
     {
-        return 1000 + 16 * $proto->maxstacksize + 160 * \count($proto->code);
+        $emittedInstructions = \count($this->proto->code);
+        if (!$this->constructorLiterals) {
+            foreach ($this->constructorRuns as $first => $last) {
+                $emittedInstructions -= $last - $first;
+            }
+        }
+        return 1000 + 16 * $this->proto->maxstacksize + 160 * $emittedInstructions;
     }
 
     /**
@@ -188,6 +238,311 @@ final class FunctionEmitter
                 $this->consumed[$pc + 1] = true;
             }
         }
+    }
+
+    /**
+     * Finds the constant table constructors to emit as runs (see
+     * emitConstructorRun): runs of at least CONSTRUCTOR_RUN_MINIMUM
+     * instructions starting at an OP_NEWTABLE (constructorRunEnd).
+     */
+    private function findConstructorRuns(): void
+    {
+        if (self::$inlineConstructors) {
+            return;
+        }
+        $code = $this->proto->code;
+        $instructionCount = \count($code);
+        $runInstructions = 0;
+        for ($pc = 0; $pc < $instructionCount; $pc++) {
+            if (OpCodes::GET_OPCODE($code[$pc]) !== OpCodes::OP_NEWTABLE) {
+                continue;
+            }
+            $last = $this->constructorRunEnd($pc);
+            if ($last - $pc + 1 >= self::CONSTRUCTOR_RUN_MINIMUM) {
+                $this->constructorRuns[$pc] = $last;
+                $runInstructions += $last - $pc + 1;
+                $pc = $last;
+            }
+        }
+        $this->constructorLiterals = $runInstructions <= self::CONSTRUCTOR_LITERALS_MAXIMUM;
+    }
+
+    /**
+     * A constant constructor run: TableConstructor::run, which steps
+     * through its instructions exactly as their inline code would. When the
+     * function's runs are small enough (CONSTRUCTOR_LITERALS_MAXIMUM) and
+     * no hook is set and the run's tables leave the GC debt <= 0 (so no
+     * OP_NEWTABLE starts a collection: nothing can run or look in
+     * between), the run's result instead: its tables built from PHP array
+     * literals and the final value of every register it writes
+     * (constructorResult), with the same debt charged.
+     */
+    private function emitConstructorRun(int $first, int $last): string
+    {
+        $proto = $this->proto;
+        $code = self::INDENT . "// [$first..$last] constant table constructor: " . ($last - $first + 1) . ' instructions ; lines '
+            . DebugInfo::getFuncLine($proto, $first) . '-' . DebugInfo::getFuncLine($proto, $last) . "\n";
+        $call = "TableConstructor::run(\$L, \$ci, \$R, $first, $last);";
+        $result = $this->constructorLiterals ? $this->constructorResult($first, $last) : null;
+        if ($result === null) {
+            return $code . self::lines($call);
+        }
+        [$tables, $registers, $charge] = $result;
+        $fastPath = ["\$L->globalState->gcDebt += $charge;"];
+        foreach ($tables as $index => [$sizearray]) {
+            $fastPath[] = "\$table$index = new LuaTable($sizearray);";
+        }
+        foreach ($tables as $index => [, $arrayPart, $hashPart]) {
+            if ($arrayPart !== []) {
+                $fastPath[] = '$table' . $index . '->arr = ' . $this->constructorLiteral($arrayPart) . ';';
+            }
+            if ($hashPart !== []) {
+                $fastPath[] = '$table' . $index . '->hash = ' . $this->constructorLiteral($hashPart) . ';';
+            }
+        }
+        ksort($registers);
+        foreach ($registers as $register => $value) {
+            $fastPath[] = self::r($register) . ' = ' . $this->constructorValue($value) . ';';
+        }
+        return $code . self::lines("if (!\$trap && \$L->globalState->gcDebt + $charge <= 0) {")
+            . self::lines(...array_map(static fn (string $line): string => "    $line", $fastPath))
+            . self::lines('} else {', "    $call", '}');
+    }
+
+    /**
+     * What the run $first..$last leaves when it runs on its own (no hook,
+     * no collection): [tables, registers, GC debt charged], each table as
+     * [sizearray, array part, hash part] in the order the run creates them,
+     * with values as constructorValue takes them. The parts are PHP arrays
+     * filled by the same PHP operations as the inline code, so their keys
+     * and order are the same. Null when the result needs more than literals:
+     * a key of another type (LuaTable::set's other keys, or an error), a
+     * long string key (its identity), a target that is not a table.
+     *
+     * @return array{list<array{int, array, array}>, array<int, array{string, mixed}>, int}|null
+     */
+    private function constructorResult(int $first, int $last): ?array
+    {
+        $code = $this->proto->code;
+        $constants = $this->proto->k;
+        $tables = [];
+        $registers = [];  // register => value
+        $charge = 0;
+        for ($pc = $first; $pc <= $last; $pc++) {
+            $instruction = $code[$pc];
+            $a = OpCodes::GETARG_A($instruction);
+            $b = OpCodes::GETARG_B($instruction);
+            $c = OpCodes::GETARG_C($instruction);
+            $k = OpCodes::GETARG_k($instruction);
+            $opcode = OpCodes::GET_OPCODE($instruction);
+            switch ($opcode) {
+                case OpCodes::OP_NEWTABLE:
+                    $arraySize = $c;
+                    if ($k) {
+                        $arraySize += OpCodes::GETARG_Ax($code[$pc + 1]) * (OpCodes::MAXARG_C + 1);
+                    }
+                    $charge += Collector::tableSize($arraySize, $b > 0 ? 1 << ($b - 1) : 0);
+                    $registers[$a] = ['table', \count($tables)];
+                    $tables[] = [$arraySize, [], []];
+                    $pc++;  // its OP_EXTRAARG
+                    continue 2;
+                case OpCodes::OP_LOADK:
+                    $registers[$a] = ['constant', OpCodes::GETARG_Bx($instruction)];
+                    continue 2;
+                case OpCodes::OP_LOADKX:
+                    $registers[$a] = ['constant', OpCodes::GETARG_Ax($code[++$pc])];
+                    continue 2;
+                case OpCodes::OP_LOADI:
+                    $registers[$a] = ['value', OpCodes::GETARG_sBx($instruction)];
+                    continue 2;
+                case OpCodes::OP_LOADF:
+                    $registers[$a] = ['value', (float) OpCodes::GETARG_sBx($instruction)];
+                    continue 2;
+                case OpCodes::OP_LOADFALSE:
+                case OpCodes::OP_LOADTRUE:
+                    $registers[$a] = ['value', $opcode === OpCodes::OP_LOADTRUE];
+                    continue 2;
+                case OpCodes::OP_LOADNIL:
+                    for ($i = 0; $i <= $b; $i++) {
+                        $registers[$a + $i] = ['value', null];
+                    }
+                    continue 2;
+            }
+            // OP_SETFIELD, OP_SETI, OP_SETTABLE, OP_SETLIST: into a table the run created
+            if ($registers[$a][0] !== 'table') {
+                return null;
+            }
+            $table = $registers[$a][1];
+            if ($opcode === OpCodes::OP_SETLIST) {
+                $index = $c;
+                if ($k) {
+                    $index += OpCodes::GETARG_Ax($code[++$pc]) * (OpCodes::MAXARG_C + 1);
+                }
+                for ($i = 1; $i <= $b; $i++) {
+                    $value = $registers[$a + $i];
+                    if ($this->constructorValueIsNil($value)) {
+                        unset($tables[$table][1][$index + $i]);
+                    } else {
+                        $tables[$table][1][$index + $i] = $value;
+                    }
+                }
+                $tables[$table][0] = max($tables[$table][0], $index + $b);
+                continue;
+            }
+            $value = $k ? ['constant', $c] : $registers[$c];
+            if ($opcode === OpCodes::OP_SETFIELD) {
+                $key = $constants[$b];
+            } elseif ($opcode === OpCodes::OP_SETI) {
+                $key = $b;
+            } else {  // OP_SETTABLE
+                $key = match ($registers[$b][0]) {
+                    'constant' => $constants[$registers[$b][1]],
+                    'value' => $registers[$b][1],
+                    'table' => null,
+                };
+                if (\is_float($key)) {
+                    $key = LuaTable::floatToInteger($key);  // an integral float key is that integer (ltable.c: luaH_get)
+                }
+            }
+            if (\is_int($key)) {
+                $part = 1;
+            } elseif (\is_string($key) && \strlen($key) <= Lua::LUAI_MAXSHORTLEN) {
+                $part = 2;
+            } else {
+                return null;
+            }
+            if ($this->constructorValueIsNil($value)) {
+                unset($tables[$table][$part][$key]);
+            } else {
+                $tables[$table][$part][$key] = $value;
+            }
+        }
+        return [$tables, $registers, $charge];
+    }
+
+    /** @param array{string, mixed} $value a value of constructorResult */
+    private function constructorValueIsNil(array $value): bool
+    {
+        return match ($value[0]) {
+            'constant' => $this->proto->k[$value[1]] === null,
+            'value' => $value[1] === null,
+            'table' => false,
+        };
+    }
+
+    /**
+     * PHP expression of a value of constructorResult: a constant (by index,
+     * so long strings come from the Proto: see k()), an immediate, or one
+     * of the run's tables.
+     *
+     * @param array{string, mixed} $value
+     */
+    private function constructorValue(array $value): string
+    {
+        return match ($value[0]) {
+            'constant' => $this->k($value[1]),
+            'value' => PhpLiteral::of($value[1]),
+            'table' => '$table' . $value[1],
+        };
+    }
+
+    /**
+     * PHP array literal of a table part of constructorResult
+     *
+     * @param array<int|string, array{string, mixed}> $part
+     */
+    private function constructorLiteral(array $part): string
+    {
+        $elements = [];
+        foreach ($part as $key => $value) {
+            $elements[] = PhpLiteral::of($key) . ' => ' . $this->constructorValue($value);
+        }
+        return '[' . implode(', ', $elements) . ']';
+    }
+
+    /**
+     * The last instruction of the constant constructor starting at the
+     * OP_NEWTABLE $first: the longest straight run (nothing jumps into it)
+     * of OP_NEWTABLE, OP_SETFIELD, OP_SETI, OP_SETTABLE, OP_SETLIST with a
+     * count, OP_LOADK, OP_LOADKX, OP_LOADI, OP_LOADF, OP_LOADNIL,
+     * OP_LOADTRUE and OP_LOADFALSE (with the OP_EXTRAARG each consumes)
+     * that reads only registers written in the run: tables it created and
+     * constants, so its values do not depend on anything before it. The
+     * code a compiler generates for a constructor of constants (nested ones
+     * too), and of the statements of constants that follow, is such a run.
+     */
+    private function constructorRunEnd(int $first): int
+    {
+        $code = $this->proto->code;
+        $instructionCount = \count($code);
+        $written = [];  // registers the run has written
+        $last = $first - 1;
+        for ($pc = $first; $pc < $instructionCount; $pc++) {
+            if ($pc > $first && isset($this->jumpTargets[$pc])) {
+                break;
+            }
+            $instruction = $code[$pc];
+            $a = OpCodes::GETARG_A($instruction);
+            $b = OpCodes::GETARG_B($instruction);
+            $k = OpCodes::GETARG_k($instruction);
+            $valueIsKnown = $k === 1 || isset($written[OpCodes::GETARG_C($instruction)]);
+            $nextIsExtraArgument = $pc + 1 < $instructionCount && OpCodes::GET_OPCODE($code[$pc + 1]) === OpCodes::OP_EXTRAARG;
+            switch (OpCodes::GET_OPCODE($instruction)) {
+                case OpCodes::OP_NEWTABLE:
+                case OpCodes::OP_LOADKX:
+                    if (!$nextIsExtraArgument) {
+                        break 2;
+                    }
+                    $written[$a] = true;
+                    $pc++;  // its OP_EXTRAARG
+                    break;
+                case OpCodes::OP_LOADK:
+                case OpCodes::OP_LOADI:
+                case OpCodes::OP_LOADF:
+                case OpCodes::OP_LOADTRUE:
+                case OpCodes::OP_LOADFALSE:
+                    $written[$a] = true;
+                    break;
+                case OpCodes::OP_LOADNIL:
+                    for ($i = 0; $i <= $b; $i++) {
+                        $written[$a + $i] = true;
+                    }
+                    break;
+                case OpCodes::OP_SETFIELD:
+                    if (!isset($written[$a]) || !\is_string($this->proto->k[$b]) || !$valueIsKnown) {
+                        break 2;
+                    }
+                    break;
+                case OpCodes::OP_SETI:
+                    if (!isset($written[$a]) || !$valueIsKnown) {
+                        break 2;
+                    }
+                    break;
+                case OpCodes::OP_SETTABLE:
+                    if (!isset($written[$a]) || !isset($written[$b]) || !$valueIsKnown) {
+                        break 2;
+                    }
+                    break;
+                case OpCodes::OP_SETLIST:
+                    // (B = 0 sets values up to the top a call or vararg left)
+                    if ($b === 0 || !isset($written[$a]) || $nextIsExtraArgument !== ($k === 1)) {
+                        break 2;
+                    }
+                    for ($i = 1; $i <= $b; $i++) {
+                        if (!isset($written[$a + $i])) {
+                            break 3;
+                        }
+                    }
+                    if ($k === 1) {
+                        $pc++;  // its OP_EXTRAARG
+                    }
+                    break;
+                default:
+                    break 2;
+            }
+            $last = $pc;
+        }
+        return $last;
     }
 
     private function comment(int $pc): string

@@ -211,6 +211,25 @@ Lua string keys and integer keys distinct.
   `$cl->upvals[i]`, and `OP_CLOSURE` is `new LuaClosure1($proto_X,
   $function_X, $upval)` ... or `new LuaClosureN($proto_X, $function_X,
   [upvals])`.
+  A constant table constructor is one piece of code, commented
+  `// [first..last] constant table constructor`: a straight run (nothing
+  jumps into it) of 3 or more instructions from an OP_NEWTABLE, made of
+  OP_NEWTABLE, OP_SETFIELD/SETI/SETTABLE, OP_SETLIST with a count and the
+  OP_LOAD* that fill their registers, reading only registers the run wrote
+  (nested constructors and the constant statements after it included;
+  `FunctionEmitter::constructorRunEnd`). `TableConstructor::run($L, $ci,
+  $R, first, last)` steps through those instructions from the Proto
+  exactly as their inline code: the `$trap` check before each, the GC
+  check after each OP_NEWTABLE, `Vm::setTable` when a hook or finalizer
+  changed a register or gave the table a metatable. In a function whose
+  runs total at most 4096 instructions, a fast path comes first, taken
+  when `!$trap` and the run's tables leave `gcDebt` <= 0 (so nothing can
+  run or look in between): the run's final tables built from PHP array
+  literals (`$table<i>`, long strings from the Proto) and the final value
+  of every register it writes, charging the same debt. A bigger function
+  (a data module) gets only the calls: its literals would need more memory
+  to compile than PHP's default limit, while the Proto is there anyway.
+  `FunctionEmitter::$inlineConstructors` (tests only) emits them inline.
   Never use `array_slice`/array functions on `$R`: open upvalues make its
   elements PHP references.
 - **Calls.** Lua function: `($f->code)($L, $f, $args)` returns the result list,
@@ -367,7 +386,8 @@ Lua string keys and integer keys distinct.
   OP_TFORLOOP, not an OP_EXTRAARG, the OP_MMBIN* only on the metamethod
   path, not the OP_JMP after a test (the test jumps to its target
   directly: donextjump), not OP_TFORCALL when entered from OP_TFORPREP
-  (`goto T<pc>`, a label after its check). Call hooks: `Hooks::hookCall`
+  (`goto T<pc>`, a label after its check); `TableConstructor::run` does
+  the same for the instructions of a constructor run. Call hooks: `Hooks::hookCall`
   in the prologue (after OP_VARARGPREP for vararg functions) and in
   `Calls::callNative`; return hooks: `Hooks::retHook` in OP_RETURN* (before
   the results are collected), `Calls::callNative` (a native's results are
@@ -381,10 +401,12 @@ Lua string keys and integer keys distinct.
   is buffered (PHP's output buffer is C's stdout buffer: `print` echoes and
   then flushes, like lua_writeline; `Standalone::flushStdout()` before
   stderr/exit). It leaves memory_limit alone: lua2php output and any PHP
-  that embeds the runtime keep the limit PHP was started with. bin/lua
-  (and test harnesses that stand in for it) call
-  `Standalone::raiseMemoryLimit()`: 4G, never lower, and at most PHP 8.5's
-  max_memory_limit (ini_set above it would warn).
+  that embeds the runtime keep the limit PHP was started with. bin/lua,
+  bin/lua2php (a build tool; in directory mode a file that fails is
+  reported and the others are still transpiled) and test harnesses that
+  stand in for bin/lua call `Standalone::raiseMemoryLimit()`: 4G, never
+  lower, and at most PHP 8.5's max_memory_limit (ini_set above it would
+  warn).
 - **Reference build.** lua5.4 is built with LUA_COMPAT_5_3: `__le` falls back
   to `not __lt(b, a)`, and math has pow, ldexp, frexp, cosh, sinh, tanh, log10,
   atan2. Its package.path/cpath defaults include the distribution's `/usr/`
@@ -429,6 +451,19 @@ interpreter `lua5.4` (5.4.9) and compiler `luac5.4`, both installed.
   under `bin/lua` from `tests/diff`; exit status, stdout and stderr must match
   (0x... addresses and the program name normalized). `tests/unit/Lua2PhpTest.php`
   also runs every case through `bin/lua2php`. Add one for every bug.
+- C stack: `tests/run.php` runs itself (so every process it starts) with an
+  8 MB stack, the usual default, running itself again under `ulimit -s 8192`
+  when the limit differs. A bigger one (this machine's shells have 16 MB)
+  hides PHP crashing in its own recursion: opcache's optimizer recurses
+  about once per basic block, and segfaulted (exit 139) on huge generated
+  functions at 8 MB. Run other PHP by hand with `ulimit -s 8192` too.
+- opcache: this machine's php.ini enables it for the CLI, but it skips files
+  younger than `opcache.file_update_protection` (2 s), which is every file
+  a test has just generated or cached. Tests that run generated or cached
+  files pass `OPCACHE_ON_NEW_FILES` (tests/run.php: `-d opcache.enable_cli=1
+  -d opcache.file_update_protection=0`) so opcache really compiles and
+  optimizes them (e.g. Lua2PhpTest's cold and warm passes, and its data
+  modules at 8 MB and 1 MB stacks).
 - A bug gets a failing test before it gets a fix.
 - Never make a test pass by skipping, deleting, or loosening it.
 - Run `php tests/run.php` before claiming anything is done.

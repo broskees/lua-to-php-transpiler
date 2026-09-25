@@ -20,7 +20,12 @@ declare(strict_types=1);
 // Syntax errors: in single-file mode lua2php reports the error and writes
 // nothing. In directory mode it reports each error on stderr, still writes
 // every file (one that did not compile raises exactly Lua's load error when
-// the program loads it), and exits with status 1.
+// the program loads it), and exits with status 1. A file that cannot be
+// read, transpiled or written is reported the same way, and the others are
+// still transpiled.
+//
+// Memory: like bin/lua, lua2php raises PHP's memory_limit (to 4G, at most
+// max_memory_limit): transpiling a big file takes more than PHP's default.
 
 require __DIR__ . '/../src/autoload.php';
 
@@ -33,6 +38,7 @@ use LuaPhp\Emitter\Emitter;
 use LuaPhp\Emitter\PhpLiteral;
 use LuaPhp\Runtime\ChunkLoader;
 use LuaPhp\Runtime\Lua;
+use LuaPhp\Runtime\Standalone;
 
 $programName = (isset($argv[0]) && $argv[0] !== '') ? $argv[0] : 'lua2php';
 
@@ -174,14 +180,16 @@ function writeFile(string $file, string $contents): void
 {
     $directory = dirname($file);
     if (!is_dir($directory) && !@mkdir($directory, 0777, true) && !is_dir($directory)) {
-        fail("cannot create directory $directory");
+        throw new RuntimeException("cannot create directory $directory");
     }
     $temporaryFile = $directory . '/.' . basename($file) . '.' . getmypid() . '.tmp';
     if (@file_put_contents($temporaryFile, $contents) !== strlen($contents) || !@rename($temporaryFile, $file)) {
         @unlink($temporaryFile);
-        fail("cannot write $file");
+        throw new RuntimeException("cannot write $file");
     }
 }
+
+Standalone::raiseMemoryLimit();
 
 $input = null;
 $output = null;
@@ -203,7 +211,11 @@ if (!is_dir($input)) {
     if ($errorMessage !== null) {
         fail($errorMessage);
     }
-    writeFile($output ?? ChunkLoader::precompiledFileName($input), $php);
+    try {
+        writeFile($output ?? ChunkLoader::precompiledFileName($input), $php);
+    } catch (RuntimeException $error) {
+        fail($error->getMessage());
+    }
     exit(0);
 }
 
@@ -220,13 +232,18 @@ foreach ($iterator as $file) {
 sort($luaFiles, SORT_STRING);
 $failed = false;
 foreach ($luaFiles as $relativePath) {
-    [$php, $errorMessage] = transpile("$inputDirectory/$relativePath", $relativePath);
-    if ($errorMessage !== null) {
-        fwrite(STDERR, "$programName: $errorMessage\n");
+    try {
+        [$php, $errorMessage] = transpile("$inputDirectory/$relativePath", $relativePath);
+        if ($errorMessage !== null) {
+            fwrite(STDERR, "$programName: $errorMessage\n");
+            $failed = true;
+        }
+        if ($php !== null) {
+            writeFile($outputDirectory . '/' . ChunkLoader::precompiledFileName($relativePath), $php);
+        }
+    } catch (Throwable $error) {  // one file that fails does not stop the others
+        fwrite(STDERR, "$programName: $relativePath: " . $error->getMessage() . "\n");
         $failed = true;
-    }
-    if ($php !== null) {
-        writeFile($outputDirectory . '/' . ChunkLoader::precompiledFileName($relativePath), $php);
     }
 }
 exit($failed ? 1 : 0);

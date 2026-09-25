@@ -34,7 +34,7 @@ function runLua(string $script, string $workingDirectory, ?string $cacheDirector
 {
     $environment = $cacheDirectory === null ? ['-u', 'LUAPHP_CACHE_DIR'] : ["LUAPHP_CACHE_DIR=$cacheDirectory"];
     $phpOptions = $guarded ? ['-d', 'auto_prepend_file=' . GUARD] : [];
-    return runCommand(['env', ...$environment, 'php', ...$phpOptions, $program, $script], '', $workingDirectory);
+    return runCommand(['env', ...$environment, 'php', ...OPCACHE_ON_NEW_FILES, ...$phpOptions, $program, $script], '', $workingDirectory);
 }
 
 /** @return list<string> the cache entries (generated PHP files) in $directory */
@@ -129,7 +129,7 @@ function test_concurrent_writers(): void
     $cacheDirectory = newDirectory('cache-concurrent/cache');
     $processes = [];
     for ($i = 0; $i < 3; $i++) {
-        $processes[] = startProcess(['env', "LUAPHP_CACHE_DIR=$cacheDirectory", 'php', REPO_ROOT . '/bin/lua', 'writers.lua'], $directory);
+        $processes[] = startProcess(['env', "LUAPHP_CACHE_DIR=$cacheDirectory", 'php', ...OPCACHE_ON_NEW_FILES, REPO_ROOT . '/bin/lua', 'writers.lua'], $directory);
     }
     foreach ($processes as $process) {
         assertSame([0, "60300\t3000\n", ''], finishProcess($process));
@@ -281,7 +281,7 @@ function test_the_disk_cache_works_without_posix_functions(): void
     $expected = [0, "true\ttrue\n230\thits.lua:1: boom\n", ''];
     $noPosix = ['-d', 'disable_functions=posix_geteuid,posix_getuid,posix_getegid,posix_getgid,posix_getpwuid'];
     $run = static fn (array $environment, array $phpOptions, array $script): array
-        => runCommand(['env', ...$environment, 'php', ...$noPosix, ...$phpOptions, ...$script], '', $directory);
+        => runCommand(['env', ...$environment, 'php', ...OPCACHE_ON_NEW_FILES, ...$noPosix, ...$phpOptions, ...$script], '', $directory);
     // bin/lua with LUAPHP_CACHE_DIR
     $cacheDirectory = "$directory/cache";
     assertSame($expected, $run(["LUAPHP_CACHE_DIR=$cacheDirectory"], [], [REPO_ROOT . '/bin/lua', 'hits.lua']));
@@ -303,16 +303,16 @@ function test_generated_scripts_default_to_a_private_directory_under_tmp(): void
     $expected = [0, "true\ttrue\n230\thits.lua:1: boom\n", ''];
     $temporary = newDirectory('cache-default/tmp');
     $cacheDirectory = "$temporary/luaphp-" . posix_geteuid();
-    assertSame($expected, runCommand(['env', '-u', 'LUAPHP_CACHE_DIR', "TMPDIR=$temporary", 'php', 'hits.php'], '', $directory));
+    assertSame($expected, runCommand(['env', '-u', 'LUAPHP_CACHE_DIR', "TMPDIR=$temporary", 'php', ...OPCACHE_ON_NEW_FILES, 'hits.php'], '', $directory));
     assertSame(040700, fileperms($cacheDirectory) & 0777777);
     assertSame(22, \count(entries($cacheDirectory)), 'one entry per load()');
-    assertSame($expected, runCommand(['env', '-u', 'LUAPHP_CACHE_DIR', "TMPDIR=$temporary", 'php', '-d', 'auto_prepend_file=' . GUARD, 'hits.php'], '', $directory));
+    assertSame($expected, runCommand(['env', '-u', 'LUAPHP_CACHE_DIR', "TMPDIR=$temporary", 'php', ...OPCACHE_ON_NEW_FILES, '-d', 'auto_prepend_file=' . GUARD, 'hits.php'], '', $directory));
 
     // a directory that is not private (here: world-writable) is not used
     $otherTemporary = newDirectory('cache-default/other-tmp');
     mkdir("$otherTemporary/luaphp-" . posix_geteuid(), 0777);
     chmod("$otherTemporary/luaphp-" . posix_geteuid(), 0777);
-    assertSame($expected, runCommand(['env', '-u', 'LUAPHP_CACHE_DIR', "TMPDIR=$otherTemporary", 'php', 'hits.php'], '', $directory));
+    assertSame($expected, runCommand(['env', '-u', 'LUAPHP_CACHE_DIR', "TMPDIR=$otherTemporary", 'php', ...OPCACHE_ON_NEW_FILES, 'hits.php'], '', $directory));
     assertSame([], entries("$otherTemporary/luaphp-" . posix_geteuid()));
 }
 
@@ -323,6 +323,6 @@ function test_cache_files_do_nothing_when_run_directly(): void
     runLua('hits.lua', $directory, "$directory/cache");
     assertSame(23, \count(entries("$directory/cache")));
     foreach (entries("$directory/cache") as $entry) {
-        assertSame([0, '', ''], runCommand(['php', $entry], '', $directory), basename($entry));
+        assertSame([0, '', ''], runCommand(['php', ...OPCACHE_ON_NEW_FILES, $entry], '', $directory), basename($entry));
     }
 }

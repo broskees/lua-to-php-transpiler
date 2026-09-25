@@ -7,6 +7,7 @@ namespace Tests\EmitterTest;
 use LuaPhp\Compiler\Compiler;
 use LuaPhp\Compiler\OpCodes;
 use LuaPhp\Emitter\Emitter;
+use LuaPhp\Emitter\FunctionEmitter;
 use LuaPhp\Runtime\Calls;
 use LuaPhp\Runtime\ChunkLoader;
 use LuaPhp\Runtime\Lua;
@@ -14,8 +15,10 @@ use LuaPhp\Runtime\Standalone;
 
 /*
  * The emitted PHP is meant to be read: every instruction carries a
- * "// [pc] OPNAME args ; line N" comment, jump targets are labels, and a
- * chunk is one factory expression.
+ * "// [pc] OPNAME args ; line N" comment (the instructions of a constant
+ * table constructor share one, "// [first..last] constant table
+ * constructor"), jump targets are labels, and a chunk is one factory
+ * expression.
  */
 
 function test_every_instruction_has_a_comment_with_pc_opcode_and_line(): void
@@ -23,12 +26,19 @@ function test_every_instruction_has_a_comment_with_pc_opcode_and_line(): void
     $source = "local t = {}\nfor i = 1, 3 do\n  t[i] = i * 2\nend\nif #t > 2 then print(t[3]) else print('no') end\nreturn function (x) return x + 1 end\n";
     $proto = Compiler::compile($source, '=emitter');
     $code = Emitter::emitChunk($proto);
-    foreach ([$proto, $proto->p[0]] as $function) {
+    foreach ([['0', $proto], ['0_0', $proto->p[0]]] as [$path, $function]) {
+        $functionCode = (new FunctionEmitter($function, $path))->emit();
+        $inConstructor = [];
+        preg_match_all('/\/\/ \[(\d+)\.\.(\d+)\] constant table constructor: \d+ instructions ; lines \d+-\d+\n/', $functionCode, $runs, PREG_SET_ORDER);
+        foreach ($runs as [, $first, $last]) {
+            $inConstructor += array_fill_keys(range((int) $first, (int) $last), true);
+        }
         foreach ($function->code as $pc => $instruction) {
             $name = OpCodes::OPNAMES[OpCodes::GET_OPCODE($instruction)];
-            assertTrue(preg_match('/\/\/ \[' . $pc . '\] ' . $name . ' [^\n]* ; line \d+\n/', $code) === 1, "comment for [$pc] $name");
+            assertTrue(isset($inConstructor[$pc]) || preg_match('/\/\/ \[' . $pc . '\] ' . $name . ' [^\n]* ; line \d+\n/', $functionCode) === 1, "comment for [$pc] $name");
         }
     }
+    assertTrue(str_contains($code, "// [1..5] constant table constructor: 5 instructions ; lines 1-2\n"), '{} and the loop limits: one comment');
     assertTrue(preg_match('/\/\/ \[\d+\] FORPREP \d+ \d+ ; line 2\n/', $code) === 1, 'FORPREP comment with its line');
     assertTrue(preg_match('/^    L\d+:$/m', $code) === 1, 'jump targets are labels');
     assertTrue(str_starts_with($code, 'static function (Proto $proto_0): \\Closure {'), 'factory expression');

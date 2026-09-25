@@ -29,7 +29,7 @@ function lua2php(array $arguments, ?string $workingDirectory = null): array
 function runGuarded(string $phpFile, string $workingDirectory, string $cacheDirectory, array $phpOptions = []): array
 {
     return runCommand(
-        ['env', "LUAPHP_CACHE_DIR=$cacheDirectory", 'php', ...$phpOptions, '-d', 'auto_prepend_file=' . GUARD, $phpFile],
+        ['env', "LUAPHP_CACHE_DIR=$cacheDirectory", 'php', ...OPCACHE_ON_NEW_FILES, ...$phpOptions, '-d', 'auto_prepend_file=' . GUARD, $phpFile],
         '',
         $workingDirectory,
     );
@@ -107,7 +107,7 @@ function test_project_transpiled_in_place_behaves_like_lua(): void
     );
     assertSame(
         normalized(runCommand(['lua5.4', 'lib/shapes/init.lua', 'a'], '', PROJECT), 'lua5.4'),
-        normalized(runCommand(['env', 'LUAPHP_CACHE_DIR=' . scratchDirectory() . '/aot-in-place-cache', 'php', 'lib/shapes/init.php', 'a'], '', $directory), 'lib/shapes/init.php'),
+        normalized(runCommand(['env', 'LUAPHP_CACHE_DIR=' . scratchDirectory() . '/aot-in-place-cache', 'php', ...OPCACHE_ON_NEW_FILES, 'lib/shapes/init.php', 'a'], '', $directory), 'lib/shapes/init.php'),
     );
 }
 
@@ -171,7 +171,7 @@ function test_load_compiles_only_on_a_cache_miss(): void
     // a new string: load() needs the compiler (the one exception to ahead of time)
     [$status, $stdout, $stderr] = runGuarded('loader.php', $directory, $cacheDirectory);
     assertSame([97, '', "GUARD: LuaPhp\\Compiler\\Compiler loaded at run time\n"], [$status, $stdout, $stderr]);
-    assertSame([0, "42\n", ''], runCommand(['env', "LUAPHP_CACHE_DIR=$cacheDirectory", 'php', 'loader.php'], '', $directory));
+    assertSame([0, "42\n", ''], runCommand(['env', "LUAPHP_CACHE_DIR=$cacheDirectory", 'php', ...OPCACHE_ON_NEW_FILES, 'loader.php'], '', $directory));
     // with the disk cache warm, the same load() compiles nothing
     assertSame([0, "42\n", ''], runGuarded('loader.php', $directory, $cacheDirectory));
 }
@@ -190,7 +190,7 @@ function test_lua_init_code_is_loaded_like_load(): void
     lua2php([$directory]);
     $cacheDirectory = "$directory/cache";
     $withInit = static fn (string $init, bool $guarded): array => runCommand(
-        ['env', "LUA_INIT=$init", "LUAPHP_CACHE_DIR=$cacheDirectory", 'php', ...($guarded ? ['-d', 'auto_prepend_file=' . GUARD] : []), 'hello.php'],
+        ['env', "LUA_INIT=$init", "LUAPHP_CACHE_DIR=$cacheDirectory", 'php', ...OPCACHE_ON_NEW_FILES, ...($guarded ? ['-d', 'auto_prepend_file=' . GUARD] : []), 'hello.php'],
         '',
         $directory,
     );

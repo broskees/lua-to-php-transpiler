@@ -40,6 +40,7 @@ final class Emitter
         . "use LuaPhp\\Runtime\\LuaClosureN;\n"
         . "use LuaPhp\\Runtime\\LuaTable;\n"
         . "use LuaPhp\\Runtime\\MetaMethods;\n"
+        . "use LuaPhp\\Runtime\\TableConstructor;\n"
         . "use LuaPhp\\Runtime\\Upvalues;\n"
         . "use LuaPhp\\Runtime\\Vm;\n";
 

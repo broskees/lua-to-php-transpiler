@@ -98,7 +98,7 @@ function assertSameAsReference(string $directory, string $name, string $script, 
     ];
     foreach ($configurations as $configuration => $phpOptions) {
         foreach ([[$ourProgram, $name], [$transpiled]] as $arguments) {
-            $actual = runCommand([...$prefix, 'php', ...$phpOptions, ...$arguments], '', $directory);
+            $actual = runCommand([...$prefix, 'php', ...OPCACHE_ON_NEW_FILES, ...$phpOptions, ...$arguments], '', $directory);
             assertSame($expected, $normalize($actual, $arguments[0]), "$name, " . basename($arguments[0]) . ", $configuration");
         }
     }

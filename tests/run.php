@@ -20,12 +20,35 @@ declare(strict_types=1);
  *   directly; scratch files go in scratchDirectory(), removed at exit.
  *
  * Exit status is 1 if any test fails.
+ *
+ * C stack: the runner and every process it starts run with an 8 MB stack,
+ * the usual default (it runs itself again under `ulimit -s 8192` when the
+ * limit differs). A bigger stack, like the 16 MB of some shells, hides PHP
+ * crashing in its own recursion: opcache's optimizer recurses about once
+ * per basic block of a function, so a huge generated function segfaults
+ * (exit 139) at 8 MB and passes at 16 MB.
  */
+
+const TEST_STACK_BYTES = 8 * 1024 * 1024;
+$limits = @file_get_contents('/proc/self/limits');
+if ($limits !== false && preg_match('/^Max stack size +(\S+)/m', $limits, $match) && $match[1] !== (string) TEST_STACK_BYTES) {
+    // the same command line (with php's own -d options) under the usual stack
+    $commandLine = explode("\0", rtrim(file_get_contents('/proc/self/cmdline'), "\0"));
+    passthru('ulimit -s ' . (TEST_STACK_BYTES >> 10) . ' && exec ' . implode(' ', array_map('escapeshellarg', $commandLine)), $status);
+    exit($status);
+}
 
 require __DIR__ . '/../src/autoload.php';
 
 const REPO_ROOT = __DIR__ . '/..';
 const OFFICIAL_TESTS_DIRECTORY = REPO_ROOT . '/reference/lua-5.4.9-tests';
+
+/**
+ * php options for a process that runs files a test has just generated or
+ * cached: opcache compiles and optimizes them, where by default it skips
+ * files younger than opcache.file_update_protection (2 seconds).
+ */
+const OPCACHE_ON_NEW_FILES = ['-d', 'opcache.enable_cli=1', '-d', 'opcache.file_update_protection=0'];
 
 final class AssertionFailed extends \RuntimeException
 {
