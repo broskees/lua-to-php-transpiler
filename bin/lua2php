@@ -109,9 +109,12 @@ function transpile(string $inputFile, string $scriptName): array
     $commentSafeScript = PhpLiteral::commentText($scriptName, 200);
     $commentSafeRuntime = PhpLiteral::commentText($runtimeAutoload, 300);
 
-    $header = ChunkLoader::PRECOMPILED_HEADER;  // the runtime includes no other PHP file
+    // the runtime includes no other PHP file, and this one only for this Lua file
+    $slash = strrpos($inputFile, '/');
+    $header = ChunkLoader::PRECOMPILED_HEADER . rawurlencode($slash === false ? $inputFile : substr($inputFile, $slash + 1));
     $php = <<<PHP
-        {$header}from $commentSafeInput. Do not edit.
+        $header
+        // ($commentSafeInput). Do not edit.
         //
         // Run it like the Lua script:   php <this file> args...
         // (behaves like 'lua5.4 $commentSafeScript args...'; in the 'arg' table,

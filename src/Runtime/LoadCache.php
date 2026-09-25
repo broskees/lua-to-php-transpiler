@@ -29,10 +29,13 @@ use LuaPhp\Emitter\PhpLiteral;
  *
  * Disk entries are "<sha256>.php", the hash of a fingerprint of this
  * code (every PHP file under src/ and the PHP version), the chunk name and
- * the chunk: an entry written by other code is never found. The directory
- * must be private: owned by this process's user, no permissions for
- * others, not a symbolic link; it is created (mode 0700) if missing.
- * Otherwise there is no disk cache, silently. Robustness:
+ * the chunk: an entry written by other code is never found. Like ssh's
+ * StrictModes, no other user may be able to change or replace the
+ * directory: it must be ours, have no group/other permissions and not be a
+ * symbolic link, and every directory above it must be owned by root or us
+ * and not writable by group/others unless sticky (as /tmp is). It is
+ * created (mode 0700) if missing, checked once per process, and then used
+ * by its real path. Otherwise there is no disk cache, silently. Robustness:
  *
  * - a write is a temporary file renamed into place, so a reader never
  *   includes half an entry;
@@ -64,10 +67,15 @@ final class LoadCache
     /** @var array<string, array{?string, int, \Closure}> key => [Protos as a binary chunk, parser nesting, factory] */
     private static array $memory = [];
 
+    /** the disk cache directory set (absolute, no trailing slash), null for none or the default */
     private static ?string $directory = null;
 
-    /** whether $directory is usable; null until checked */
-    private static ?bool $directoryUsable = null;
+    private static bool $useDefaultDirectory = false;
+
+    private static bool $directoryChecked = false;
+
+    /** the real path of the disk cache directory once it passed the checks, else null */
+    private static ?string $trustedDirectory = null;
 
     private static ?string $fingerprint = null;
 
@@ -77,26 +85,28 @@ final class LoadCache
      */
     public static function useDirectory(?string $directory): void
     {
-        if ($directory !== null && $directory !== '' && $directory[0] !== '/') {
-            $directory = (getcwd() ?: '.') . '/' . $directory;  // include must not search include_path
+        if ($directory !== null && $directory !== '') {
+            if ($directory[0] !== '/') {
+                $directory = (getcwd() ?: '.') . '/' . $directory;
+            }
+            $directory = rtrim($directory, '/') ?: '/';  // "link/" would make lstat follow the link
         }
         self::$directory = $directory === '' ? null : $directory;
-        self::$directoryUsable = null;
+        self::$useDefaultDirectory = false;
+        self::$directoryChecked = false;
+        self::$trustedDirectory = null;
         self::$memory = [];
     }
 
     /**
-     * The disk cache directory of scripts bin/lua2php generates when
+     * Uses the disk cache directory of scripts bin/lua2php generates when
      * LUAPHP_CACHE_DIR is not set: "luaphp-<uid>" in the system's
-     * temporary directory. Null without the posix extension (no way to
-     * tell whose a directory is).
+     * temporary directory (found when first needed).
      */
-    public static function defaultDirectory(): ?string
+    public static function useDefaultDirectory(): void
     {
-        if (!\function_exists('posix_geteuid')) {
-            return null;
-        }
-        return rtrim(sys_get_temp_dir(), '/') . '/luaphp-' . posix_geteuid();
+        self::useDirectory(null);
+        self::$useDefaultDirectory = true;
     }
 
     /** the key of $chunk loaded with chunk name $chunkname */
@@ -175,7 +185,7 @@ final class LoadCache
         }
         ob_start();  // a corrupt entry may print
         try {
-            $entry = @include self::$directory . '/' . self::fileName($key);
+            $entry = @include self::$trustedDirectory . '/' . self::fileName($key);
         } catch (\Throwable) {
             return null;
         } finally {
@@ -210,7 +220,7 @@ final class LoadCache
         if ($size > self::$diskByteLimit) {
             return;
         }
-        $directory = self::$directory;
+        $directory = self::$trustedDirectory;
         $usage = @fopen("$directory/" . self::USAGE_FILE, 'c+');
         if ($usage === false) {
             return;
@@ -275,29 +285,68 @@ final class LoadCache
 
     private static function directoryIsUsable(): bool
     {
-        self::$directoryUsable ??= self::$directory !== null && self::isPrivateDirectory(self::$directory);
-        return self::$directoryUsable;
+        if (!self::$directoryChecked) {
+            self::$directoryChecked = true;
+            if (self::$directory !== null || self::$useDefaultDirectory) {
+                $uid = self::effectiveUid();
+                if ($uid !== null) {
+                    $directory = self::$directory ?? rtrim(sys_get_temp_dir(), '/') . "/luaphp-$uid";
+                    self::$trustedDirectory = self::trustedDirectory($directory, $uid);
+                }
+            }
+        }
+        return self::$trustedDirectory !== null;
     }
 
     /**
-     * Creates $directory (mode 0700) if missing; true if it is a directory
-     * (not a symbolic link) owned by this process's user with no
-     * permissions for group or others.
+     * The effective uid of this process: the owner of a file it creates.
+     * (No posix extension needed: shared hosts often disable it.) Null if
+     * no file can be created.
      */
-    private static function isPrivateDirectory(string $directory): bool
+    private static function effectiveUid(): ?int
     {
-        if (!\function_exists('posix_geteuid')) {
-            return false;
+        $file = @tmpfile();
+        if ($file === false) {
+            return null;
         }
+        $status = @fstat($file);
+        fclose($file);
+        return \is_array($status) ? $status['uid'] : null;
+    }
+
+    /**
+     * Creates $directory (mode 0700) if missing, and returns its real path
+     * if no user but us (and root) can change or replace it (see the class
+     * comment), else null.
+     */
+    private static function trustedDirectory(string $directory, int $uid): ?string
+    {
         if (!is_dir($directory) && !@mkdir($directory, 0700, true) && !is_dir($directory)) {
-            return false;
+            return null;
         }
-        clearstatcache(true, $directory);
+        clearstatcache();
         $status = @lstat($directory);
-        return $status !== false
-            && ($status['mode'] & 0170000) === 0040000
-            && $status['uid'] === posix_geteuid()
-            && ($status['mode'] & 0077) === 0;
+        if ($status === false || ($status['mode'] & 0170000) !== 0040000) {
+            return null;  // gone, or a symbolic link
+        }
+        $realDirectory = realpath($directory);  // resolves symbolic links above it
+        $status = $realDirectory === false ? false : @lstat($realDirectory);
+        if ($status === false || ($status['mode'] & 0170000) !== 0040000 || $status['uid'] !== $uid || ($status['mode'] & 0077) !== 0) {
+            return null;
+        }
+        $ancestor = $realDirectory;
+        do {
+            $ancestor = \dirname($ancestor);
+            $status = @lstat($ancestor);
+            if (
+                $status === false
+                || ($status['uid'] !== 0 && $status['uid'] !== $uid)
+                || (($status['mode'] & 0022) !== 0 && ($status['mode'] & 01000) === 0)  // writable by others, not sticky
+            ) {
+                return null;
+            }
+        } while ($ancestor !== '/');
+        return $realDirectory;
     }
 
     /**

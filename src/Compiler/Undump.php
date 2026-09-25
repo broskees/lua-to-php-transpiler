@@ -55,8 +55,9 @@ final class Undump
      *
      * Each string loaded is a new string, as C's long strings are
      * (loadStringN). $shareEqualStrings makes equal strings one string
-     * instead, as the lexer does (llex.c: luaX_newstring): for bin/lua2php,
-     * whose binary chunk stands for the source it compiled.
+     * instead, as the lexer does (llex.c: luaX_newstring; not the source
+     * name): for chunks whose binary chunk stands for the source it
+     * compiled (bin/lua2php, LoadCache).
      *
      * @throws CompileError "<name>: bad binary format (<why>)"
      */
@@ -152,8 +153,13 @@ final class Undump
         return unpack('P', $this->loadBlock(8))[1];
     }
 
-    // lundump.c: loadStringN (nullable string)
-    private function loadStringN(): ?string
+    /**
+     * lundump.c: loadStringN (nullable string). $lexerString: a string the
+     * lexer would make (constants, names of locals and upvalues), which
+     * $shareEqualStrings shares; the source name is not one (lparser.c:
+     * luaY_parser makes it apart from the lexer's strings).
+     */
+    private function loadStringN(bool $lexerString = true): ?string
     {
         $size = $this->loadSize();
         if ($size === 0) {
@@ -163,7 +169,7 @@ final class Undump
             $this->error('truncated chunk');
         }
         $string = $this->loadBlock($size - 1);
-        if ($this->shareEqualStrings) {
+        if ($this->shareEqualStrings && $lexerString) {
             return $this->sharedStrings[$string] ??= $string;
         }
         return $string;
@@ -270,7 +276,7 @@ final class Undump
     // lundump.c: loadFunction
     private function loadFunction(Proto $f, ?string $parentSource): void
     {
-        $f->source = $this->loadStringN();
+        $f->source = $this->loadStringN(lexerString: false);
         if ($f->source === null) {  // no source in dump?
             $f->source = $parentSource;  // reuse parent's source
         }

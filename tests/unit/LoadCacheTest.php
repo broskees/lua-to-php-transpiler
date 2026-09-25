@@ -213,6 +213,10 @@ function test_the_cache_directory_must_be_private(): void
     chmod("$directory/shared", 0700);
     assertSame($expected, runLua('hits.lua', $directory, "$directory/link"));
     assertSame(['.', '..'], scandir("$directory/shared"), 'a symbolic link is not used');
+    assertSame($expected, runLua('hits.lua', $directory, "$directory/link/"));
+    assertSame(['.', '..'], scandir("$directory/shared"), 'a symbolic link is not used with a trailing slash either');
+    assertSame($expected, runLua('hits.lua', $directory, "$directory/link//"));
+    assertSame(['.', '..'], scandir("$directory/shared"), 'nor with two');
 
     file_put_contents("$directory/file", '');
     assertSame($expected, runLua('hits.lua', $directory, "$directory/file/cache"), 'a directory that cannot be created: silently no cache');
@@ -220,6 +224,75 @@ function test_the_cache_directory_must_be_private(): void
     assertSame($expected, runLua('hits.lua', $directory, "$directory/new/cache"));
     assertSame(040700, fileperms("$directory/new/cache") & 0777777, 'created private');
     assertTrue(entries("$directory/new/cache") !== []);
+}
+
+/**
+ * Like ssh's StrictModes: no other user may be able to replace the cache
+ * directory, so it and every directory above it must be owned by root or
+ * by us and not writable by others unless sticky (as /tmp is).
+ */
+function test_a_cache_directory_others_could_replace_is_not_used(): void
+{
+    $directory = newDirectory('cache-replace');
+    // the name of the entry for this chunk (the same in any cache directory)
+    $trusted = newDirectory('cache-replace/trusted');
+    LoadCache::useDirectory($trusted);
+    try {
+        $L = Standalone::newStateWithLibraries();
+        ChunkLoader::load($L, 'return 42', '=victim', null);
+        $entryName = basename(entries($trusted)[0]);
+
+        // a parent directory others can write to (not sticky): they could
+        // rename our cache directory away and put theirs in its place
+        mkdir("$directory/open", 0777);
+        chmod("$directory/open", 0777);
+        LoadCache::useDirectory("$directory/open/cache");
+        ChunkLoader::load($L, 'return 1', '=first', null);  // the check happens here, once
+        assertSame([], glob("$directory/open/cache/*.php"), 'not used');
+        if (is_dir("$directory/open/cache")) {
+            rename("$directory/open/cache", "$directory/open/ours");
+        }
+        mkdir("$directory/open/cache", 0777);
+        $marker = "$directory/foreign-code-ran";
+        file_put_contents("$directory/open/cache/$entryName", '<?php file_put_contents(' . var_export($marker, true) . ', "x"); return null;');
+        assertSame([0, [42]], Standalone::docall($L, ChunkLoader::load($L, 'return 42', '=victim', null), []));
+        assertTrue(!file_exists($marker), 'a replaced cache directory is never included from');
+
+        // group-writable is refused too; a sticky world-writable parent is fine
+        mkdir("$directory/group", 0770);
+        chmod("$directory/group", 0770);
+        LoadCache::useDirectory("$directory/group/cache");
+        ChunkLoader::load($L, 'return 2', '=second', null);
+        assertSame([], glob("$directory/group/cache/*.php"), 'a group-writable parent: not used');
+        mkdir("$directory/sticky", 0777);
+        chmod("$directory/sticky", 01777);
+        LoadCache::useDirectory("$directory/sticky/cache");
+        ChunkLoader::load($L, 'return 3', '=third', null);
+        assertSame(1, \count(glob("$directory/sticky/cache/*.php")), 'a sticky parent: used');
+    } finally {
+        LoadCache::useDirectory(null);
+    }
+}
+
+function test_the_disk_cache_works_without_posix_functions(): void
+{
+    $directory = newDirectory('cache-no-posix');
+    file_put_contents("$directory/hits.lua", HITS_SCRIPT);
+    $expected = [0, "true\ttrue\n230\thits.lua:1: boom\n", ''];
+    $noPosix = ['-d', 'disable_functions=posix_geteuid,posix_getuid,posix_getegid,posix_getgid,posix_getpwuid'];
+    $run = static fn (array $environment, array $phpOptions, array $script): array
+        => runCommand(['env', ...$environment, 'php', ...$noPosix, ...$phpOptions, ...$script], '', $directory);
+    // bin/lua with LUAPHP_CACHE_DIR
+    $cacheDirectory = "$directory/cache";
+    assertSame($expected, $run(["LUAPHP_CACHE_DIR=$cacheDirectory"], [], [REPO_ROOT . '/bin/lua', 'hits.lua']));
+    assertSame(23, \count(entries($cacheDirectory)));
+    assertSame($expected, $run(["LUAPHP_CACHE_DIR=$cacheDirectory"], ['-d', 'auto_prepend_file=' . GUARD], [REPO_ROOT . '/bin/lua', 'hits.lua']));
+    // a generated script's default directory
+    runCommand(['php', REPO_ROOT . '/bin/lua2php', 'hits.lua'], '', $directory);
+    $temporary = newDirectory('cache-no-posix/tmp');
+    assertSame($expected, $run(['-u', 'LUAPHP_CACHE_DIR', "TMPDIR=$temporary"], [], ['hits.php']));
+    assertSame(22, \count(entries("$temporary/luaphp-" . posix_geteuid())), 'luaphp-<uid> without posix');
+    assertSame($expected, $run(['-u', 'LUAPHP_CACHE_DIR', "TMPDIR=$temporary"], ['-d', 'auto_prepend_file=' . GUARD], ['hits.php']));
 }
 
 function test_generated_scripts_default_to_a_private_directory_under_tmp(): void

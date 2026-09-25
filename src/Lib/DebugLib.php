@@ -323,7 +323,8 @@ final class DebugLib
                 return [];
             }
             try {
-                $chunk = ChunkLoader::load($L, DebugInfo::cString($line), '=(debug command)', null);  // luaL_loadbuffer
+                // luaL_loadbuffer: code that exists only at run time, so also in lua2php output (through load()'s cache)
+                $chunk = ChunkLoader::load($L, DebugInfo::cString($line), '=(debug command)', null);
                 [$status, $value] = Calls::protectedCall($L, $chunk, []);
             } catch (LuaError $error) {  // syntax error
                 $status = $error->status;

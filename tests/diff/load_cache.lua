@@ -50,6 +50,13 @@ for _ = 1, 2 do
   print(info.source, info.short_src, info.linedefined, info.lastlinedefined, debug.getupvalue(f, 1))
 end
 
+-- the chunk name is never one of the chunk's strings, even when equal to one
+local name = string.rep("X", 50)
+for i = 1, 2 do
+  local f = load("return '" .. name .. "'", name)
+  print(i, p(debug.getinfo(f, "S").source) == p(f()))
+end
+
 -- environments and upvalues belong to each load
 local e1 = load("x = (x or 0) + 1; return x", "=env", "t", {x = 10})
 local e2 = load("x = (x or 0) + 1; return x", "=env", "t", {x = 20})

@@ -170,22 +170,31 @@ Lua string keys and integer keys distinct.
   Protos as a binary chunk, parser nesting, or the load error of a file that
   did not compile. In its scripts (`GlobalState::$filesArePrecompiled`)
   require/dofile/loadfile resolve names as Lua does (a file counts as found
-  when its .php exists) and `ChunkLoader::loadPrecompiled` sets the chunk name
-  at load time; a Lua file without its .php (written at run time, stdin) is a
-  LuaError "not transpiled ahead of time". Only `load()` compiles there.
+  when its .php exists and was generated from it: the header records the
+  Lua file's name, since "x" and "x.lua" share x.php) and
+  `ChunkLoader::loadPrecompiled` sets the chunk name at load time; a Lua
+  file without its .php (written at run time, stdin) is a LuaError "not
+  transpiled ahead of time". Only `load()` compiles there, and so do the
+  other luaL_loadbuffer calls on code that exists only at run time: the
+  commands of debug.debug() and a string LUA_INIT go through `load()` and
+  its cache; `LUA_INIT=@file` loads the precompiled file.
   `bin/lua` still compiles files on the fly.
   The load cache (`LoadCache`): key = chunk name + exact bytes. A hit undumps
-  fresh Protos sharing equal strings like a compile (two loads look like two
-  compiles to '%p') and is used only where compiling at the current C-call
+  fresh Protos sharing equal strings like the lexer (not the source name;
+  two loads look like two compiles to '%p') and is used only where
+  compiling at the current C-call
   depth would succeed (`ChunkLoader::nestingError`); failed compiles are not
   cached. In memory (1000 entries), and on disk when a directory is set: one
   PHP file per chunk named by sha256(fingerprint of src/ + PHP version, key),
   loaded with include so opcache and the JIT apply. lua2php scripts use
   `LUAPHP_CACHE_DIR`, else `sys_get_temp_dir()/luaphp-<euid>`; bin/lua only
-  `LUAPHP_CACHE_DIR`. A directory that is not private (ours, no group/other
-  bits, not a symlink) is not used. Writes are temp file + rename under the
-  flock of its `usage` counter, which empties the directory before it passes
-  20000 entries or 256 MB.
+  `LUAPHP_CACHE_DIR` (the uid comes from a file's owner: no posix needed).
+  As ssh's StrictModes, once per process: the directory must be ours, have
+  no group/other bits and not be a symlink, and every directory above it
+  must be root's or ours and not group/other-writable unless sticky; else no
+  disk cache. It is then used by its real path. Writes are temp file +
+  rename under the flock of its `usage` counter, which empties the directory
+  before it passes 20000 entries or 256 MB.
 - **Emitted function** (one per Proto): `static function (Coroutine $L,
   LuaClosure $cl, array $R, int $callstatus = 0) use ($proto_<path>,
   $function_<path>...): ?array`. `$R` is the register file; the incoming

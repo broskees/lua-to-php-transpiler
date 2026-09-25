@@ -276,7 +276,8 @@ final class PackageLib
      * With $precompiledFiles (scripts bin/lua2php generates, see
      * ChunkLoader::loadFile) a file whose precompiled PHP exists counts
      * as readable too: the Lua file need not be there. Another PHP file
-     * there does not count.
+     * there, or the precompiled file of another name ("x" and "x.lua"
+     * share x.php), does not count.
      *
      * @return array{?string, ?string}
      */
@@ -293,7 +294,7 @@ final class PackageLib
         // add path to the buffer, replacing marks ('?') with the file name
         $pathName = str_replace(self::LUA_PATH_MARK, $name, $path);
         foreach (self::fileNames($pathName) as $filename) {
-            if (($precompiledFiles && ChunkLoader::isPrecompiledFile(ChunkLoader::precompiledFileName($filename))) || self::readable($filename)) {  // does file exist and is readable?
+            if (($precompiledFiles && ChunkLoader::hasPrecompiledFile($filename)) || self::readable($filename)) {  // does file exist and is readable?
                 return [$filename, null];  // return that name
             }
         }

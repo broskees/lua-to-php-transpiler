@@ -77,6 +77,10 @@ function test_project_transpiled_to_another_directory_behaves_like_lua(): void
     assertSame(1, $reference[0]);
     $ours = normalized(runGuarded('main.php', $outputDirectory, scratchDirectory() . '/aot-out-cache'), 'main.php');
     assertSame($reference, $ours);
+    assertSame(
+        normalized(runCommand(['lua5.4', 'paths.lua'], '', PROJECT), 'lua5.4'),
+        normalized(runGuarded('paths.php', $outputDirectory, scratchDirectory() . '/aot-out-cache'), 'paths.php'),
+    );
 }
 
 function test_project_transpiled_in_place_behaves_like_lua(): void
@@ -92,6 +96,10 @@ function test_project_transpiled_in_place_behaves_like_lua(): void
     $reference = normalized(runCommand(['lua5.4', 'main.lua'], '', PROJECT), 'lua5.4');
     $ours = normalized(runGuarded('main.php', $directory, scratchDirectory() . '/aot-in-place-cache'), 'main.php');
     assertSame($reference, $ours);
+    assertSame(
+        normalized(runCommand(['lua5.4', 'paths.lua'], '', PROJECT), 'lua5.4'),
+        normalized(runGuarded('paths.php', $directory, scratchDirectory() . '/aot-in-place-cache'), 'paths.php'),
+    );
     // every generated file also runs as a script, as `lua5.4 file.lua` does
     assertSame(
         normalized(runCommand(['lua5.4', 'broken.lua'], '', PROJECT), 'lua5.4'),
@@ -166,6 +174,30 @@ function test_load_compiles_only_on_a_cache_miss(): void
     assertSame([0, "42\n", ''], runCommand(['env', "LUAPHP_CACHE_DIR=$cacheDirectory", 'php', 'loader.php'], '', $directory));
     // with the disk cache warm, the same load() compiles nothing
     assertSame([0, "42\n", ''], runGuarded('loader.php', $directory, $cacheDirectory));
+}
+
+/**
+ * A string LUA_INIT is code that exists only at run time, like debug.debug()'s
+ * commands: it goes through load() and its cache. LUA_INIT=@file loads the
+ * precompiled file.
+ */
+function test_lua_init_code_is_loaded_like_load(): void
+{
+    $directory = scratchDirectory() . '/aot-init';
+    mkdir($directory);
+    file_put_contents("$directory/hello.lua", "print('hello')\n");
+    file_put_contents("$directory/init.lua", "print('init file')\n");
+    lua2php([$directory]);
+    $cacheDirectory = "$directory/cache";
+    $withInit = static fn (string $init, bool $guarded): array => runCommand(
+        ['env', "LUA_INIT=$init", "LUAPHP_CACHE_DIR=$cacheDirectory", 'php', ...($guarded ? ['-d', 'auto_prepend_file=' . GUARD] : []), 'hello.php'],
+        '',
+        $directory,
+    );
+    assertSame([97, '', "GUARD: LuaPhp\\Compiler\\Compiler loaded at run time\n"], $withInit("print('init code')", true));
+    assertSame([0, "init code\nhello\n", ''], $withInit("print('init code')", false));
+    assertSame([0, "init code\nhello\n", ''], $withInit("print('init code')", true));
+    assertSame([0, "init file\nhello\n", ''], $withInit('@init.lua', true));
 }
 
 function test_jit_is_switched_on_only_when_the_host_left_it_available(): void

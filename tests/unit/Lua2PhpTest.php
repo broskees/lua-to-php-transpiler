@@ -6,10 +6,11 @@ namespace Tests\Lua2PhpTest;
 
 /*
  * bin/lua2php: tests/diff is transpiled as one project (so modules/ is
- * precompiled too); `php out.php args`, run from the output directory,
- * must behave like `lua5.4 in.lua args` run from tests/diff (same exit
- * status and stdout; stderr equal up to the program name). The cases that
- * load() chunks run a second time with the load cache warm.
+ * precompiled too, and its other files are copied along); `php out.php
+ * args`, run from the output directory, must behave like `lua5.4 in.lua
+ * args` run from tests/diff (same exit status and stdout; stderr equal up
+ * to the program name). The cases that load() chunks run a second time
+ * with the load cache warm.
  */
 
 /**
@@ -38,6 +39,15 @@ function test_transpiled_diff_cases_behave_like_lua(): void
     [$status, , $errorOutput] = runCommand(['php', REPO_ROOT . '/bin/lua2php', $diffDirectory, '-o', $outputDirectory]);
     assertSame(1, $status, 'modules/syntax_error.lua does not compile');
     assertSame(REPO_ROOT . "/bin/lua2php: modules/syntax_error.lua:1: unexpected symbol near '='\n", $errorOutput);
+    // the project's other files (data the cases read) go along, as a deployment would copy them
+    $iterator = new \RecursiveIteratorIterator(new \RecursiveDirectoryIterator($diffDirectory, \FilesystemIterator::SKIP_DOTS));
+    foreach ($iterator as $file) {
+        if (!str_ends_with($file->getFilename(), '.lua')) {
+            $copy = $outputDirectory . substr($file->getPathname(), \strlen($diffDirectory));
+            @mkdir(\dirname($copy), 0777, true);
+            assertTrue(copy($file->getPathname(), $copy), "copy $file");
+        }
+    }
     $files = glob($diffDirectory . '/*.lua');
     sort($files);
     $arguments = ['first', 'second arg'];

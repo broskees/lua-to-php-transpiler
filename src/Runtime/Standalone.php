@@ -133,9 +133,10 @@ final class Standalone
             return Lua::LUA_OK;
         }
         if (str_starts_with($init, '@')) {
-            $filename = substr($init, 1);
+            $filename = substr($init, 1);  // precompiled in lua2php output, like any file
             return self::doChunk($L, $programName, static fn (): LuaClosure => ChunkLoader::loadFile($L, $filename, null));
         }
+        // code that exists only at run time: load(), and its cache, also in lua2php output
         return self::doChunk($L, $programName, static fn (): LuaClosure => ChunkLoader::load($L, $init, $name, null));
     }
 
@@ -181,7 +182,7 @@ final class Standalone
      * PHP script); in 'arg', index 0 is $scriptName and -1 is the PHP
      * script. $chunk is the script's chunk (see ChunkLoader::loadPrecompiled).
      * Files are precompiled too (ChunkLoader::loadFile); load() caches on
-     * disk in LUAPHP_CACHE_DIR, else in LoadCache::defaultDirectory().
+     * disk in LUAPHP_CACHE_DIR, else in LoadCache's default directory.
      * Returns the process exit status.
      *
      * @param list<string> $argv
@@ -190,7 +191,11 @@ final class Standalone
     {
         self::switchJitOn();
         $cacheDirectory = getenv('LUAPHP_CACHE_DIR');
-        LoadCache::useDirectory(\is_string($cacheDirectory) && $cacheDirectory !== '' ? $cacheDirectory : LoadCache::defaultDirectory());
+        if (\is_string($cacheDirectory) && $cacheDirectory !== '') {
+            LoadCache::useDirectory($cacheDirectory);
+        } else {
+            LoadCache::useDefaultDirectory();
+        }
         $programName = $argv[0] ?? 'lua';
         $L = Coroutine::newState();
         $L->globalState->filesArePrecompiled = true;
