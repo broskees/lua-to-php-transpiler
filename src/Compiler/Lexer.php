@@ -138,6 +138,9 @@ final class Lexer
     /** lstate.h: getCcalls(L), the C-stack depth that enterlevel counts */
     public int $nCcalls;
 
+    /** the deepest $nCcalls enterlevel reached (see Compiler::compile's $nesting) */
+    public int $deepestNCcalls;
+
     /** buffer for tokens (C 'Mbuffer') */
     private string $buffer = '';
 
@@ -157,6 +160,7 @@ final class Lexer
         $this->inputLength = strlen($input);
         $this->source = $source;
         $this->nCcalls = $nCcallsAtEntry;
+        $this->deepestNCcalls = $nCcallsAtEntry;
         $this->t = new Token();
         $this->lookahead = new Token();
         $this->lookahead->token = self::TK_EOS;  // no look-ahead token

@@ -3,23 +3,36 @@
 
 declare(strict_types=1);
 
-// bin/lua2php: transpile a Lua 5.4 script to a PHP script.
+// bin/lua2php: transpile Lua 5.4 to PHP ahead of time.
 //
-//     bin/lua2php in.lua [-o out.php]      (default output: in.php)
+//     bin/lua2php in.lua [-o out.php]   one file (default output: in.php)
+//     bin/lua2php dir [-o outdir]        every *.lua under dir, each to the same
+//                                        relative path with .php (default: next to it)
 //
-// `php out.php args...` then behaves like `lua5.4 in.lua args...`. The
-// output holds the emitted PHP functions, the script's Proto as a binary
-// chunk (for debug information and long string constants) and a bootstrap
-// that loads the LuaPhp runtime; its header says how the runtime is found.
+// Every generated file runs as a script: `php out.php args...` behaves like
+// `lua5.4 in.lua args...`, where in.lua is the input path as given or, in
+// directory mode, the path relative to dir (run a project from its root).
+// The runtime also loads generated files for require, dofile and loadfile:
+// the Lua file x.lua is found as x.php (other names get .php appended; see
+// ChunkLoader::precompiledFileName), and no Lua file is compiled at run
+// time. Only load() of a string or reader function compiles (and caches).
+//
+// Syntax errors: in single-file mode lua2php reports the error and writes
+// nothing. In directory mode it reports each error on stderr, still writes
+// every file (one that did not compile raises exactly Lua's load error when
+// the program loads it), and exits with status 1.
 
 require __DIR__ . '/../src/autoload.php';
 
+use LuaPhp\Compiler\ChunkId;
 use LuaPhp\Compiler\CompileError;
 use LuaPhp\Compiler\Compiler;
 use LuaPhp\Compiler\Dump;
 use LuaPhp\Compiler\Undump;
 use LuaPhp\Emitter\Emitter;
 use LuaPhp\Emitter\PhpLiteral;
+use LuaPhp\Runtime\ChunkLoader;
+use LuaPhp\Runtime\Lua;
 
 $programName = (isset($argv[0]) && $argv[0] !== '') ? $argv[0] : 'lua2php';
 
@@ -33,113 +46,184 @@ function fail(string $message): never
 function usage(string $message): never
 {
     global $programName;
-    fwrite(STDERR, "$programName: $message\nusage: $programName input.lua [-o output.php]\n");
+    fwrite(STDERR, "$programName: $message\nusage: $programName input.lua [-o output.php]\n       $programName directory [-o output-directory]\n");
     exit(1);
 }
 
-$inputFile = null;
-$outputFile = null;
+/**
+ * The PHP file for the Lua file $inputFile, run as the script
+ * $scriptName: [PHP source, null], or [PHP source that raises the load
+ * error, error message] when it does not compile. Null source: the file
+ * cannot be read.
+ *
+ * @return array{?string, ?string}
+ */
+function transpile(string $inputFile, string $scriptName): array
+{
+    // lauxlib.c: luaL_loadfilex (skip a UTF-8 BOM and a first line starting with '#')
+    $contents = is_dir($inputFile) ? false : @file_get_contents($inputFile);
+    if ($contents === false) {
+        return [null, "cannot open $inputFile"];
+    }
+    $position = str_starts_with($contents, "\xEF\xBB\xBF") ? 3 : 0;
+    $prefix = '';
+    if (($contents[$position] ?? '') === '#') {
+        $newlinePosition = strpos($contents, "\n", $position);
+        $position = $newlinePosition === false ? strlen($contents) : $newlinePosition + 1;
+        $prefix = "\n";  // keep line numbers
+    }
+    $chunk = substr($contents, $position);
+    $chunkname = '@' . $scriptName;
+    $isBinaryInput = ($chunk[0] ?? '') === Undump::LUA_SIGNATURE[0];
+    $proto = null;
+    $nesting = 0;
+    $errorLiteral = 'null';
+    $errorMessage = null;
+    try {
+        $proto = $isBinaryInput
+            ? Undump::undump($chunk, $chunkname)
+            : Compiler::compile($prefix . $chunk, $chunkname, Compiler::MAIN_CHUNK_C_CALLS, $nesting);
+    } catch (CompileError $error) {
+        // raised again when the file is loaded, with the chunk name it is loaded as
+        $errorMessage = $error->getMessage();
+        $status = match ($error->getCode()) {
+            Lua::LUA_ERRRUN => Lua::LUA_ERRRUN,
+            Lua::LUA_ERRERR => Lua::LUA_ERRERR,
+            default => Lua::LUA_ERRSYNTAX,
+        };
+        $name = $isBinaryInput ? Undump::nameForErrors($chunkname) : ChunkId::of($chunkname);
+        $followsName = str_starts_with($errorMessage, $name . ':');
+        $storedMessage = $followsName ? substr($errorMessage, strlen($name)) : $errorMessage;
+        $errorLiteral = "[$status, " . PhpLiteral::string($storedMessage) . ', ' . ($followsName ? 'true' : 'false') . ']';
+    }
+
+    $runtimeAutoload = realpath(__DIR__ . '/../src/autoload.php');
+    $preamble = Emitter::PREAMBLE;
+    $format = PhpLiteral::string(ChunkLoader::PRECOMPILED_FORMAT);
+    $binary = $isBinaryInput ? 'true' : 'false';
+    $protos = $proto === null ? 'null' : PhpLiteral::string(Dump::dump($proto, false));
+    $factory = $proto === null ? 'null' : Emitter::emitChunk($proto);
+    $scriptNameLiteral = PhpLiteral::string($scriptName);
+    $runtimeLiteral = PhpLiteral::string($runtimeAutoload);
+    $commentSafeInput = PhpLiteral::commentText($inputFile, 200);
+    $commentSafeScript = PhpLiteral::commentText($scriptName, 200);
+    $commentSafeRuntime = PhpLiteral::commentText($runtimeAutoload, 300);
+
+    $header = ChunkLoader::PRECOMPILED_HEADER;  // the runtime includes no other PHP file
+    $php = <<<PHP
+        {$header}from $commentSafeInput. Do not edit.
+        //
+        // Run it like the Lua script:   php <this file> args...
+        // (behaves like 'lua5.4 $commentSafeScript args...'; in the 'arg' table,
+        // index 0 is the Lua script name and -1 is this PHP file).
+        // The LuaPhp runtime also loads this file when the program requires,
+        // dofiles or loadfiles the Lua file: then it returns the chunk below.
+        //
+        // Finding the runtime: this file needs the LuaPhp runtime (the src/
+        // directory of the lua-to-php-transpiler). It loads, in this order:
+        //   1. the file named by the environment variable LUAPHP_AUTOLOAD, or
+        //      src/autoload.php inside the directory named by LUAPHP_HOME;
+        //   2. the runtime this file was generated with:
+        //      $commentSafeRuntime
+        // The runtime must be the same version that generated this file.
+
+        $preamble
+        // the chunk (see LuaPhp\\Runtime\\ChunkLoader::loadPrecompiled)
+        \$luaChunk = [
+            'format' => $format,
+            'binary' => $binary,
+            'nesting' => $nesting,
+            'error' => $errorLiteral,
+            // the function prototypes (a Lua 5.4 binary chunk): debug information and long string constants
+            'protos' => $protos,
+            // the main function and all nested functions
+            'factory' => $factory,
+        ];
+        if (\\class_exists(\\LuaPhp\\Runtime\\ChunkLoader::class, false) && \\LuaPhp\\Runtime\\ChunkLoader::\$includingPrecompiled) {
+            return \$luaChunk;  // loaded by require, dofile or loadfile
+        }
+
+        (static function (): void {
+            \$autoload = getenv('LUAPHP_AUTOLOAD');
+            if (\$autoload === false && getenv('LUAPHP_HOME') !== false) {
+                \$autoload = rtrim(getenv('LUAPHP_HOME'), '/') . '/src/autoload.php';
+            }
+            if (\$autoload === false) {
+                \$autoload = $runtimeLiteral;
+            }
+            if (!is_file(\$autoload)) {
+                fwrite(STDERR, "cannot find the LuaPhp runtime at \$autoload (set LUAPHP_AUTOLOAD or LUAPHP_HOME)\\n");
+                exit(1);
+            }
+            require_once \$autoload;
+        })();
+
+        \\LuaPhp\\Runtime\\Standalone::configurePhp();
+
+        exit(\\LuaPhp\\Runtime\\Standalone::runCompiledScript(\$argv, $scriptNameLiteral, \$luaChunk));
+
+        PHP;
+    return [$php, $errorMessage];
+}
+
+/** writes $contents to $file atomically (a running program never includes half a file) */
+function writeFile(string $file, string $contents): void
+{
+    $directory = dirname($file);
+    if (!is_dir($directory) && !@mkdir($directory, 0777, true) && !is_dir($directory)) {
+        fail("cannot create directory $directory");
+    }
+    $temporaryFile = $directory . '/.' . basename($file) . '.' . getmypid() . '.tmp';
+    if (@file_put_contents($temporaryFile, $contents) !== strlen($contents) || !@rename($temporaryFile, $file)) {
+        @unlink($temporaryFile);
+        fail("cannot write $file");
+    }
+}
+
+$input = null;
+$output = null;
 for ($i = 1; $i < count($argv); $i++) {
     if ($argv[$i] === '-o') {
-        $outputFile = $argv[++$i] ?? usage("'-o' needs argument");
-    } elseif ($inputFile === null && $argv[$i] !== '') {
-        $inputFile = $argv[$i];
+        $output = $argv[++$i] ?? usage("'-o' needs argument");
+    } elseif ($input === null && $argv[$i] !== '') {
+        $input = $argv[$i];
     } else {
         usage("unexpected argument '{$argv[$i]}'");
     }
 }
-if ($inputFile === null) {
+if ($input === null) {
     usage('no input file given');
 }
-$outputFile ??= (str_ends_with($inputFile, '.lua') ? substr($inputFile, 0, -4) : $inputFile) . '.php';
 
-// lauxlib.c: luaL_loadfilex (skip a UTF-8 BOM and a first line starting with '#')
-$contents = @file_get_contents($inputFile);
-if ($contents === false || is_dir($inputFile)) {
-    fail("cannot open $inputFile");
-}
-$position = str_starts_with($contents, "\xEF\xBB\xBF") ? 3 : 0;
-$prefix = '';
-if (($contents[$position] ?? '') === '#') {
-    $newlinePosition = strpos($contents, "\n", $position);
-    $position = $newlinePosition === false ? strlen($contents) : $newlinePosition + 1;
-    $prefix = "\n";  // keep line numbers
-}
-$chunk = substr($contents, $position);
-$chunkname = '@' . $inputFile;
-$isBinaryInput = ($chunk[0] ?? '') === Undump::LUA_SIGNATURE[0];
-try {
-    $proto = $isBinaryInput
-        ? Undump::undump($chunk, $chunkname)
-        : Compiler::compile($prefix . $chunk, $chunkname);
-} catch (CompileError $error) {
-    fail($error->getMessage());
+if (!is_dir($input)) {
+    [$php, $errorMessage] = transpile($input, $input);
+    if ($errorMessage !== null) {
+        fail($errorMessage);
+    }
+    writeFile($output ?? ChunkLoader::precompiledFileName($input), $php);
+    exit(0);
 }
 
-$runtimeAutoload = realpath(__DIR__ . '/../src/autoload.php');
-$scriptName = PhpLiteral::string($inputFile);
-$binaryChunk = PhpLiteral::string(Dump::dump($proto, false));
-// a chunk compiled from source has one string per contents (llex.c: luaX_newstring)
-$shareEqualStrings = $isBinaryInput ? 'false' : 'true';
-$factory = Emitter::emitChunk($proto);
-$preamble = Emitter::PREAMBLE;
-$runtimeLiteral = PhpLiteral::string($runtimeAutoload);
-$commentSafeInput = PhpLiteral::commentText($inputFile, 200);
-$commentSafeRuntime = PhpLiteral::commentText($runtimeAutoload, 300);
-
-$php = <<<PHP
-<?php
-
-// Generated by bin/lua2php from $commentSafeInput. Do not edit.
-//
-// Run it like the Lua script:   php <this file> args...
-// (behaves like 'lua5.4 $commentSafeInput args...'; in the 'arg' table,
-// index 0 is the Lua script name and -1 is this PHP file).
-//
-// Finding the runtime: this file needs the LuaPhp runtime (the src/
-// directory of the lua-to-php-transpiler). It loads, in this order:
-//   1. the file named by the environment variable LUAPHP_AUTOLOAD, or
-//      src/autoload.php inside the directory named by LUAPHP_HOME;
-//   2. the runtime this file was generated with:
-//      $commentSafeRuntime
-// The runtime must be the same version that generated this file.
-
-$preamble
-(static function (): void {
-    \$autoload = getenv('LUAPHP_AUTOLOAD');
-    if (\$autoload === false && getenv('LUAPHP_HOME') !== false) {
-        \$autoload = rtrim(getenv('LUAPHP_HOME'), '/') . '/src/autoload.php';
+// directory mode: every *.lua below $input, in a stable order
+$inputDirectory = $input === '/' ? '' : rtrim($input, '/');
+$outputDirectory = $output === null ? $inputDirectory : rtrim($output, '/');
+$luaFiles = [];
+$iterator = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($inputDirectory === '' ? '/' : $inputDirectory, FilesystemIterator::SKIP_DOTS));
+foreach ($iterator as $file) {
+    if (str_ends_with($file->getFilename(), '.lua')) {
+        $luaFiles[] = substr($file->getPathname(), strlen($inputDirectory) + 1);
     }
-    if (\$autoload === false) {
-        \$autoload = $runtimeLiteral;
-    }
-    if (!is_file(\$autoload)) {
-        fwrite(STDERR, "cannot find the LuaPhp runtime at \$autoload (set LUAPHP_AUTOLOAD or LUAPHP_HOME)\\n");
-        exit(1);
-    }
-    require_once \$autoload;
-})();
-
-\LuaPhp\Runtime\Standalone::configurePhp();
-
-// the script's main function and all nested functions
-\$factory = $factory;
-
-// the script's function prototypes (a Lua 5.4 binary chunk) for debug
-// information and long string constants
-\$binaryChunk = $binaryChunk;
-
-exit(\LuaPhp\Runtime\Standalone::runCompiledScript(\$argv, $scriptName, static function (\LuaPhp\Runtime\Coroutine \$L) use (\$factory, \$binaryChunk): \LuaPhp\Runtime\LuaClosure {
-    \$main = \LuaPhp\Runtime\ChunkLoader::instantiate(\LuaPhp\Compiler\Undump::undump(\$binaryChunk, '=?', $shareEqualStrings), \$factory);
-    if (\$main->proto->upvalues !== []) {
-        \$main->getUpval(0)->v = \$L->globalState->globals;  // _ENV
-    }
-    return \$main;
-}));
-
-PHP;
-
-if (@file_put_contents($outputFile, $php) === false) {
-    fail("cannot write $outputFile");
 }
-exit(0);
+sort($luaFiles, SORT_STRING);
+$failed = false;
+foreach ($luaFiles as $relativePath) {
+    [$php, $errorMessage] = transpile("$inputDirectory/$relativePath", $relativePath);
+    if ($errorMessage !== null) {
+        fwrite(STDERR, "$programName: $errorMessage\n");
+        $failed = true;
+    }
+    if ($php !== null) {
+        writeFile($outputDirectory . '/' . ChunkLoader::precompiledFileName($relativePath), $php);
+    }
+}
+exit($failed ? 1 : 0);

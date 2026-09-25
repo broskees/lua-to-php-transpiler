@@ -61,14 +61,18 @@ final class Parser
      *
      * @throws CompileError
      */
-    public static function luaY_parser(string $input, string $chunkname, int $nCcallsAtEntry): Proto
+    public static function luaY_parser(string $input, string $chunkname, int $nCcallsAtEntry, ?int &$nesting = null): Proto
     {
         $chunkname = Lexer::asCString($chunkname);  // C receives the name as a 'const char *'
         $mainProto = new Proto();
         $mainProto->source = $chunkname;
         $lexState = new Lexer($input, $chunkname, $nCcallsAtEntry);
         $parser = new self($lexState);
-        $parser->mainfunc(new FuncState($mainProto, $lexState));
+        try {
+            $parser->mainfunc(new FuncState($mainProto, $lexState));
+        } finally {
+            $nesting = $lexState->deepestNCcalls - $nCcallsAtEntry;
+        }
         return $mainProto;
     }
 
@@ -462,6 +466,9 @@ final class Parser
     private function enterlevel(): void
     {
         $this->ls->nCcalls++;
+        if ($this->ls->nCcalls > $this->ls->deepestNCcalls) {
+            $this->ls->deepestNCcalls = $this->ls->nCcalls;
+        }
         if ($this->ls->nCcalls < self::LUAI_MAXCCALLS) {
             return;
         }

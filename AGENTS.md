@@ -41,7 +41,8 @@ agent can diff behavior against C. Never edit anything under `reference/`.
 
     bin/lua            standalone interpreter, mirrors lua.c (arg table, -e, -l, -v, -, script args)
     bin/luac           mirrors luac.c (-l, -l -l, -p, -o, -s)
-    bin/lua2php        the transpiler deliverable: in.lua -> standalone out.php
+    bin/lua2php        the transpiler deliverable, ahead of time: in.lua -> out.php, or a project
+                       directory -> one .php per .lua (require/dofile load those; see Chunks)
     src/autoload.php   PSR-4 autoloader: namespace LuaPhp\ -> src/
     src/Compiler/      Proto, OpCodes, Lexer, Parser, CodeGen, Dump, Undump, Listing, Compiler
     src/Emitter/       Proto -> PHP source
@@ -157,10 +158,34 @@ Lua string keys and integer keys distinct.
   only on objects nothing reaches (or at shutdown). Each freed table pays
   about 60 ns for it (a destructor call).
 - **Chunks.** `ChunkLoader::load($L, $chunk, $chunkname, $mode)` (lua_load) ->
-  `Compiler::compile`/`Undump::undump` -> `Emitter::emitChunk($proto)` -> eval ->
-  a factory `static function (Proto $proto): \Closure` returning the main
-  function's code. Factories are cached by PHP-source hash (PHP never frees
-  eval'd code). `bin/lua2php` writes the same factory into a file.
+  `LoadCache` lookup -> on a miss `Compiler::compile`/`Undump::undump` ->
+  `Emitter::emitChunk($proto)` -> eval -> a factory `static function (Proto
+  $proto): \Closure` returning the main function's code. Factories are also
+  cached by PHP-source hash (PHP never frees eval'd code).
+  Ahead of time: lua2php output never compiles or emits a file at run time.
+  `bin/lua2php <dir> [-o <outdir>]` transpiles every `*.lua` of a project
+  (x.lua -> x.php, other names get ".php": `ChunkLoader::precompiledFileName`).
+  Each generated file runs as a script, and when the runtime includes it
+  (`ChunkLoader::$includingPrecompiled`) returns its chunk instead: factory,
+  Protos as a binary chunk, parser nesting, or the load error of a file that
+  did not compile. In its scripts (`GlobalState::$filesArePrecompiled`)
+  require/dofile/loadfile resolve names as Lua does (a file counts as found
+  when its .php exists) and `ChunkLoader::loadPrecompiled` sets the chunk name
+  at load time; a Lua file without its .php (written at run time, stdin) is a
+  LuaError "not transpiled ahead of time". Only `load()` compiles there.
+  `bin/lua` still compiles files on the fly.
+  The load cache (`LoadCache`): key = chunk name + exact bytes. A hit undumps
+  fresh Protos sharing equal strings like a compile (two loads look like two
+  compiles to '%p') and is used only where compiling at the current C-call
+  depth would succeed (`ChunkLoader::nestingError`); failed compiles are not
+  cached. In memory (1000 entries), and on disk when a directory is set: one
+  PHP file per chunk named by sha256(fingerprint of src/ + PHP version, key),
+  loaded with include so opcache and the JIT apply. lua2php scripts use
+  `LUAPHP_CACHE_DIR`, else `sys_get_temp_dir()/luaphp-<euid>`; bin/lua only
+  `LUAPHP_CACHE_DIR`. A directory that is not private (ours, no group/other
+  bits, not a symlink) is not used. Writes are temp file + rename under the
+  flock of its `usage` counter, which empties the directory before it passes
+  20000 entries or 256 MB.
 - **Emitted function** (one per Proto): `static function (Coroutine $L,
   LuaClosure $cl, array $R, int $callstatus = 0) use ($proto_<path>,
   $function_<path>...): ?array`. `$R` is the register file; the incoming

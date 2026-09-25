@@ -12,7 +12,8 @@ namespace Tests\StringIdentityTest;
  * string per occurrence, and those of files it caches are interned in
  * shared memory. So the cases that inspect string identity run here under
  * each of these, whatever php.ini says: through bin/lua (eval'd code) and
- * through lua2php scripts (files).
+ * through lua2php scripts (files), those twice: with load()'s disk cache
+ * cold, then warm (chunks from cache files, which opcache may cache).
  */
 
 /** PHP settings => command-line options, and whether opcache caches the script file */
@@ -50,9 +51,14 @@ function test_identity_diff_cases_behave_like_lua_under_each_opcache_setting(): 
         [$status, , $errors] = runCommand(['php', REPO_ROOT . '/bin/lua2php', $name, '-o', $transpiled], '', $diffDirectory);
         assertSame(0, $status, "lua2php $name: $errors");
         foreach (PHP_SETTINGS as $setting => [$options]) {
-            $runs = ['bin/lua' => [REPO_ROOT . '/bin/lua', $name], 'lua2php' => [$transpiled]];
+            $cacheDirectory = "$outputDirectory/cache-$name-" . md5($setting);
+            $runs = [
+                'bin/lua' => [REPO_ROOT . '/bin/lua', $name],
+                'lua2php, cold cache' => [$transpiled],
+                'lua2php, warm cache' => [$transpiled],
+            ];
             foreach ($runs as $how => $arguments) {
-                [$status, $output, $errors] = runCommand(['php', ...$options, ...$arguments], '', $diffDirectory);
+                [$status, $output, $errors] = runCommand(['env', "LUAPHP_CACHE_DIR=$cacheDirectory", 'php', ...$options, ...$arguments], '', $diffDirectory);
                 $label = "$name via $how, $setting";
                 assertSame($expectedStatus, $status, "$label: exit status ($errors)");
                 assertSame(normalizeDifferentialOutput($expectedOutput, 'lua5.4'), normalizeDifferentialOutput($output, 'lua5.4'), "$label: stdout");
@@ -66,23 +72,31 @@ function test_official_identity_files_pass_under_each_opcache_setting(): void
 {
     $outputDirectory = scratchDirectory() . '/string-identity-official';
     @mkdir($outputDirectory);
-    $running = [];
-    foreach (IDENTITY_OFFICIAL_FILES as $name) {
-        $transpiled = $outputDirectory . '/' . basename($name, '.lua') . '.php';
-        [$status, , $errors] = runCommand(['php', REPO_ROOT . '/bin/lua2php', $name, '-o', $transpiled], '', OFFICIAL_TESTS_DIRECTORY);
-        assertSame(0, $status, "lua2php $name: $errors");
-        foreach (PHP_SETTINGS as $setting => [$options]) {
-            // as tests/official.sh runs them
-            $command = ['php', ...$options, REPO_ROOT . '/bin/lua', '-e_U=true _soft=true _port=true _nomsg=true', $name];
-            $running["$name via bin/lua, $setting"] = startProcess($command, OFFICIAL_TESTS_DIRECTORY);
-            $running["$name via lua2php, $setting"] = startProcess(['php', ...$options, $transpiled], OFFICIAL_TESTS_DIRECTORY);
-        }
-    }
     $failures = [];
-    foreach ($running as $label => $started) {
-        [$status, $output, $errors] = finishProcess($started);
-        if ($status !== 0 || !str_ends_with($output, "OK\n")) {
-            $failures[] = "$label: exit status $status: " . trim(substr($errors, 0, 300));
+    foreach (['cold', 'warm'] as $cache) {
+        $running = [];
+        foreach (IDENTITY_OFFICIAL_FILES as $name) {
+            $transpiled = $outputDirectory . '/' . basename($name, '.lua') . '.php';
+            if ($cache === 'cold') {
+                [$status, , $errors] = runCommand(['php', REPO_ROOT . '/bin/lua2php', $name, '-o', $transpiled], '', OFFICIAL_TESTS_DIRECTORY);
+                assertSame(0, $status, "lua2php $name: $errors");
+            }
+            foreach (PHP_SETTINGS as $setting => [$options]) {
+                if ($cache === 'cold') {
+                    // as tests/official.sh runs them
+                    $command = ['php', ...$options, REPO_ROOT . '/bin/lua', '-e_U=true _soft=true _port=true _nomsg=true', $name];
+                    $running["$name via bin/lua, $setting"] = startProcess($command, OFFICIAL_TESTS_DIRECTORY);
+                }
+                $cacheDirectory = "$outputDirectory/cache-$name-" . md5($setting);
+                $command = ['env', "LUAPHP_CACHE_DIR=$cacheDirectory", 'php', ...$options, $transpiled];
+                $running["$name via lua2php, $setting, $cache cache"] = startProcess($command, OFFICIAL_TESTS_DIRECTORY);
+            }
+        }
+        foreach ($running as $label => $started) {
+            [$status, $output, $errors] = finishProcess($started);
+            if ($status !== 0 || !str_ends_with($output, "OK\n")) {
+                $failures[] = "$label: exit status $status: " . trim(substr($errors, 0, 300));
+            }
         }
     }
     assertSame([], $failures);

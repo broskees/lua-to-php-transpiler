@@ -72,6 +72,13 @@ final class GlobalState
      */
     public array $tobefnz = [];
 
+    /**
+     * Lua files were transpiled ahead of time (scripts bin/lua2php
+     * generates): loading a file includes its precompiled PHP and never
+     * compiles (ChunkLoader::loadFile)
+     */
+    public bool $filesArePrecompiled = false;
+
     /** @var array<string, mixed> free slots for libraries (e.g. the io library's default files) */
     public array $libraryState = [];
 

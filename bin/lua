@@ -17,6 +17,7 @@ use LuaPhp\Runtime\Calls;
 use LuaPhp\Runtime\ChunkLoader;
 use LuaPhp\Runtime\Coroutine;
 use LuaPhp\Runtime\Gc\Collector;
+use LuaPhp\Runtime\LoadCache;
 use LuaPhp\Runtime\Lua;
 use LuaPhp\Runtime\LuaError;
 use LuaPhp\Runtime\LuaObject;
@@ -24,6 +25,11 @@ use LuaPhp\Runtime\NativeFunction;
 use LuaPhp\Runtime\Standalone;
 
 Standalone::configurePhp();
+
+// load() caches compiled chunks on disk only when asked to (tests never
+// depend on what earlier runs left there); in memory it always does
+$cacheDirectory = getenv('LUAPHP_CACHE_DIR');
+LoadCache::useDirectory(is_string($cacheDirectory) && $cacheDirectory !== '' ? $cacheDirectory : null);
 
 $programName = (isset($argv[0]) && $argv[0] !== '') ? $argv[0] : 'lua';  // lua.c: progname
 

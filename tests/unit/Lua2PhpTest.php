@@ -5,46 +5,70 @@ declare(strict_types=1);
 namespace Tests\Lua2PhpTest;
 
 /*
- * bin/lua2php: every differential case (tests/diff/*.lua) is transpiled to
- * a PHP script; `php out.php args` must behave like `lua5.4 in.lua args`
- * (same exit status and stdout; stderr equal up to the program name).
+ * bin/lua2php: tests/diff is transpiled as one project (so modules/ is
+ * precompiled too); `php out.php args`, run from the output directory,
+ * must behave like `lua5.4 in.lua args` run from tests/diff (same exit
+ * status and stdout; stderr equal up to the program name). The cases that
+ * load() chunks run a second time with the load cache warm.
  */
+
+/**
+ * The one expected difference: coroutine_yield_across.lua dofile()s a file
+ * it writes at run time. lua2php output loads only files transpiled ahead
+ * of time, so there dofile raises that error instead (bin/lua still runs
+ * the file, see the differential cases). Returns $stdout with that line
+ * put back as lua5.4 prints it, after checking it is exactly the error.
+ */
+function expectedDifference(string $name, string $stdout): string
+{
+    if ($name !== 'coroutine_yield_across.lua') {
+        return $stdout;
+    }
+    $pattern = "~^dofile\t\tfalse\tcannot load (/\\S+): not transpiled ahead of time \\(no \\1\\.php\\)$~m";
+    assertSame(1, preg_match($pattern, $stdout), "$name: dofile of a file written at run time fails");
+    return preg_replace($pattern, "dofile\tin dofile\ttrue\t1\tfrom file", $stdout);
+}
 
 function test_transpiled_diff_cases_behave_like_lua(): void
 {
     $diffDirectory = REPO_ROOT . '/tests/diff';
     $outputDirectory = scratchDirectory() . '/lua2php';
-    @mkdir($outputDirectory);
+    $cacheDirectory = scratchDirectory() . '/lua2php-cache';
+    mkdir($cacheDirectory, 0700);
+    [$status, , $errorOutput] = runCommand(['php', REPO_ROOT . '/bin/lua2php', $diffDirectory, '-o', $outputDirectory]);
+    assertSame(1, $status, 'modules/syntax_error.lua does not compile');
+    assertSame(REPO_ROOT . "/bin/lua2php: modules/syntax_error.lua:1: unexpected symbol near '='\n", $errorOutput);
     $files = glob($diffDirectory . '/*.lua');
     sort($files);
     $arguments = ['first', 'second arg'];
-    foreach (array_chunk($files, 8) as $batch) {
-        $running = [];
-        foreach ($batch as $file) {
-            $name = basename($file);
-            $outputFile = $outputDirectory . '/' . basename($name, '.lua') . '.php';
-            [$status, , $errorOutput] = runCommand(['php', REPO_ROOT . '/bin/lua2php', $name, '-o', $outputFile], '', $diffDirectory);
-            assertSame(0, $status, "lua2php $name: $errorOutput");
-            $running[$name] = [
-                startProcess(['lua5.4', $name, ...$arguments], $diffDirectory),
-                startProcess(['php', $outputFile, ...$arguments], $diffDirectory),
-                $outputFile,
-            ];
-        }
-        foreach ($running as $name => [$referenceProcess, $ourProcess, $outputFile]) {
-            [$referenceStatus, $referenceStdout, $referenceStderr] = finishProcess($referenceProcess);
-            [$ourStatus, $ourStdout, $ourStderr] = finishProcess($ourProcess);
-            assertSame($referenceStatus, $ourStatus, "$name: exit status");
-            assertSame(
-                normalizeDifferentialOutput($referenceStdout, 'lua5.4'),
-                normalizeDifferentialOutput($ourStdout, 'lua5.4'),
-                "$name: stdout",
-            );
-            assertSame(
-                normalizeDifferentialOutput($referenceStderr, 'lua5.4'),
-                normalizeDifferentialOutput($ourStderr, $outputFile),
-                "$name: stderr",
-            );
+    $warmFiles = array_values(array_filter($files, static fn (string $file): bool => str_contains(file_get_contents($file), 'load')));
+    foreach (['cold' => $files, 'warm' => $warmFiles] as $cache => $caseFiles) {
+        foreach (array_chunk($caseFiles, 8) as $batch) {
+            $running = [];
+            foreach ($batch as $file) {
+                $name = basename($file);
+                $outputFile = $outputDirectory . '/' . basename($name, '.lua') . '.php';
+                $running[$name] = [
+                    startProcess(['lua5.4', $name, ...$arguments], $diffDirectory),
+                    startProcess(['env', "LUAPHP_CACHE_DIR=$cacheDirectory", 'php', $outputFile, ...$arguments], $outputDirectory),
+                    $outputFile,
+                ];
+            }
+            foreach ($running as $name => [$referenceProcess, $ourProcess, $outputFile]) {
+                [$referenceStatus, $referenceStdout, $referenceStderr] = finishProcess($referenceProcess);
+                [$ourStatus, $ourStdout, $ourStderr] = finishProcess($ourProcess);
+                assertSame($referenceStatus, $ourStatus, "$name ($cache cache): exit status");
+                assertSame(
+                    normalizeDifferentialOutput($referenceStdout, 'lua5.4'),
+                    normalizeDifferentialOutput(expectedDifference($name, $ourStdout), 'lua5.4'),
+                    "$name ($cache cache): stdout",
+                );
+                assertSame(
+                    normalizeDifferentialOutput($referenceStderr, 'lua5.4'),
+                    normalizeDifferentialOutput($ourStderr, $outputFile),
+                    "$name ($cache cache): stderr",
+                );
+            }
         }
     }
 }
