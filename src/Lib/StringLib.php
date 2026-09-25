@@ -110,6 +110,18 @@ final class StringLib
     // lstrlib.c: str_sub
     private static function sub(Coroutine $L, array $args): array
     {
+        $s = $args[0] ?? null;
+        // Fast path for string.sub(s, i[, j]) with integers 1 <= i <= j <=
+        // #s (a missing or nil j is -1, which is #s): posrelatI and
+        // getendpos give i and j unchanged.
+        if (\is_string($s) && \count($args) <= 3) {
+            $length = \strlen($s);
+            $start = $args[1] ?? null;
+            $end = $args[2] ?? $length;
+            if (\is_int($start) && \is_int($end) && $start >= 1 && $start <= $end && $end <= $length) {
+                return [substr($s, $start - 1, $end - $start + 1)];
+            }
+        }
         $s = Auxiliary::checkString($L, $args, 1);
         $length = \strlen($s);
         $start = self::relativePosition(Auxiliary::checkInteger($L, $args, 2), $length);
@@ -160,6 +172,15 @@ final class StringLib
     // lstrlib.c: str_byte
     private static function byte(Coroutine $L, array $args): array
     {
+        $s = $args[0] ?? null;
+        $position = $args[1] ?? 1;
+        // Fast path for string.byte(s[, i]) with an integer 1 <= i <= #s:
+        // the interval is [i, i], one byte, when luaL_checkstack for it
+        // passes (Calls::checkStack($L, 1)).
+        if (\is_string($s) && \count($args) <= 2 && \is_int($position) && $position >= 1 && $position <= \strlen($s)
+            && $L->ci->top < $L->stackLimit) {
+            return [\ord($s[$position - 1])];
+        }
         $s = Auxiliary::checkString($L, $args, 1);
         $length = \strlen($s);
         $initial = Auxiliary::optInteger($L, $args, 2, 1);

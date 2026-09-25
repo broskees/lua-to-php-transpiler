@@ -283,6 +283,33 @@ final class LuaTable
         if ($key === null) {
             return $this->firstFromPart(0);
         }
+        // Fast path of a pairs() step: an integer or string key under its
+        // part's internal pointer (where the next() that returned it left
+        // it) is followed by the next entry of that part, as below.
+        if (\is_int($key)) {
+            if (key($this->arr) === $key) {
+                next($this->arr);
+                $nextKey = key($this->arr);
+                if ($nextKey === null) {
+                    return $this->firstFromPart(1);
+                }
+                $extra = $this->extra ??= new LuaTableExtra();
+                $extra->cursorKey = $nextKey;
+                return [$nextKey, $this->arr[$nextKey]];
+            }
+        } elseif (\is_string($key)) {
+            $currentKey = key($this->hash);
+            if ($currentKey !== null && (string) $currentKey === $key) {
+                next($this->hash);
+                $nextKey = key($this->hash);
+                if ($nextKey === null) {
+                    return $this->firstFromPart(2);
+                }
+                $extra = $this->extra ??= new LuaTableExtra();
+                $extra->cursorKey = (string) $nextKey;
+                return [(string) $nextKey, $this->hash[$nextKey]];
+            }
+        }
         if (\is_float($key) && self::floatToInteger($key) !== null) {
             // ltable.c: findindex does not normalize the key: a float is
             // never equal to a stored key with an integral value

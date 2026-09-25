@@ -297,6 +297,16 @@ final class Vm
     /** lvm.c: luaV_finishget, entered with a non-table or a table whose raw t[key] is nil */
     public static function finishGet(Coroutine $L, mixed $t, mixed $key, int $slot): mixed
     {
+        // Fast path for a method lookup: a string key found in the '__index'
+        // table of a table's metatable or of the string metatable is what
+        // the first iteration below returns.
+        if (\is_string($key)) {
+            $metatable = $t instanceof LuaTable ? $t->metatable : (\is_string($t) ? ($L->globalState->typeMetatables[Lua::LUA_TSTRING] ?? null) : null);
+            $tm = $metatable?->hash['__index'] ?? null;
+            if ($tm instanceof LuaTable && isset($tm->hash[$key])) {
+                return $tm->hash[$key];
+            }
+        }
         for ($loop = 0; $loop < self::MAXTAGLOOP; $loop++) {
             if ($t instanceof LuaTable) {
                 $metatable = $t->metatable;

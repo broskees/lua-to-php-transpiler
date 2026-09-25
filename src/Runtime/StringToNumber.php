@@ -34,6 +34,12 @@ final class StringToNumber
     // lobject.c: luaO_str2num
     public static function convert(string $s): int|float|null
     {
+        // Fast path: 1 to 18 decimal digits and nothing else is a decimal
+        // integer numeral below 10^18, so it cannot overflow: l_str2int
+        // accepts it with this value (leading zeros included).
+        if (\strlen($s) <= 18 && ctype_digit($s)) {
+            return (int) $s;
+        }
         if (str_contains($s, "\0")) {
             return null;  // the C string would end early; callers require the whole length
         }

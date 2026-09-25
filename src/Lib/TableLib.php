@@ -97,6 +97,14 @@ final class TableLib
     private static function insert(Coroutine $L, array $args): array
     {
         $table = $args[0] ?? null;
+        // Fast path for table.insert(t, v) on a table without a metatable:
+        // checktab passes, aux_getn is the raw border (lua_len without
+        // '__len'), and lua_seti is a raw set. Same result as below.
+        if ($table instanceof LuaTable && $table->metatable === null && \count($args) === 2) {
+            $border = $table->length();
+            $table->set($border === PHP_INT_MAX ? PHP_INT_MIN : $border + 1, $args[1]);  // intop(+, border, 1)
+            return [];
+        }
         $firstEmpty = Vm::addWrap(self::lengthOf($L, $args, 1, self::TAB_RW), 1);  // first empty element
         switch (\count($args)) {
             case 2:  // called with only 2 arguments
@@ -123,6 +131,15 @@ final class TableLib
     private static function remove(Coroutine $L, array $args): array
     {
         $table = $args[0] ?? null;
+        // Fast path for table.remove(t) on a table without a metatable:
+        // checktab passes, pos is the raw border, and lua_geti/lua_seti are
+        // raw. Same result as below (also for an empty table: t[0]).
+        if ($table instanceof LuaTable && $table->metatable === null && \count($args) === 1) {
+            $border = $table->length();
+            $result = $table->arr[$border] ?? null;
+            $table->set($border, null);
+            return [$result];
+        }
         $size = self::lengthOf($L, $args, 1, self::TAB_RW);
         $position = Auxiliary::optInteger($L, $args, 2, $size);
         if ($position !== $size) {  // validate 'pos' if given
@@ -180,6 +197,30 @@ final class TableLib
     // ltablib.c: tconcat
     private static function concat(Coroutine $L, array $args): array
     {
+        $table = $args[0] ?? null;
+        $separator = $args[1] ?? '';
+        // Fast path for table.concat(t[, sep]) with a string separator on a
+        // table without a metatable: checktab passes, the range is 1 to the
+        // raw border, lua_geti is raw, and strings and integers are added
+        // as addfield adds them. Any other element takes the path below.
+        if ($table instanceof LuaTable && $table->metatable === null && \count($args) <= 2 && \is_string($separator)) {
+            $last = $table->length();
+            $pieces = [];
+            for ($index = 1; $index <= $last; $index++) {
+                $value = $table->arr[$index] ?? null;
+                if (\is_string($value)) {
+                    $pieces[] = $value;
+                } elseif (\is_int($value)) {
+                    $pieces[] = (string) $value;
+                } else {
+                    $pieces = null;
+                    break;
+                }
+            }
+            if ($pieces !== null) {
+                return [implode($separator, $pieces)];
+            }
+        }
         $last = self::lengthOf($L, $args, 1, self::TAB_R);
         $separator = Auxiliary::optString($L, $args, 2, '');
         $index = Auxiliary::optInteger($L, $args, 3, 1);
@@ -207,6 +248,19 @@ final class TableLib
     private static function unpack(Coroutine $L, array $args): array
     {
         $table = $args[0] ?? null;
+        // Fast path for table.unpack(t) on a table without a metatable: i is
+        // 1, e is the raw border, and the stack check below passes.
+        if ($table instanceof LuaTable && $table->metatable === null && \count($args) === 1) {
+            $end = $table->length();
+            if ($end < Lua::LUAI_MAXSTACK && $L->ci->top + $end <= $L->stackLimit) {  // Calls::checkStack($L, $end)
+                $values = $table->arr;
+                $results = [];
+                for ($index = 1; $index <= $end; $index++) {
+                    $results[] = $values[$index] ?? null;
+                }
+                return $results;
+            }
+        }
         $index = Auxiliary::optInteger($L, $args, 2, 1);
         $end = ($args[2] ?? null) === null ? Auxiliary::len($L, $table) : Auxiliary::checkInteger($L, $args, 3);
         if ($index > $end) {

@@ -318,6 +318,12 @@ Lua string keys and integer keys distinct.
   atan2. Its package.path/cpath defaults include the distribution's `/usr/`
   directories (PackageLib uses the same); it has dlopen, we do not
   (package.loadlib returns fail, DLMSG, "absent").
+- **Fast paths.** Hot library functions (and `Calls::callNonLua`/`call`,
+  which inline `callNative`/`callk`) start with a short fast path for the
+  common case (e.g. a table without a metatable) that falls through to the
+  unchanged C port. It must compute exactly what the port would (results,
+  errors, metamethods, hooks), so a change to the port updates it too; each
+  has cases for both paths in `tests/diff/fastpath_*.lua`.
 - **Files and processes.** A file handle is a `Userdata` (metatable
   registry["FILE*"]) whose payload is `Lib\Io\LuaStream` (luaL_Stream) holding
   a `Lib\Io\CFile`, the emulated C `FILE *` with glibc's buffering rules
