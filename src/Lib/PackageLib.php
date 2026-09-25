@@ -273,10 +273,14 @@ final class PackageLib
     /**
      * loadlib.c: searchpath: returns [filename, null] for the first
      * readable file, or [null, error message]. Arguments are C strings.
+     * With $precompiledFiles (scripts bin/lua2php generates, see
+     * ChunkLoader::loadFile) a file whose precompiled PHP exists counts
+     * as readable too: the Lua file need not be there. Another PHP file
+     * there does not count.
      *
      * @return array{?string, ?string}
      */
-    private static function searchPath(string $name, string $path, string $separator, string $directorySeparator): array
+    private static function searchPath(string $name, string $path, string $separator, string $directorySeparator, bool $precompiledFiles): array
     {
         $name = DebugInfo::cString($name);
         $path = DebugInfo::cString($path);
@@ -289,7 +293,7 @@ final class PackageLib
         // add path to the buffer, replacing marks ('?') with the file name
         $pathName = str_replace(self::LUA_PATH_MARK, $name, $path);
         foreach (self::fileNames($pathName) as $filename) {
-            if (self::readable($filename)) {  // does file exist and is readable?
+            if (($precompiledFiles && ChunkLoader::isPrecompiledFile(ChunkLoader::precompiledFileName($filename))) || self::readable($filename)) {  // does file exist and is readable?
                 return [$filename, null];  // return that name
             }
         }
@@ -304,7 +308,7 @@ final class PackageLib
         $separator = Auxiliary::optString($L, $args, 3, '.');
         $path = Auxiliary::checkString($L, $args, 2);
         $name = Auxiliary::checkString($L, $args, 1);
-        [$filename, $error] = self::searchPath($name, $path, $separator, $directorySeparator);
+        [$filename, $error] = self::searchPath($name, $path, $separator, $directorySeparator, $L->globalState->filesArePrecompiled);
         if ($filename !== null) {
             return [$filename];
         }
@@ -318,7 +322,7 @@ final class PackageLib
         if ($path === null) {
             Auxiliary::error($L, "'package.$pathFieldName' must be a string");
         }
-        return self::searchPath($name, $path, '.', $directorySeparator);
+        return self::searchPath($name, $path, '.', $directorySeparator, $L->globalState->filesArePrecompiled);
     }
 
     /** loadlib.c: checkload: the open function and file name, or the error */

@@ -176,19 +176,26 @@ final class Standalone
     }
 
     /**
-     * lua.c: main + pmain for a script compiled ahead of time by
-     * bin/lua2php: behaves like 'lua <script> args...'. $argv is PHP's
-     * ($argv[0] is the PHP script); in 'arg', index 0 is $scriptName and
-     * -1 is the PHP script. Returns the process exit status.
+     * lua.c: main + pmain for a script bin/lua2php compiled ahead of time:
+     * behaves like 'lua <script> args...'. $argv is PHP's ($argv[0] is the
+     * PHP script); in 'arg', index 0 is $scriptName and -1 is the PHP
+     * script. $chunk is the script's chunk (see ChunkLoader::loadPrecompiled).
+     * Files are precompiled too (ChunkLoader::loadFile); load() caches on
+     * disk in LUAPHP_CACHE_DIR, else in LoadCache::defaultDirectory().
+     * Returns the process exit status.
      *
      * @param list<string> $argv
      */
-    public static function runCompiledScript(array $argv, string $scriptName, \Closure $loadScript): int
+    public static function runCompiledScript(array $argv, string $scriptName, array $chunk): int
     {
+        self::switchJitOn();
+        $cacheDirectory = getenv('LUAPHP_CACHE_DIR');
+        LoadCache::useDirectory(\is_string($cacheDirectory) && $cacheDirectory !== '' ? $cacheDirectory : LoadCache::defaultDirectory());
         $programName = $argv[0] ?? 'lua';
         $L = Coroutine::newState();
+        $L->globalState->filesArePrecompiled = true;
         $L->globalState->gcstp = Collector::GCSTPUSR;  // lua_gc(L, LUA_GCSTOP): stop GC while building state
-        $pmain = new NativeFunction('pmain', static function (Coroutine $L, array $args) use ($argv, $programName, $scriptName, $loadScript): array {
+        $pmain = new NativeFunction('pmain', static function (Coroutine $L, array $args) use ($argv, $programName, $scriptName, $chunk): array {
             StandardLibraries::openAll($L);
             $luaArgv = array_merge([$argv[0] ?? 'lua', $scriptName], \array_slice($argv, 1));
             self::createArgTable($L, $luaArgv, 1);
@@ -197,13 +204,42 @@ final class Standalone
             if (self::handleLuaInit($L, $programName) !== Lua::LUA_OK) {
                 return [false];
             }
-            return [self::handleScript($L, $programName, static fn (): LuaClosure => $loadScript($L)) === Lua::LUA_OK];
+            $loadScript = static fn (): LuaClosure => ChunkLoader::loadPrecompiled($L, $chunk, '@' . $scriptName, null);  // luaL_loadfile
+            return [self::handleScript($L, $programName, $loadScript) === Lua::LUA_OK];
         });
         [$status, $result] = Calls::protectedCall($L, $pmain, []);
         self::report($programName, $status, $result);
         Collector::closeState($L);  // lua_close
         self::flushStdout();
         return $status === Lua::LUA_OK && $result[0] ? 0 : 1;
+    }
+
+    /**
+     * Switches opcache's JIT to tracing when opcache runs and the host left
+     * the JIT available but off (opcache.jit=off) with a buffer
+     * (opcache.jit_buffer_size > 0). Never overrides a JIT mode the host
+     * chose, and never makes PHP warn (ini_set does when the JIT is
+     * disabled). Only code compiled afterwards is JIT-compiled: the
+     * runtime and the modules the script loads, not the script itself.
+     */
+    public static function switchJitOn(): void
+    {
+        if (!\function_exists('opcache_get_status')) {
+            return;
+        }
+        $status = @opcache_get_status(false);  // false (with a warning) when opcache.restrict_api forbids it
+        if (!\is_array($status) || ($status['opcache_enabled'] ?? false) !== true) {
+            return;
+        }
+        $jit = $status['jit'] ?? null;
+        // 'enabled': not opcache.jit=disable (which cannot be undone at run time); 'on': running
+        if (!\is_array($jit) || ($jit['enabled'] ?? false) !== true || ($jit['on'] ?? true) !== false) {
+            return;
+        }
+        if (@ini_parse_quantity((string) ini_get('opcache.jit_buffer_size')) <= 0) {
+            return;
+        }
+        ini_set('opcache.jit', 'tracing');
     }
 
     public static function flushStdout(): void

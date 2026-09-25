@@ -36,9 +36,13 @@ final class Compiler
      *         (LUA_ERRERR) for "error in error handling": nesting reached
      *         LUAI_MAXCCALLS / 10 * 11 while $nCcalls was already past the
      *         limit (parsing inside the handler of a C stack overflow).
+     *
+     * $nesting is set, also when compiling fails, to how many levels above
+     * $nCcalls the parser's nesting went: the result depends on $nCcalls
+     * only through that (see ChunkLoader::nestingError).
      */
-    public static function compile(string $source, string $chunkname, int $nCcalls = self::MAIN_CHUNK_C_CALLS): Proto
+    public static function compile(string $source, string $chunkname, int $nCcalls = self::MAIN_CHUNK_C_CALLS, ?int &$nesting = null): Proto
     {
-        return Parser::luaY_parser($source, $chunkname, $nCcalls);
+        return Parser::luaY_parser($source, $chunkname, $nCcalls, $nesting);
     }
 }

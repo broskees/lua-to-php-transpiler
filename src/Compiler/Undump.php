@@ -62,14 +62,7 @@ final class Undump
      */
     public static function undump(string $bytes, string $chunkname, bool $shareEqualStrings = false): Proto
     {
-        if ($chunkname !== '' && ($chunkname[0] === '@' || $chunkname[0] === '=')) {
-            $nameForErrors = substr($chunkname, 1);
-        } elseif ($chunkname !== '' && $chunkname[0] === self::LUA_SIGNATURE[0]) {
-            $nameForErrors = 'binary string';
-        } else {
-            $nameForErrors = $chunkname;
-        }
-        $loadState = new self($bytes, $nameForErrors, $shareEqualStrings);
+        $loadState = new self($bytes, self::nameForErrors($chunkname), $shareEqualStrings);
         $loadState->checkHeader();
         // Number of upvalues of the main closure; the runtime takes it from
         // the Proto instead (C asserts both agree).
@@ -77,6 +70,18 @@ final class Undump
         $mainProto = new Proto();
         $loadState->loadFunction($mainProto, null);
         return $mainProto;
+    }
+
+    /** lundump.c: luaU_undump: the name of chunk $chunkname in error messages ("<name>: bad binary format ...") */
+    public static function nameForErrors(string $chunkname): string
+    {
+        if ($chunkname !== '' && ($chunkname[0] === '@' || $chunkname[0] === '=')) {
+            return substr($chunkname, 1);
+        }
+        if ($chunkname !== '' && $chunkname[0] === self::LUA_SIGNATURE[0]) {
+            return 'binary string';
+        }
+        return $chunkname;
     }
 
     // lundump.c: error
