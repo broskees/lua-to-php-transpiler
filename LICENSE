@@ -19,7 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
-The files under reference/ are Lua 5.4.9's source code and Lua's official
-test suites, Copyright (C) 1994-2026 Lua.org, PUC-Rio, distributed under
-Lua's own MIT license (see reference/lua-5.4.9/doc/readme.html).
