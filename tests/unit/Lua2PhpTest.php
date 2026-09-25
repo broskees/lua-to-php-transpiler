@@ -10,7 +10,8 @@ namespace Tests\Lua2PhpTest;
  * args`, run from the output directory, must behave like `lua5.4 in.lua
  * args` run from tests/diff (same exit status and stdout; stderr equal up
  * to the program name). The cases that load() chunks run a second time
- * with the load cache warm.
+ * with the load cache warm. A lua2php script keeps the memory_limit PHP
+ * was started with; the cases get the 4G bin/lua sets itself.
  */
 
 /**
@@ -60,7 +61,7 @@ function test_transpiled_diff_cases_behave_like_lua(): void
                 $outputFile = $outputDirectory . '/' . basename($name, '.lua') . '.php';
                 $running[$name] = [
                     startProcess(['lua5.4', $name, ...$arguments], $diffDirectory),
-                    startProcess(['env', "LUAPHP_CACHE_DIR=$cacheDirectory", 'php', $outputFile, ...$arguments], $outputDirectory),
+                    startProcess(['env', "LUAPHP_CACHE_DIR=$cacheDirectory", 'php', '-d', 'memory_limit=4G', $outputFile, ...$arguments], $outputDirectory),
                     $outputFile,
                 ];
             }

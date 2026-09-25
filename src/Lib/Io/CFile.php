@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace LuaPhp\Lib\Io;
 
+use LuaPhp\Runtime\MemoryLimit;
 use LuaPhp\Runtime\Standalone;
 
 /**
@@ -35,6 +36,12 @@ final class CFile
 
     /** largest read request honoured; C's buffer allocation fails beyond memory ("not enough memory") */
     public const MAX_READ_REQUEST = 1 << 46;
+
+    /** reads take at most this many bytes from the stream at once */
+    private const READ_PIECE = 65536;
+
+    /** lines are read in pieces of at most this many bytes (fgets allocates that much for every call) */
+    private const LINE_PIECE = 1024;
 
     /** @var \WeakMap<CFile, true>|null open streams, for fflush(NULL) */
     private static ?\WeakMap $openFiles = null;
@@ -280,12 +287,16 @@ final class CFile
         if (@feof($this->stream) && (stream_get_meta_data($this->stream)['seekable'] ?? false)) {
             @fseek($this->stream, 0, SEEK_CUR);  // PHP's fgets stops at a remembered end of file; C reads again
         }
+        $capacity = MemoryLimit::CHECK_ABOVE;  // $line may grow to this length before the next check
         while (true) {
             Errno::clearPhpError();
-            $piece = @fgets($this->stream);
+            $piece = @fgets($this->stream, self::LINE_PIECE + 1);  // (a whole line could be any size)
             if ($piece === false) {
                 $this->readFailed();
                 return $line;
+            }
+            if (\strlen($line) + \strlen($piece) > $capacity) {
+                $capacity = MemoryLimit::grow(\strlen($line) + \strlen($piece));
             }
             $line .= $piece;
             if (str_ends_with($piece, "\n")) {
@@ -302,12 +313,16 @@ final class CFile
         if (\strlen($data) === $count || !$this->checkReadable()) {
             return $data;
         }
+        $capacity = MemoryLimit::CHECK_ABOVE;  // $data may grow to this length before the next check
         while (\strlen($data) < $count) {
             Errno::clearPhpError();
-            $piece = @fread($this->stream, min($count - \strlen($data), 65536));
+            $piece = @fread($this->stream, min($count - \strlen($data), self::READ_PIECE));
             if ($piece === false || $piece === '') {
                 $this->readFailed();
                 break;
+            }
+            if (\strlen($data) + \strlen($piece) > $capacity) {
+                $capacity = MemoryLimit::grow(\strlen($data) + \strlen($piece));
             }
             $data .= $piece;
         }
@@ -322,12 +337,16 @@ final class CFile
         if (!$this->checkReadable()) {
             return $data;
         }
+        $capacity = MemoryLimit::CHECK_ABOVE;  // $data may grow to this length before the next check
         while (true) {
             Errno::clearPhpError();
-            $piece = @fread($this->stream, 65536);
+            $piece = @fread($this->stream, self::READ_PIECE);
             if ($piece === false || $piece === '') {
                 $this->readFailed();
                 return $data;
+            }
+            if (\strlen($data) + \strlen($piece) > $capacity) {
+                $capacity = MemoryLimit::grow(\strlen($data) + \strlen($piece));
             }
             $data .= $piece;
         }

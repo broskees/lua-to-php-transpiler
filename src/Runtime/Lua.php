@@ -24,6 +24,9 @@ final class Lua
     public const LUA_ERRERR = 5;
     public const LUA_ERRFILE = 6;
 
+    // lstring.h: MEMERRMSG (the value of every memory error)
+    public const MEMERRMSG = 'not enough memory';
+
     // lua.h: basic types
     public const LUA_TNONE = -1;
     public const LUA_TNIL = 0;

@@ -6,6 +6,7 @@ namespace LuaPhp\Lib\String;
 
 use LuaPhp\Runtime\Auxiliary;
 use LuaPhp\Runtime\Coroutine;
+use LuaPhp\Runtime\MemoryLimit;
 
 /**
  * Port of lstrlib.c's pattern matcher (MatchState and the functions that
@@ -106,6 +107,9 @@ final class MatchState
     private int $regexStart = -1;
     private int $regexEnd = -1;
 
+    /** memory_get_usage(true) plus preg_match's copies when MemoryLimit last allowed them */
+    private int $regexCopiesAllowed = 0;
+
     // Not in C: regexSearch's result when PCRE gives up
     private const PCRE_FAILED = -2;
 
@@ -172,10 +176,21 @@ final class MatchState
      * Not in C: preg_match $regex from $s. Returns the start of the match,
      * with its end and the captures set as match() would set them, -1 if
      * there is none, or PCRE_FAILED if PCRE gave up (backtrack or JIT stack
-     * limit): the port then runs this and every later match.
+     * limit): the port then runs this and every later match. preg_match
+     * copies the match and every capture: when that could need more
+     * memory than there is (MemoryLimit), the port runs this search
+     * (PCRE_FAILED too), and copies only the captures Lua asks for.
      */
     private function regexSearch(string $regex, int $s): int
     {
+        $copies = (\count($this->regex->isPositionCapture) + 1) * ($this->srcEnd - $s);
+        if ($copies > MemoryLimit::CHECK_ABOVE && memory_get_usage(true) + $copies > $this->regexCopiesAllowed) {
+            if (!MemoryLimit::fits($copies)) {
+                $this->regexStart = -1;
+                return self::PCRE_FAILED;
+            }
+            $this->regexCopiesAllowed = memory_get_usage(true) + $copies;  // (later searches copy less)
+        }
         $found = @preg_match($regex, $this->src, $groups, PREG_OFFSET_CAPTURE, $s);
         if ($found === 0) {
             $this->regexStart = -1;
@@ -679,6 +694,15 @@ final class MatchState
     {
         $levelCount = ($this->level === 0 && $s !== -1) ? 1 : $this->level;
         Auxiliary::checkStack($this->L, $levelCount, 'too many captures');
+        if ($this->srcEnd > MemoryLimit::CHECK_ABOVE) {  // (captures are copies: up to 32 of the subject)
+            $bytes = $levelCount > $this->level ? $e - $s : 0;  // the whole match
+            for ($i = 0; $i < $this->level; $i++) {
+                $bytes += max(0, $this->captureLen[$i]);
+            }
+            if ($bytes > MemoryLimit::CHECK_ABOVE) {
+                MemoryLimit::reserve($bytes);
+            }
+        }
         $captures = [];
         for ($i = 0; $i < $levelCount; $i++) {
             $captures[] = $this->getCapture($i, $s, $e);

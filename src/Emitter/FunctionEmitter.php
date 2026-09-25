@@ -12,6 +12,7 @@ use LuaPhp\Runtime\Gc\Collector;
 use LuaPhp\Runtime\Lua;
 use LuaPhp\Runtime\LuaClosure;
 use LuaPhp\Runtime\LuaTable;
+use LuaPhp\Runtime\MemoryLimit;
 use LuaPhp\Runtime\MetaMethods;
 
 /**
@@ -612,12 +613,17 @@ final class FunctionEmitter
                 );
 
             case OpCodes::OP_CONCAT:
+                // strings are joined here when the result is small; others
+                // (and results too large to go unchecked: MemoryLimit) by Vm::concat
                 $operands = [];
                 $conditions = [];
+                $lengths = [];
                 for ($i = 0; $i < $b; $i++) {
                     $operands[] = self::r($a + $i);
                     $conditions[] = '\is_string(' . self::r($a + $i) . ')';
+                    $lengths[] = '\strlen(' . self::r($a + $i) . ')';
                 }
+                $conditions[] = implode(' + ', $lengths) . ' <= ' . MemoryLimit::CHECK_ABOVE;
                 return self::lines(
                     'if (' . implode(' && ', $conditions) . ') {',
                     "    $ra = " . implode(' . ', $operands) . ';',

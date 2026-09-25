@@ -82,6 +82,9 @@ final class GlobalState
     /** @var array<string, mixed> free slots for libraries (e.g. the io library's default files) */
     public array $libraryState = [];
 
+    /** frame budget of each thread (Calls::frameBudget, for the memory left when the state was created) */
+    public int $frameBudget = Calls::MAX_FRAME_BYTES;
+
     public function __construct()
     {
         $this->registry = new LuaTable();
@@ -89,5 +92,6 @@ final class GlobalState
         $this->registry->arr[2] = $this->globals;  // LUA_RIDX_GLOBALS
         $this->registry->hash[Lua::LUA_LOADED_TABLE] = new LuaTable();
         $this->gcRealBase = memory_get_usage();
+        $this->frameBudget = Calls::frameBudget();
     }
 }

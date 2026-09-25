@@ -16,6 +16,7 @@ use LuaPhp\Runtime\LuaClosure;
 use LuaPhp\Runtime\LuaError;
 use LuaPhp\Runtime\LuaObject;
 use LuaPhp\Runtime\LuaTable;
+use LuaPhp\Runtime\MemoryLimit;
 use LuaPhp\Runtime\NativeFunction;
 use LuaPhp\Runtime\Userdata;
 use LuaPhp\Runtime\Vm;
@@ -246,20 +247,6 @@ final class PackageLib
     }
 
     /**
-     * loadlib.c: getnextfilename over the whole list: the names in
-     * 'name1;name2;...' (none for an empty path).
-     *
-     * @return list<string>
-     */
-    private static function fileNames(string $path): array
-    {
-        if ($path === '') {
-            return [];
-        }
-        return explode(self::LUA_PATH_SEP, $path);
-    }
-
-    /**
      * loadlib.c: pusherrornotfound: for ";blabla.so;blublu.so" the string
      *
      *     no file 'blabla.so'
@@ -267,6 +254,7 @@ final class PackageLib
      */
     private static function errorNotFound(string $path): string
     {
+        MemoryLimit::reserve(\strlen($path) + 10 + substr_count($path, self::LUA_PATH_SEP) * 11);
         return "no file '" . str_replace(self::LUA_PATH_SEP, "'\n\tno file '", $path) . "'";
     }
 
@@ -289,11 +277,20 @@ final class PackageLib
         $directorySeparator = DebugInfo::cString($directorySeparator);
         // separator is non-empty and appears in 'name'?
         if ($separator !== '' && str_contains($name, $separator[0])) {
+            MemoryLimit::reserve(\strlen($name) + substr_count($name, $separator) * max(0, \strlen($directorySeparator) - \strlen($separator)));
             $name = str_replace($separator, $directorySeparator, $name);  // replace it by 'dirsep'
         }
         // add path to the buffer, replacing marks ('?') with the file name
+        MemoryLimit::reserve(\strlen($path) + substr_count($path, self::LUA_PATH_MARK) * \strlen($name));
         $pathName = str_replace(self::LUA_PATH_MARK, $name, $path);
-        foreach (self::fileNames($pathName) as $filename) {
+        // loadlib.c: getnextfilename: the names in 'name1;name2;...' (none for an empty path)
+        $end = \strlen($pathName);
+        for ($start = 0; $pathName !== '' && $start <= $end; $start = $separatorPosition + 1) {
+            $separatorPosition = strpos($pathName, self::LUA_PATH_SEP, $start);
+            if ($separatorPosition === false) {
+                $separatorPosition = $end;  // name goes until the end
+            }
+            $filename = substr($pathName, $start, $separatorPosition - $start);
             if (($precompiledFiles && ChunkLoader::hasPrecompiledFile($filename)) || self::readable($filename)) {  // does file exist and is readable?
                 return [$filename, null];  // return that name
             }

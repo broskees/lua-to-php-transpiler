@@ -9,6 +9,7 @@ use LuaPhp\Runtime\Coroutine;
 use LuaPhp\Runtime\DebugInfo;
 use LuaPhp\Runtime\Lua;
 use LuaPhp\Runtime\LuaObject;
+use LuaPhp\Runtime\MemoryLimit;
 use LuaPhp\Runtime\NumberFormat;
 
 /**
@@ -32,6 +33,9 @@ final class StringFormat
     // lstrlib.c: MAX_FORMAT (maximum size of each format specification)
     private const MAX_FORMAT = 32;
 
+    // lstrlib.c: MAX_ITEM (maximum size of a formatted item that is not a string: '%99.99f' of -1e308)
+    private const MAX_ITEM = 120 + 308;
+
     /** characters that addquoted escapes: '"', '\\', and control characters (C locale iscntrl) */
     private const QUOTED_SPECIALS = "\"\\\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f"
         . "\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f\x7f";
@@ -51,8 +55,14 @@ final class StringFormat
         $formatEnd = \strlen($format);
         $position = 0;
         $result = '';
+        $capacity = MemoryLimit::CHECK_ABOVE;  // $result may grow to this length before the next check
         while ($position < $formatEnd) {
             $escapePosition = strpos($format, self::L_ESC, $position);
+            // room for the text before the next item and for the item, unless it is a string (checked below)
+            $bytes = \strlen($result) + ($escapePosition === false ? $formatEnd : $escapePosition) - $position + self::MAX_ITEM;
+            if ($bytes > $capacity) {
+                $capacity = MemoryLimit::grow($bytes);
+            }
             if ($escapePosition === false) {
                 $result .= substr($format, $position);
                 break;
@@ -124,7 +134,11 @@ final class StringFormat
                     if (\strlen($form) !== 2) {  // modifiers?
                         Auxiliary::error($L, "specifier '%q' cannot have modifiers");
                     }
-                    $result .= self::literal($L, $args, $arg);
+                    $literal = self::literal($L, $args, $arg);
+                    if (\strlen($result) + \strlen($literal) > $capacity) {
+                        $capacity = MemoryLimit::grow(\strlen($result) + \strlen($literal));
+                    }
+                    $result .= $literal;
                     break;
                 case 's':
                     // fast path: a string, when strings have no '__tostring'
@@ -132,6 +146,9 @@ final class StringFormat
                         ? $value
                         : Auxiliary::toLString($L, $value);
                     if (\strlen($form) === 2) {  // no modifiers?
+                        if (\strlen($result) + \strlen($string) > $capacity) {
+                            $capacity = MemoryLimit::grow(\strlen($result) + \strlen($string));
+                        }
                         $result .= $string;  // keep entire string
                         break;
                     }
@@ -139,6 +156,9 @@ final class StringFormat
                     self::checkFormat($L, $form, self::L_FMTFLAGSC, true);
                     if (!str_contains($form, '.') && \strlen($string) >= 100) {
                         // no precision and string is too long to be formatted
+                        if (\strlen($result) + \strlen($string) > $capacity) {
+                            $capacity = MemoryLimit::grow(\strlen($result) + \strlen($string));
+                        }
                         $result .= $string;  // keep entire string
                         break;
                     }
@@ -303,9 +323,13 @@ final class StringFormat
     {
         $length = \strlen($s);
         $quoted = '"';
+        $capacity = MemoryLimit::CHECK_ABOVE;  // $quoted may grow to this length before the next check
         $position = 0;
         while ($position < $length) {
             $plainLength = strcspn($s, self::QUOTED_SPECIALS, $position);
+            if (\strlen($quoted) + $plainLength + 5 > $capacity) {  // (plain text and one escape, '\ddd')
+                $capacity = MemoryLimit::grow(\strlen($quoted) + $plainLength + 5);
+            }
             $quoted .= substr($s, $position, $plainLength);
             $position += $plainLength;
             if ($position >= $length) {

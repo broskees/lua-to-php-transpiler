@@ -18,7 +18,9 @@ namespace Tests\VirtualMemoryTest;
  * directory is transpiled as one project (a copy: reference/ is read-only).
  * Expected difference: files.lua, the last file all.lua runs, dofile()s a
  * file it writes at run time (files.lua:202); lua2php output refuses that,
- * so its run ends there, after every other official file passed.
+ * so its run ends there, after every other official file passed. A
+ * lua2php script keeps the memory_limit PHP was started with: it gets the
+ * 4G bin/lua sets itself.
  */
 
 const ALL_LUA_VIRTUAL_CAP_KB = 1536 * 1024;
@@ -35,7 +37,7 @@ function test_bin_lua_and_a_lua2php_project_run_all_lua_under_the_virtual_memory
     $running = [
         'bin/lua' => startProcess($underCap(['php', REPO_ROOT . '/bin/lua', '-e_U=true', 'all.lua']), OFFICIAL_TESTS_DIRECTORY),
         // a lua2php script takes no -e: LUA_INIT sets _U before the script runs
-        'lua2php' => startProcess($underCap(['env', 'LUA_INIT=_U=true', "LUAPHP_CACHE_DIR=$cacheDirectory", 'php', 'all.php']), $project),
+        'lua2php' => startProcess($underCap(['env', 'LUA_INIT=_U=true', "LUAPHP_CACHE_DIR=$cacheDirectory", 'php', '-d', 'memory_limit=4G', 'all.php']), $project),
     ];
     [$status, $standardOutput, $errorOutput] = finishProcess($running['bin/lua']);
     assertTrue(

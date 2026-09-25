@@ -68,7 +68,7 @@ final class Coroutine
     /** stack size limit: LUAI_MAXSTACK, or ERRORSTACKSIZE while handling a stack overflow */
     public int $stackLimit = Lua::LUAI_MAXSTACK;
 
-    /** frame memory limit: Calls::MAX_FRAME_BYTES, plus some extra while handling a stack overflow */
+    /** frame memory limit: the state's frame budget, plus some extra while handling a stack overflow */
     public int $frameBytesLimit = Calls::MAX_FRAME_BYTES;
 
     /**
@@ -144,6 +144,7 @@ final class Coroutine
     public function __construct(
         public readonly GlobalState $globalState,
     ) {
+        $this->frameBytesLimit = $globalState->frameBudget;
         $this->baseCi = CallInfo::push($this, null, Lua::CIST_C, 1 + Lua::LUA_MINSTACK, 0);
     }
 

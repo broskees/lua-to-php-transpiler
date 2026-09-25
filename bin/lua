@@ -25,6 +25,7 @@ use LuaPhp\Runtime\NativeFunction;
 use LuaPhp\Runtime\Standalone;
 
 Standalone::configurePhp();
+Standalone::raiseMemoryLimit();
 
 // load() caches compiled chunks on disk only when asked to (tests never
 // depend on what earlier runs left there); in memory it always does

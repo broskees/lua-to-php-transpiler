@@ -10,6 +10,7 @@ use LuaPhp\Runtime\Coroutine;
 use LuaPhp\Runtime\Lua;
 use LuaPhp\Runtime\LuaObject;
 use LuaPhp\Runtime\LuaTable;
+use LuaPhp\Runtime\MemoryLimit;
 use LuaPhp\Runtime\MetaMethods;
 use LuaPhp\Runtime\Vm;
 
@@ -206,18 +207,22 @@ final class TableLib
         if ($table instanceof LuaTable && $table->metatable === null && \count($args) <= 2 && \is_string($separator)) {
             $last = $table->length();
             $pieces = [];
+            $length = 0;
             for ($index = 1; $index <= $last; $index++) {
                 $value = $table->arr[$index] ?? null;
                 if (\is_string($value)) {
                     $pieces[] = $value;
+                    $length += \strlen($value);
                 } elseif (\is_int($value)) {
-                    $pieces[] = (string) $value;
+                    $pieces[] = $piece = (string) $value;
+                    $length += \strlen($piece);
                 } else {
                     $pieces = null;
                     break;
                 }
             }
             if ($pieces !== null) {
+                MemoryLimit::reserve($length + \strlen($separator) * max(0, $last - 1));
                 return [implode($separator, $pieces)];
             }
         }
@@ -227,12 +232,16 @@ final class TableLib
         $last = Auxiliary::optInteger($L, $args, 4, $last);
         $table = $args[0];
         $pieces = [];
+        $length = 0;
         for (; $index < $last; $index++) {
-            $pieces[] = self::field($L, $table, $index);
+            $pieces[] = $piece = self::field($L, $table, $index);
+            $length += \strlen($piece) + \strlen($separator);
         }
         if ($index === $last) {  // add last value (if interval was not empty)
-            $pieces[] = self::field($L, $table, $index);
+            $pieces[] = $piece = self::field($L, $table, $index);
+            $length += \strlen($piece);
         }
+        MemoryLimit::reserve($length);
         return [implode($separator, $pieces)];
     }
 

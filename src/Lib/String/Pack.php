@@ -8,6 +8,7 @@ use LuaPhp\Lib\StringLib;
 use LuaPhp\Runtime\Auxiliary;
 use LuaPhp\Runtime\Coroutine;
 use LuaPhp\Runtime\DebugInfo;
+use LuaPhp\Runtime\MemoryLimit;
 
 /**
  * Port of lstrlib.c's PACK/UNPACK section: string.pack, string.packsize
@@ -232,9 +233,14 @@ final class Pack
         $totalSize = 0;  // accumulate total size of result
         $args[] = null;  // mark to separate arguments from string buffer (a missing argument is "nil")
         $result = '';
+        $capacity = MemoryLimit::CHECK_ABOVE;  // $result may grow to this length before the next check
         while (!$header->atEnd()) {
             [$option, $size, $alignmentPadding] = $header->getDetails($totalSize);
             $totalSize += $alignmentPadding + $size;
+            // room for the alignment and a number (strings are checked below, after their argument)
+            if (\strlen($result) + $alignmentPadding + self::MAXINTSIZE > $capacity) {
+                $capacity = MemoryLimit::grow(\strlen($result) + $alignmentPadding + self::MAXINTSIZE);
+            }
             $result .= str_repeat("\0", $alignmentPadding);  // fill alignment
             $arg++;
             switch ($option) {
@@ -264,6 +270,9 @@ final class Pack
                     $string = Auxiliary::checkString($L, $args, $arg);
                     $length = \strlen($string);
                     Auxiliary::argCheck($L, $length <= $size, $arg, 'string longer than given size');
+                    if (\strlen($result) + $size > $capacity) {
+                        $capacity = MemoryLimit::grow(\strlen($result) + $size);
+                    }
                     $result .= $string . str_repeat("\0", $size - $length);  // pad extra space
                     break;
                 case self::Kstring:  // strings with length count
@@ -275,12 +284,18 @@ final class Pack
                         $arg,
                         'string length does not fit in given size',
                     );
+                    if (\strlen($result) + $size + $length > $capacity) {
+                        $capacity = MemoryLimit::grow(\strlen($result) + $size + $length);
+                    }
                     $result .= $header->packInteger($length, $size, false) . $string;  // pack length, add string
                     $totalSize += $length;
                     break;
                 case self::Kzstr:  // zero-terminated string
                     $string = Auxiliary::checkString($L, $args, $arg);
                     Auxiliary::argCheck($L, !str_contains($string, "\0"), $arg, 'string contains zeros');
+                    if (\strlen($result) + \strlen($string) + 1 > $capacity) {
+                        $capacity = MemoryLimit::grow(\strlen($result) + \strlen($string) + 1);
+                    }
                     $result .= $string . "\0";  // add zero at the end
                     $totalSize += \strlen($string) + 1;
                     break;

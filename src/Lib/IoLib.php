@@ -508,7 +508,7 @@ final class IoLib
     private static function readChars(CFile $f, int $count): array
     {
         if ($count < 0 || $count > CFile::MAX_READ_REQUEST) {
-            throw new LuaError('not enough memory');  // lauxlib.c: resizebox
+            LuaError::raise(Lua::MEMERRMSG);  // lauxlib.c: resizebox
         }
         $data = $f->read($count);
         return [$data !== '', $data];

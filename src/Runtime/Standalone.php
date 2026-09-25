@@ -17,13 +17,14 @@ final class Standalone
     /**
      * PHP settings for running Lua: no PHP warning may leak into Lua's
      * output (they become exceptions, i.e. crashes that show the bug),
-     * exception traces must not keep Lua values alive, deep recursion
-     * needs memory, and stdout is buffered like C's stdio.
+     * exception traces must not keep Lua values alive, and stdout is
+     * buffered like C's stdio. memory_limit stays as PHP was started
+     * (see raiseMemoryLimit for bin/lua): library functions raise Lua's
+     * "not enough memory" below it (MemoryLimit).
      */
     public static function configurePhp(): void
     {
         ini_set('zend.exception_ignore_args', '1');
-        ini_set('memory_limit', '4G');
         ini_set('serialize_precision', '-1');
         set_error_handler(static function (int $severity, string $message, string $file, int $line): bool {
             if (!(error_reporting() & $severity)) {
@@ -32,6 +33,27 @@ final class Standalone
             throw new \ErrorException($message, 0, $severity, $file, $line);
         });
         ob_start(null, 8192);
+    }
+
+    /**
+     * bin/lua's memory: deep recursion and the official test suite need
+     * more than PHP's default 128M, so raise memory_limit to 4G (never
+     * lower it; -1 is no limit). PHP 8.5's max_memory_limit caps what
+     * memory_limit may be set to, and asking for more warns: ask for at
+     * most the cap. Scripts bin/lua2php generates, and other programs
+     * that embed the runtime, keep the limit PHP was started with.
+     */
+    public static function raiseMemoryLimit(): void
+    {
+        $wanted = 4 * 1024 * 1024 * 1024;
+        $cap = (int) @ini_parse_quantity((string) ini_get('max_memory_limit'));  // -1: no cap
+        if ($cap > 0 && $cap < $wanted) {
+            $wanted = $cap;
+        }
+        $current = (int) @ini_parse_quantity((string) ini_get('memory_limit'));
+        if ($current >= 0 && $current < $wanted) {
+            ini_set('memory_limit', (string) $wanted);
+        }
     }
 
     /** lauxlib.c: luaL_newstate + linit.c: luaL_openlibs */

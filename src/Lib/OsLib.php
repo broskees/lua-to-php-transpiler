@@ -14,6 +14,7 @@ use LuaPhp\Runtime\DebugInfo;
 use LuaPhp\Runtime\Gc\Collector;
 use LuaPhp\Runtime\Lua;
 use LuaPhp\Runtime\LuaTable;
+use LuaPhp\Runtime\MemoryLimit;
 use LuaPhp\Runtime\Standalone;
 use LuaPhp\Runtime\Vm;
 
@@ -257,9 +258,15 @@ final class OsLib
             return [$table];
         }
         $result = '';
+        $capacity = MemoryLimit::CHECK_ABOVE;  // $result may grow to this length before the next check
         $length = \strlen($format);
         while ($position < $length) {
             $percentPosition = strpos($format, '%', $position);
+            // room for the text before the next conversion and for the conversion (loslib.c: SIZETIMEFMT)
+            $bytes = \strlen($result) + ($percentPosition === false ? $length : $percentPosition) - $position + 250;
+            if ($bytes > $capacity) {
+                $capacity = MemoryLimit::grow($bytes);
+            }
             if ($percentPosition === false) {  // no more conversion specifiers
                 $result .= substr($format, $position);
                 break;

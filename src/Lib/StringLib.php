@@ -15,6 +15,7 @@ use LuaPhp\Runtime\Lua;
 use LuaPhp\Runtime\LuaClosure;
 use LuaPhp\Runtime\LuaObject;
 use LuaPhp\Runtime\LuaTable;
+use LuaPhp\Runtime\MemoryLimit;
 use LuaPhp\Runtime\NativeFunction;
 use LuaPhp\Runtime\StringToNumber;
 use LuaPhp\Runtime\Userdata;
@@ -113,12 +114,14 @@ final class StringLib
         $s = $args[0] ?? null;
         // Fast path for string.sub(s, i[, j]) with integers 1 <= i <= j <=
         // #s (a missing or nil j is -1, which is #s): posrelatI and
-        // getendpos give i and j unchanged.
+        // getendpos give i and j unchanged. Results too large to go
+        // unchecked (MemoryLimit) take the path below.
         if (\is_string($s) && \count($args) <= 3) {
             $length = \strlen($s);
             $start = $args[1] ?? null;
             $end = $args[2] ?? $length;
-            if (\is_int($start) && \is_int($end) && $start >= 1 && $start <= $end && $end <= $length) {
+            if (\is_int($start) && \is_int($end) && $start >= 1 && $start <= $end && $end <= $length
+                && $end - $start < MemoryLimit::CHECK_ABOVE) {
                 return [substr($s, $start - 1, $end - $start + 1)];
             }
         }
@@ -129,25 +132,32 @@ final class StringLib
         if ($start > $end) {
             return [''];
         }
+        MemoryLimit::reserve($end - $start + 1);
         return [substr($s, $start - 1, $end - $start + 1)];
     }
 
     // lstrlib.c: str_reverse
     private static function reverse(Coroutine $L, array $args): array
     {
-        return [strrev(Auxiliary::checkString($L, $args, 1))];
+        $s = Auxiliary::checkString($L, $args, 1);
+        MemoryLimit::reserve(\strlen($s));
+        return [strrev($s)];
     }
 
     // lstrlib.c: str_lower (C locale; PHP's strtolower is ASCII-only)
     private static function lower(Coroutine $L, array $args): array
     {
-        return [strtolower(Auxiliary::checkString($L, $args, 1))];
+        $s = Auxiliary::checkString($L, $args, 1);
+        MemoryLimit::reserve(\strlen($s));
+        return [strtolower($s)];
     }
 
     // lstrlib.c: str_upper (C locale)
     private static function upper(Coroutine $L, array $args): array
     {
-        return [strtoupper(Auxiliary::checkString($L, $args, 1))];
+        $s = Auxiliary::checkString($L, $args, 1);
+        MemoryLimit::reserve(\strlen($s));
+        return [strtoupper($s)];
     }
 
     // lstrlib.c: str_rep
@@ -163,9 +173,12 @@ final class StringLib
             Auxiliary::error($L, 'resulting string too large');
         }
         if ($separator === '') {
+            MemoryLimit::reserve(\strlen($s) * $n);
             return [str_repeat($s, $n)];
         }
         // first n-1 copies followed by the separator, then the last copy
+        // (appending it may copy the whole string)
+        MemoryLimit::reserve(2 * ((\strlen($s) + \strlen($separator)) * $n));
         return [str_repeat($s . $separator, $n - 1) . $s];
     }
 
@@ -318,8 +331,13 @@ final class StringLib
     private static function expandReplacement(MatchState $ms, string $replacement, int $s, int $e): string
     {
         $expanded = '';
+        $capacity = MemoryLimit::CHECK_ABOVE;  // $expanded may grow to this length before the next check
         $position = 0;
         while (($escapePosition = strpos($replacement, '%', $position)) !== false) {
+            // room for the text before the escape and for a capture (at most the whole match)
+            if (\strlen($expanded) + $escapePosition - $position + $e - $s > $capacity) {
+                $capacity = MemoryLimit::grow(\strlen($expanded) + $escapePosition - $position + $e - $s);
+            }
             $expanded .= substr($replacement, $position, $escapePosition - $position);
             $escaped = $replacement[$escapePosition + 1] ?? "\0";  // skip ESC (C reads the final '\0')
             if ($escaped === '%') {  // '%%'
@@ -333,7 +351,8 @@ final class StringLib
             }
             $position = $escapePosition + 2;
         }
-        return $expanded . substr($replacement, $position);
+        $expanded .= substr($replacement, $position);
+        return $expanded;
     }
 
     // lstrlib.c: str_gsub (with add_value)
@@ -360,6 +379,7 @@ final class StringLib
         }
         $ms = new MatchState($L, $source, $pattern);
         $result = '';
+        $capacity = MemoryLimit::CHECK_ABOVE;  // $result may grow to this length before the next check
         $position = 0;
         $lastMatch = -1;  // end of last match (C: NULL)
         $count = 0;  // replacement count
@@ -370,6 +390,9 @@ final class StringLib
                 if ($candidate === -1) {
                     break;  // no more matches: the rest of the subject is kept below
                 }
+                if (\strlen($result) + $candidate - $position > $capacity) {
+                    $capacity = MemoryLimit::grow(\strlen($result) + $candidate - $position);
+                }
                 $result .= substr($source, $position, $candidate - $position);
                 $position = $candidate;
             }
@@ -378,7 +401,7 @@ final class StringLib
                 $count++;
                 // lstrlib.c: add_value
                 if ($replacementString !== null) {
-                    $result .= self::expandReplacement($ms, $replacementString, $position, $end);
+                    $piece = self::expandReplacement($ms, $replacementString, $position, $end);
                     $changed = true;  // something changed
                 } else {
                     if ($replacementType === Lua::LUA_TFUNCTION) {  // call the function
@@ -387,16 +410,23 @@ final class StringLib
                         $value = Vm::getTable($L, $replacement, $ms->getCapture(0, $position, $end));
                     }
                     if ($value === null || $value === false) {  // nil or false?
-                        $result .= substr($source, $position, $end - $position);  // keep original text
+                        $piece = substr($source, $position, $end - $position);  // keep original text
                     } elseif (!(\is_string($value) || \is_int($value) || \is_float($value))) {
                         Auxiliary::error($L, 'invalid replacement value (a ' . LuaObject::typeName($value) . ')');
                     } else {
-                        $result .= LuaObject::toStringCoerced($value);  // add result to accumulator
+                        $piece = LuaObject::toStringCoerced($value);  // add result to accumulator
                         $changed = true;  // something changed
                     }
                 }
+                if (\strlen($result) + \strlen($piece) > $capacity) {
+                    $capacity = MemoryLimit::grow(\strlen($result) + \strlen($piece));
+                }
+                $result .= $piece;
                 $position = $lastMatch = $end;
             } elseif ($position < $sourceLength) {  // otherwise, skip one character
+                if (\strlen($result) >= $capacity) {
+                    $capacity = MemoryLimit::grow(\strlen($result) + 1);
+                }
                 $result .= $source[$position++];
             } else {
                 break;  // end of subject
@@ -408,6 +438,9 @@ final class StringLib
         if (!$changed) {  // no changes?
             // return original string (a number subject was converted in place by luaL_checklstring)
             return [$source, $count];
+        }
+        if (\strlen($result) + $sourceLength - $position > $capacity) {
+            MemoryLimit::grow(\strlen($result) + $sourceLength - $position);
         }
         $result .= substr($source, $position);
         return [$result, $count];  // new string and number of substitutions

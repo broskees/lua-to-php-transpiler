@@ -107,7 +107,7 @@ final class CoroutineLib
         if ($status !== Lua::LUA_ERRMEM && \is_string($error)) {  // not a memory error and error object is a string?
             $error = Auxiliary::where($L, 1) . $error;  // add extra info, if available
         }
-        throw new LuaError($error);  // propagate error
+        LuaError::raise($error);  // propagate error
     }
 
     // lcorolib.c: luaB_cocreate

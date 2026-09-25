@@ -236,7 +236,11 @@ Lua string keys and integer keys distinct.
   variables), `top`/`frameBytes` (stack limits). Return pops: `$L->ci = $ci->previous`.
 - **Errors.** `LuaError($value, $status)`. Raise with `DebugInfo::runError($L,
   $msg)` (luaG_runerror: adds "chunk:line:" of the running Lua function) or
-  `Auxiliary::error($L, $msg)` (luaL_error: position of level 1). Throwing does
+  `Auxiliary::error($L, $msg)` (luaL_error: position of level 1). Natives
+  that raise a Lua value (C: lua_error, as error, assert, coroutine.wrap and
+  dofile do) use `LuaError::raise($value)`: the string "not enough memory"
+  is a memory error there (LUA_ERRMEM: no message handler), as in lapi.c.
+  Throwing does
   not pop CallInfos: the catcher, `Calls::protectedCall/protectedRun`
   (luaD_pcall), runs the message handler on top of the chain as it was at the
   raise point (like luaG_errormsg), then resets `$L->ci`/`nCcalls`, closes
@@ -257,10 +261,31 @@ Lua string keys and integer keys distinct.
 - **Limits.** "stack overflow" when a frame's approximate slot top exceeds
   LUAI_MAXSTACK, or when the estimated PHP memory of the frames
   (`FunctionEmitter::frameBytes`: PHP frames of eval'd code grow with the
-  function's size) exceeds `Calls::MAX_FRAME_BYTES` (256 MB, about 120000
-  small Lua frames); both limits grow while the overflow is handled, and a
-  second overflow is "error in error handling". C calls: LUAI_MAXCCALLS (200)
-  -> "C stack overflow".
+  function's size) exceeds the thread's frame budget: `Calls::frameBudget()`
+  when the state is created (GlobalState::$frameBudget), half the memory
+  left below memory_limit once a quarter (at least 16 MB) is kept aside,
+  at most `Calls::MAX_FRAME_BYTES` (256 MB, about 100000 small Lua frames,
+  bin/lua's 4G), so deep recursion stays a catchable error at any limit
+  (frames really take up to about twice their estimate without opcache).
+  Both limits grow while the overflow is handled (frames: 1/32 of the
+  budget, 1 to 8 MB), and a second overflow is "error in error handling".
+  C calls: LUAI_MAXCCALLS (200) -> "C stack overflow". Memory: PHP's
+  memory_limit is a fatal error no
+  pcall sees, so every library function that can build a large result in
+  one call checks its size first (`MemoryLimit::reserve`, or `grow` for a
+  string built piece by piece like a luaL_Buffer: room for twice its
+  length) and raises `LuaError('not enough memory', LUA_ERRMEM)` as C's
+  failing allocator does (no position, no message handler). Room =
+  memory_limit - memory_get_usage(true) - 4 MB, checked again after
+  gc_collect_cycles + gc_mem_caches; results up to 64 KB are never
+  checked. Lua's own limits come first ("resulting string too large").
+  Covered: string.rep/sub/upper/lower/reverse/format/gsub/pack, pattern
+  captures, `..` (emitted code joins strings inline only up to 64 KB in
+  all, else `Vm::concat`), table.concat, io reads ('a', lines, counts),
+  os.date, package.searchpath, load's reader. preg_match copies the match
+  and every capture: a search whose copies might not fit runs on the port.
+  Memory that grows a little at a time (tables, closures) is not checked
+  and still ends in PHP's fatal error; frames are bounded as above.
 - **Upvalues.** An open `UpVal->v` is a PHP reference to `$R[$reg]`; one UpVal
   per register (`Upvalues::find`), closed by `Upvalues::close`/`closeUpvalues`
   (OP_CLOSE, OP_RETURN/OP_TAILCALL with k, error unwinding). `v` is UpVal's
@@ -355,7 +380,11 @@ Lua string keys and integer keys distinct.
   exceptions (a crash, never output), exception traces drop arguments, stdout
   is buffered (PHP's output buffer is C's stdout buffer: `print` echoes and
   then flushes, like lua_writeline; `Standalone::flushStdout()` before
-  stderr/exit).
+  stderr/exit). It leaves memory_limit alone: lua2php output and any PHP
+  that embeds the runtime keep the limit PHP was started with. bin/lua
+  (and test harnesses that stand in for it) call
+  `Standalone::raiseMemoryLimit()`: 4G, never lower, and at most PHP 8.5's
+  max_memory_limit (ini_set above it would warn).
 - **Reference build.** lua5.4 is built with LUA_COMPAT_5_3: `__le` falls back
   to `not __lt(b, a)`, and math has pow, ldexp, frexp, cosh, sinh, tanh, log10,
   atan2. Its package.path/cpath defaults include the distribution's `/usr/`

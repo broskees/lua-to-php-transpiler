@@ -32,6 +32,7 @@ use LuaPhp\Runtime\Standalone;
 use LuaPhp\Runtime\Userdata;
 
 Standalone::configurePhp();
+Standalone::raiseMemoryLimit();  // as bin/lua: the longest chains need more than PHP's default
 [, , $kind, $length] = $argv;
 
 function buildChain(Coroutine $L, string $kind, int $length): object

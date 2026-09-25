@@ -22,4 +22,15 @@ final class LuaError extends \Exception
     ) {
         parent::__construct(\is_string($value) ? $value : 'Lua error object (' . get_debug_type($value) . ')');
     }
+
+    /**
+     * lapi.c: lua_error, how C functions raise $value: a memory error when
+     * it is the memory error message (C compares it with the interned
+     * short string G(L)->memerrmsg), else a regular error, which goes
+     * through the message handler.
+     */
+    public static function raise(mixed $value): never
+    {
+        throw new self($value, $value === Lua::MEMERRMSG ? Lua::LUA_ERRMEM : Lua::LUA_ERRRUN);
+    }
 }

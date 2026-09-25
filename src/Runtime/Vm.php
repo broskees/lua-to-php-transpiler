@@ -586,6 +586,7 @@ final class Vm
                 } else {
                     // at least two non-empty string values; get as many as possible
                     $pieces = [$second];
+                    $length = \strlen($second);
                     for ($handled = 1; $handled < $total; $handled++) {
                         $piece = $values[$top - $handled - 1];
                         if (\is_int($piece) || \is_float($piece)) {
@@ -594,6 +595,10 @@ final class Vm
                             break;
                         }
                         $pieces[] = $piece;
+                        $length += \strlen($piece);
+                    }
+                    if ($length > MemoryLimit::CHECK_ABOVE) {
+                        MemoryLimit::reserve($length);
                     }
                     $values[$top - $handled] = implode('', array_reverse($pieces));
                 }

@@ -24,12 +24,33 @@ final class Calls
      * it grows with the function's code: FunctionEmitter::frameBytes), a
      * CallInfo and a register array. Frames charge an estimate of that
      * against this budget; exceeding it, like exceeding LUAI_MAXSTACK, is
-     * Lua's "stack overflow" error.
+     * Lua's "stack overflow" error. Less memory_limit, less budget: see
+     * frameBudget.
      */
     public const MAX_FRAME_BYTES = 256 * 1024 * 1024;
 
     /** extra budget while handling a stack overflow (C: the 200 slots of ERRORSTACKSIZE) */
     public const ERROR_EXTRA_FRAME_BYTES = 8 * 1024 * 1024;
+
+    /**
+     * The frame budget of each thread of a state created now (at most
+     * MAX_FRAME_BYTES): running out of PHP memory is a fatal error no
+     * pcall sees, and frames really take up to about twice their estimate
+     * (uncached or eval'd code, FunctionEmitter::frameBytes), so the
+     * budget is half the memory left below memory_limit once a quarter of
+     * it (at least 16 MB) is kept for everything else.
+     */
+    public static function frameBudget(): int
+    {
+        $available = MemoryLimit::available();
+        return max(1 << 20, min(self::MAX_FRAME_BYTES, intdiv($available - max(16 << 20, intdiv($available, 4)), 2)));
+    }
+
+    /** extra budget while handling a stack overflow with a frame budget of $frameBudget */
+    public static function errorExtraFrameBytes(int $frameBudget): int
+    {
+        return min(self::ERROR_EXTRA_FRAME_BYTES, max(1 << 20, intdiv($frameBudget, 32)));
+    }
 
     /** estimated PHP memory of a native function's frame */
     public const NATIVE_FRAME_BYTES = 1024;
@@ -47,7 +68,7 @@ final class Calls
         }
         // add extra size to be able to handle the error message
         $L->stackLimit = Lua::ERRORSTACKSIZE;
-        $L->frameBytesLimit = self::MAX_FRAME_BYTES + self::ERROR_EXTRA_FRAME_BYTES;
+        $L->frameBytesLimit = $L->globalState->frameBudget + self::errorExtraFrameBytes($L->globalState->frameBudget);
         DebugInfo::runError($L, 'stack overflow');
     }
 
@@ -525,9 +546,10 @@ final class Calls
     /** ldo.c: luaD_shrinkstack: leave the extra space used to handle a stack overflow */
     public static function shrinkStack(Coroutine $L): void
     {
-        if ($L->stackLimit > Lua::LUAI_MAXSTACK && $L->ci->top <= Lua::LUAI_MAXSTACK && $L->ci->frameBytes <= self::MAX_FRAME_BYTES) {
+        $frameBudget = $L->globalState->frameBudget;
+        if ($L->stackLimit > Lua::LUAI_MAXSTACK && $L->ci->top <= Lua::LUAI_MAXSTACK && $L->ci->frameBytes <= $frameBudget) {
             $L->stackLimit = Lua::LUAI_MAXSTACK;
-            $L->frameBytesLimit = self::MAX_FRAME_BYTES;
+            $L->frameBytesLimit = $frameBudget;
         }
     }
 }

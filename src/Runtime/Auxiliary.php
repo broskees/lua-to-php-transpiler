@@ -223,7 +223,7 @@ final class Auxiliary
     /** lauxlib.c: luaL_error: raise $message with the position of the caller of the running function */
     public static function error(Coroutine $L, string $message): never
     {
-        throw new LuaError(self::where($L, 1) . $message);
+        LuaError::raise(self::where($L, 1) . $message);
     }
 
     /** lauxlib.c: luaL_getmetafield: raw metatable field, or null */

@@ -15,6 +15,7 @@ use LuaPhp\Runtime\LuaClosure;
 use LuaPhp\Runtime\LuaError;
 use LuaPhp\Runtime\LuaObject;
 use LuaPhp\Runtime\LuaTable;
+use LuaPhp\Runtime\MemoryLimit;
 use LuaPhp\Runtime\MetaMethods;
 use LuaPhp\Runtime\NativeFunction;
 use LuaPhp\Runtime\Standalone;
@@ -199,7 +200,7 @@ final class BaseLib
         if (\is_string($value) && $level > 0) {
             $value = Auxiliary::where($L, $level) . $value;  // add extra information
         }
-        throw new LuaError($value);
+        LuaError::raise($value);
     }
 
     // lbaselib.c: luaB_getmetatable
@@ -485,6 +486,7 @@ final class BaseLib
         // inside load's own frame, with the current message handler
         $readAll = static function () use ($L, $reader): string {
             $pieces = '';
+            $capacity = MemoryLimit::CHECK_ABOVE;  // $pieces may grow to this length before the next check
             while (true) {  // lbaselib.c: generic_reader
                 $results = Calls::call($L, $reader, []);  // call it
                 $piece = $results[0] ?? null;
@@ -497,6 +499,9 @@ final class BaseLib
                 }
                 if ($piece === '') {
                     break;
+                }
+                if (\strlen($pieces) + \strlen($piece) > $capacity) {
+                    $capacity = MemoryLimit::grow(\strlen($pieces) + \strlen($piece));
                 }
                 $pieces .= $piece;
             }
@@ -515,7 +520,11 @@ final class BaseLib
     private static function dofile(Coroutine $L, array $args): array
     {
         $filename = Auxiliary::optString($L, $args, 1, null);
-        $function = ChunkLoader::loadFile($L, $filename, null);
+        try {
+            $function = ChunkLoader::loadFile($L, $filename, null);
+        } catch (LuaError $loadError) {  // luaL_loadfile's status is not LUA_OK
+            LuaError::raise($loadError->value);
+        }
         return Calls::callk($L, $function, []);  // lua_callk with dofilecont: may yield
     }
 

@@ -106,8 +106,15 @@ against `lua5.4`:
 - No C modules: `package.loadlib` always fails.
 - Deep recursion raises Lua's "stack overflow" at about 100,000 levels, where
   `lua5.4` allows about 1,000,000, and each level costs a few KB of memory.
-- The runtime raises PHP's `memory_limit` to 4G. Running out of memory is a
-  PHP fatal error, not Lua's catchable "not enough memory".
+  With less `memory_limit` the limit comes sooner (about 19,000 levels at
+  PHP's default 128M), so that it is still Lua's catchable error.
+- Transpiled scripts keep the `memory_limit` PHP was started with (`bin/lua`
+  raises it to 4G, or to the host's `max_memory_limit`). A library call that
+  would build a result too large for the memory left (`string.rep`,
+  `table.concat`, `string.format`, `..`, `io.read`, ...) raises Lua's
+  catchable "not enough memory", as `lua5.4` does when an allocation fails.
+  Memory that grows a little at a time (tables, closures) still ends in PHP's
+  fatal error at the limit.
 - A deployed program cannot `dofile` or `require` Lua files it writes while
   running: they were never transpiled, so it gets a "not transpiled ahead of
   time" error.
