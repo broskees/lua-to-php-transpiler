@@ -18,6 +18,10 @@ use LuaPhp\Runtime\Coroutine;
  * past the end of the pattern, so the pattern is kept with a '\0'
  * appended ($patternEnd is its real length); the subject is not copied,
  * reads at its end give '\0' explicitly.
+ *
+ * Not in C: when PatternRegex can translate the pattern, the drivers'
+ * question "where is the next match from here, and what are its captures"
+ * (nextCandidate, matchAt) is answered by preg_match instead of match().
  */
 final class MatchState
 {
@@ -89,6 +93,22 @@ final class MatchState
      */
     private readonly ?string $firstLiteral;
 
+    /**
+     * Not in C: test-only switch that makes every new MatchState run the
+     * port (the pattern fuzzer compares it with the PCRE translation).
+     */
+    public static bool $forcePort = false;
+
+    /** Not in C: the pattern's PCRE translation, or null to run the port */
+    private ?PatternRegex $regex;
+
+    /** Not in C: the start (or -1) and end of the last match the regex found */
+    private int $regexStart = -1;
+    private int $regexEnd = -1;
+
+    // Not in C: regexSearch's result when PCRE gives up
+    private const PCRE_FAILED = -2;
+
     // lstrlib.c: prepstate
     public function __construct(
         public Coroutine $L,
@@ -104,20 +124,78 @@ final class MatchState
         $isPlain = $first !== null && !str_contains(self::SPECIALS . ')', $first);
         $isOptional = $second === '*' || $second === '?' || $second === '-';
         $this->firstLiteral = ($isPlain && !$isOptional) ? $first : null;
+        $this->regex = self::$forcePort ? null : PatternRegex::forPattern($pattern, $this->srcEnd, $this);
     }
 
     /**
      * The first position >= $s (up to the end of the subject) where a
      * match of the whole pattern may start, or -1 if there is none. Only
-     * for unanchored searches that try every position in turn.
+     * for unanchored searches that try every position in turn: match()
+     * fails at every position skipped. With a regex, the answer is where
+     * the next match starts, and matchAt() then returns that very match.
      */
     public function nextCandidate(int $s): int
     {
+        if ($this->regex !== null) {
+            $start = $this->regexSearch($this->regex->search, $s);
+            if ($start !== self::PCRE_FAILED) {
+                return $start;
+            }
+        }
         if ($this->firstLiteral === null) {
             return $s;
         }
         $candidate = strpos($this->src, $this->firstLiteral, $s);
         return $candidate === false ? -1 : $candidate;
+    }
+
+    /**
+     * lstrlib.c: reprepstate + match(ms, s, p) for the whole pattern: the
+     * end of its match at $s, or -1, with the captures set for captures().
+     */
+    public function matchAt(int $s): int
+    {
+        if ($this->regex !== null) {
+            if ($s === $this->regexStart) {  // found by nextCandidate
+                return $this->regexEnd;
+            }
+            $start = $this->regexSearch($this->regex->anchored, $s);
+            if ($start !== self::PCRE_FAILED) {
+                return $start === -1 ? -1 : $this->regexEnd;
+            }
+        }
+        $this->reprepstate();
+        return $this->match($s, 0);
+    }
+
+    /**
+     * Not in C: preg_match $regex from $s. Returns the start of the match,
+     * with its end and the captures set as match() would set them, -1 if
+     * there is none, or PCRE_FAILED if PCRE gave up (backtrack or JIT stack
+     * limit): the port then runs this and every later match.
+     */
+    private function regexSearch(string $regex, int $s): int
+    {
+        $found = @preg_match($regex, $this->src, $groups, PREG_OFFSET_CAPTURE, $s);
+        if ($found === 0) {
+            $this->regexStart = -1;
+            return -1;
+        }
+        if ($found !== 1) {
+            $this->regex = null;
+            return self::PCRE_FAILED;
+        }
+        [$matched, $start] = $groups[0];
+        $this->regexStart = $start;
+        $this->regexEnd = $start + \strlen($matched);
+        $isPositionCapture = $this->regex->isPositionCapture;
+        $this->level = \count($isPositionCapture);
+        foreach ($isPositionCapture as $i => $isPosition) {
+            [$captured, $captureStart] = $groups[$i + 1];
+            $this->captureInit[$i] = $captureStart;
+            $this->captureLen[$i] = $isPosition ? self::CAP_POSITION : \strlen($captured);
+        }
+        return $start;
     }
 
     /** the C-locale ctype classes of every byte */
@@ -169,7 +247,7 @@ final class MatchState
     }
 
     // lstrlib.c: reprepstate
-    public function reprepstate(): void
+    private function reprepstate(): void
     {
         $this->matchdepth = self::MAXCCALLS;
         $this->level = 0;
@@ -282,6 +360,76 @@ final class MatchState
         }
     }
 
+    /**
+     * Not in C: which bytes singlematch accepts for the single character
+     * class at pattern position $p ($ep is its classend), for PatternRegex:
+     * 256 flags, "\1" at the offset of every accepted byte, else "\0".
+     */
+    public function classBytes(int $p, int $ep): string
+    {
+        $patternCharacter = $this->pattern[$p];
+        if ($patternCharacter === '.') {
+            return str_repeat("\1", 256);
+        }
+        if ($patternCharacter === self::L_ESC) {
+            return $this->matchClassBytes(\ord($this->pattern[$p + 1]));
+        }
+        if ($patternCharacter === '[') {
+            return $this->matchBracketClassBytes($p, $ep - 1);
+        }
+        $accepted = str_repeat("\0", 256);
+        $accepted[\ord($patternCharacter)] = "\1";
+        return $accepted;
+    }
+
+    /** @var array<int, string> class byte => its matchClassBytes */
+    private static array $classBytesOfClass = [];
+
+    /** Not in C: match_class(c, cl) for every byte c, as classBytes' flags */
+    private function matchClassBytes(int $cl): string
+    {
+        if (!isset(self::$classBytesOfClass[$cl])) {
+            $accepted = '';
+            for ($c = 0; $c < 256; $c++) {
+                $accepted .= $this->matchClass($c, $cl) ? "\1" : "\0";
+            }
+            self::$classBytesOfClass[$cl] = $accepted;
+        }
+        return self::$classBytesOfClass[$cl];
+    }
+
+    /**
+     * Not in C: matchbracketclass(c, p, ec) for every byte c, as classBytes'
+     * flags. Its loop, collecting what each item of the set accepts: it
+     * returns 'sig' for a byte some item accepts, else '!sig'.
+     */
+    private function matchBracketClassBytes(int $p, int $ec): string
+    {
+        $pattern = $this->pattern;
+        $acceptedByItem = str_repeat("\0", 256);
+        $sig = true;
+        if ($pattern[$p + 1] === '^') {
+            $sig = false;
+            $p++;  // skip the '^'
+        }
+        while (++$p < $ec) {
+            if ($pattern[$p] === self::L_ESC) {
+                $p++;
+                $acceptedByItem |= $this->matchClassBytes(\ord($pattern[$p]));
+            } elseif ($pattern[$p + 1] === '-' && $p + 2 < $ec) {
+                $p += 2;
+                $first = \ord($pattern[$p - 2]);
+                $last = \ord($pattern[$p]);
+                if ($first <= $last) {  // (an inverted range accepts nothing)
+                    $acceptedByItem |= str_repeat("\0", $first) . str_repeat("\1", $last - $first + 1) . str_repeat("\0", 255 - $last);
+                }
+            } else {
+                $acceptedByItem[\ord($pattern[$p])] = "\1";
+            }
+        }
+        return $sig ? $acceptedByItem : $acceptedByItem ^ str_repeat("\1", 256);
+    }
+
     // lstrlib.c: matchbalance
     private function matchBalance(int $s, int $p): int
     {
@@ -390,7 +538,7 @@ final class MatchState
      * lstrlib.c: match. Returns the end of the match of pattern position
      * $p at subject position $s, or -1.
      */
-    public function match(int $s, int $p): int
+    private function match(int $s, int $p): int
     {
         if ($this->matchdepth-- === 0) {
             Auxiliary::error($this->L, 'pattern too complex');
