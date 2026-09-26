@@ -182,7 +182,7 @@ function writeFile(string $file, string $contents): void
     if (!is_dir($directory) && !@mkdir($directory, 0777, true) && !is_dir($directory)) {
         throw new RuntimeException("cannot create directory $directory");
     }
-    $temporaryFile = $directory . '/.' . basename($file) . '.' . getmypid() . '.tmp';
+    $temporaryFile = $directory . '/.' . basename($file) . '.' . bin2hex(random_bytes(8)) . '.tmp';  // (hosts may disable getmypid)
     if (@file_put_contents($temporaryFile, $contents) !== strlen($contents) || !@rename($temporaryFile, $file)) {
         @unlink($temporaryFile);
         throw new RuntimeException("cannot write $file");

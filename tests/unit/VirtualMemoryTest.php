@@ -52,3 +52,42 @@ function test_bin_lua_and_a_lua2php_project_run_all_lua_under_the_virtual_memory
         'lua2php all.lua under ulimit -v ' . ALL_LUA_VIRTUAL_CAP_KB . ": exit status $status: " . substr($errorOutput, 0, 500),
     );
 }
+
+/**
+ * A fiber's C stack that cannot be mapped (the address space is used up)
+ * is a failed allocation: Lua's catchable "not enough memory" (C's
+ * allocator failing), once PHP has freed the fibers of unreachable
+ * coroutines and tried again (lmem.c: tryagain), never a PHP fatal
+ * error. A host that disables ini_set gives fibers its own
+ * fiber.stack_size (PHP's default 2 MB, here 64 MB), which uses up a
+ * capped address space with far fewer coroutines than 256 KB would.
+ */
+const FIBER_STACKS_SCRIPT = <<<'LUA'
+    local function useUpTheAddressSpace()
+      local live = {}
+      for i = 1, 1000 do
+        local co = coroutine.create(function () coroutine.yield() end)
+        local ok, message = coroutine.resume(co)
+        if not ok then print(i > 1, message, coroutine.status(co)) break end
+        live[i] = co
+      end
+      print(pcall(coroutine.wrap(function () return "wrap" end)))
+    end
+    useUpTheAddressSpace()
+    print(coroutine.resume(coroutine.create(function () return "works again" end)))
+    LUA;
+
+function test_a_fiber_stack_that_cannot_be_mapped_is_not_enough_memory(): void
+{
+    $directory = scratchDirectory() . '/fiber-stacks';
+    @mkdir($directory);
+    file_put_contents("$directory/fiber_stacks.lua", FIBER_STACKS_SCRIPT);
+    [$status, , $errorOutput] = runCommand(['php', REPO_ROOT . '/bin/lua2php', 'fiber_stacks.lua'], '', $directory);
+    assertSame(0, $status, $errorOutput);
+    $hostSettings = ['-d', 'disable_functions=ini_set', '-d', 'fiber.stack_size=64M'];
+    $expected = [0, "true\tnot enough memory\tdead\nfalse\tnot enough memory\ntrue\tworks again\n", ''];
+    foreach ([[REPO_ROOT . '/bin/lua', 'fiber_stacks.lua'], ['fiber_stacks.php']] as $arguments) {
+        $command = ['sh', '-c', 'ulimit -v ' . (1024 * 1024) . ' && exec "$@"', 'sh', 'php', ...OPCACHE_ON_NEW_FILES, ...$hostSettings, ...$arguments];
+        assertSame($expected, runCommand($command, '', $directory), basename($arguments[0]));
+    }
+}

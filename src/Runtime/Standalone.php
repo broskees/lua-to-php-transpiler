@@ -17,15 +17,24 @@ final class Standalone
     /**
      * PHP settings for running Lua: no PHP warning may leak into Lua's
      * output (they become exceptions, i.e. crashes that show the bug),
-     * exception traces must not keep Lua values alive, and stdout is
+     * exception traces should not keep Lua values alive, and stdout is
      * buffered like C's stdio. memory_limit stays as PHP was started
      * (see raiseMemoryLimit for bin/lua): library functions raise Lua's
      * "not enough memory" below it (MemoryLimit).
+     *
+     * Hosts may disable ini_set (disable_functions); the host's values
+     * then stay, which Lua cannot observe: traces with arguments only
+     * hold values a little longer (Lua's collector marks from its own
+     * roots, and a caught error's trace is freed when its pcall returns),
+     * and literals of floats are exact at any serialize_precision
+     * (PhpLiteral checks the round trip; -1 only makes them shortest).
      */
     public static function configurePhp(): void
     {
-        ini_set('zend.exception_ignore_args', '1');
-        ini_set('serialize_precision', '-1');
+        if (\function_exists('ini_set')) {
+            ini_set('zend.exception_ignore_args', '1');
+            ini_set('serialize_precision', '-1');
+        }
         set_error_handler(static function (int $severity, string $message, string $file, int $line): bool {
             if (!(error_reporting() & $severity)) {
                 return false;  // silenced with @
@@ -43,10 +52,15 @@ final class Standalone
      * most the cap. bin/lua2php raises it too (a build tool: transpiling a
      * big file needs more than the default). Scripts bin/lua2php
      * generates, and other programs that embed the runtime, keep the limit
-     * PHP was started with.
+     * PHP was started with, and so do bin/lua and bin/lua2php when the host
+     * disabled ini_set (limits then come sooner: a smaller frame budget,
+     * "not enough memory", or for bin/lua2php PHP's fatal error).
      */
     public static function raiseMemoryLimit(): void
     {
+        if (!\function_exists('ini_set')) {
+            return;
+        }
         $wanted = 4 * 1024 * 1024 * 1024;
         $cap = (int) @ini_parse_quantity((string) ini_get('max_memory_limit'));  // -1: no cap
         if ($cap > 0 && $cap < $wanted) {
@@ -250,10 +264,11 @@ final class Standalone
      * chose, and never makes PHP warn (ini_set does when the JIT is
      * disabled). Only code compiled afterwards is JIT-compiled: the
      * runtime and the modules the script loads, not the script itself.
+     * Without ini_set (disabled by the host) the JIT stays off.
      */
     public static function switchJitOn(): void
     {
-        if (!\function_exists('opcache_get_status')) {
+        if (!\function_exists('opcache_get_status') || !\function_exists('ini_set')) {
             return;
         }
         $status = @opcache_get_status(false);  // false (with a warning) when opcache.restrict_api forbids it

@@ -129,11 +129,19 @@ show(os.remove(renamed))
 show(select(3, os.remove(renamed)))
 local directory = os.tmpname()
 os.remove(directory)
+-- its name is random: messages show it where mkdir cannot run (see DisabledFunctionsTest)
+local function withoutName(...)
+  local t = table.pack(...)
+  for i = 1, t.n do
+    if type(t[i]) == "string" then t[i] = t[i]:gsub(directory, "DIRECTORY") end
+  end
+  return table.unpack(t, 1, t.n)
+end
 show(os.execute("mkdir " .. directory))
-show(os.remove(directory))
+show(withoutName(os.remove(directory)))
 show(os.execute("mkdir " .. directory .. " && touch " .. directory .. "/inside"))
 show(select(3, os.remove(directory)))
-show(os.remove(directory .. "/inside"), os.remove(directory))
+show(withoutName(os.remove(directory .. "/inside"), os.remove(directory)))
 
 -- execute and popen
 show(os.execute())

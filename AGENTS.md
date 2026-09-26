@@ -138,7 +138,11 @@ Lua string keys and integer keys distinct.
   PHP keeps the last 48 KB in reserve; 256 KB
   leaves 2.5 times the worst case. Linux allows about 65530 mappings per
   process by default and each fiber stack takes 2, so about 32000 live
-  coroutines at most. Freeing: a finished coroutine's fiber is freed at
+  coroutines at most. A fiber whose C stack cannot be mapped (address
+  space used up, e.g. under ulimit -v) is a failed allocation: its first
+  resume runs gc_collect_cycles and tries again once (lmem.c: tryagain),
+  then fails with LUA_ERRMEM "not enough memory" (the coroutine is dead).
+  Freeing: a finished coroutine's fiber is freed at
   once; a suspended one that becomes unreachable (a cycle: Coroutine ->
   Fiber -> its frames -> `$L`) is freed by PHP's cycle collector, and
   closeThread drops it explicitly. PHP destroys a suspended Fiber by
@@ -437,7 +441,21 @@ Lua string keys and integer keys distinct.
   reported and the others are still transpiled) and test harnesses that
   stand in for bin/lua call `Standalone::raiseMemoryLimit()`: 4G, never
   lower, and at most PHP 8.5's max_memory_limit (ini_set above it would
-  warn).
+  warn). Hosts may disable ini_set (and getmypid, set_time_limit, putenv,
+  ...; see Files and processes): every ini_set is behind
+  `function_exists('ini_set')`, and without it the host's values stay.
+  Lua cannot observe two of them: traces with arguments hold values until
+  the pcall that caught the error returns (about 10% more peak memory at
+  a stack overflow), and float literals are exact at any
+  serialize_precision (`PhpLiteral` checks the round trip). The others
+  change limits and speed only: bin/lua keeps the host's memory_limit,
+  the JIT stays as configured, and fibers get the host's fiber.stack_size
+  (PHP's default 2 MB of address space instead of 256 KB: under all.lua's
+  1.5 GB ulimit -v, gc.lua's 1000 live coroutines then end in "not enough
+  memory").
+  `DisabledFunctionsTest` runs bin/lua, bin/lua2php and its output, and
+  the whole diff corpus (Lua2PhpTest too), under a typical shared host's
+  list.
 - **Reference build.** lua5.4 is built with LUA_COMPAT_5_3: `__le` falls back
   to `not __lt(b, a)`, and math has pow, ldexp, frexp, cosh, sinh, tanh, log10,
   atan2. Its package.path/cpath defaults include the distribution's `/usr/`
@@ -455,11 +473,17 @@ Lua string keys and integer keys distinct.
   (Lua can observe them through a second handle). Standard output writes go
   through PHP's output buffer like `print`. C's `errno` is `Lib\Io\Errno`
   (recovered from PHP's warning text); `Errno::fileResult/execResult` are
-  luaL_fileresult/luaL_execresult. Hosts may disable posix and pcntl
-  (disable_functions: a disabled function is undefined, a fatal no pcall
-  sees), so use them only behind `function_exists` with a fallback:
-  `Errno::strerror` falls back to glibc's texts, `CFile::waitForProcess`
-  polls proc_get_status (`tests/unit/DisabledFunctionsTest.php`).
+  luaL_fileresult/luaL_execresult. Hosts may disable posix, pcntl and the
+  process functions (disable_functions: a disabled function is undefined,
+  a fatal no pcall sees), so use them only behind `function_exists` with a
+  fallback: `Errno::strerror` falls back to glibc's texts,
+  `CFile::waitForProcess` polls proc_get_status, and without proc_open,
+  proc_get_status or proc_close (`CFile::canStartProcesses`) popen and
+  system fail with ENOSYS: `os.execute(cmd)` returns fail, "Function not
+  implemented", 38, `io.popen(cmd)` fail, "cmd: Function not implemented",
+  38 (after their argument checks), `os.execute()` false
+  (`tests/unit/DisabledFunctionsTest.php`: lua5.4 with its
+  `PROCESSES_FAIL_INIT` is the reference there).
   Never pass PHP's STDIN/STDOUT/STDERR to
   `proc_open`: PHP seeks the descriptor to that stream's cached position;
   leave the descriptors out so the child inherits them. Dates/times:
