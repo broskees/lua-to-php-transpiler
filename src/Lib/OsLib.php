@@ -114,12 +114,35 @@ final class OsLib
             Errno::$errno = Errno::ENOENT;
             return Errno::fileResult(false, null);
         }
+        if (self::renamesAcrossDevices(CFile::plainPath($fromName), CFile::plainPath($toName))) {
+            Errno::$errno = Errno::EXDEV;
+            return Errno::fileResult(false, null);
+        }
         Errno::clearPhpError();
         $renamed = @rename(CFile::plainPath($fromName), CFile::plainPath($toName));
         if (!$renamed) {
             Errno::setFromPhpError(Errno::ENOENT);
         }
         return Errno::fileResult($renamed, null);
+    }
+
+    /**
+     * Whether rename(2) fails with EXDEV: once it has found both parent
+     * directories, before it looks at the names in them (fs/namei.c:
+     * do_renameat2), when they are on different file systems. PHP's rename
+     * copies and unlinks instead. (A path of PATH_MAX bytes or more fails
+     * first, with ENAMETOOLONG.)
+     */
+    private static function renamesAcrossDevices(string $from, string $to): bool
+    {
+        if (\strlen($from) >= 4096 || \strlen($to) >= 4096) {
+            return false;
+        }
+        $fromParent = @stat(\dirname($from));
+        $toParent = @stat(\dirname($to));
+        return \is_array($fromParent) && \is_array($toParent)
+            && ($fromParent['mode'] & 0170000) === 0040000 && ($toParent['mode'] & 0170000) === 0040000
+            && $fromParent['dev'] !== $toParent['dev'];
     }
 
     // loslib.c: os_tmpname (lua_tmpnam: mkstemp of LUA_TMPNAMTEMPLATE, then close)

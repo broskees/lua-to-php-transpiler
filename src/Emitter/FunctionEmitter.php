@@ -374,13 +374,18 @@ final class FunctionEmitter
      * after a successful arithmetic instruction (checked in
      * metamethodFallback instead), the OP_JMP after a test when the jump is
      * taken (conditionalJump jumps directly), OP_TFORCALL when entered from
-     * OP_TFORPREP (which jumps past this check, to T<pc>).
+     * OP_TFORPREP (which jumps past this check, to T<pc>). An instruction
+     * that takes the values the previous one left up to $top (isIT) passes
+     * it: the hook runs above them.
      */
     private function hookCheck(int $pc): string
     {
         $opcode = OpCodes::GET_OPCODE($this->proto->code[$pc]);
         if ($opcode === OpCodes::OP_VARARGPREP || $opcode === OpCodes::OP_TFORLOOP) {
             return '';
+        }
+        if (OpCodes::isIT($this->proto->code[$pc])) {
+            return self::lines("if (\$trap) { Hooks::traceExec(\$L, \$ci, $pc, \$top); }");
         }
         return self::lines("if (\$trap) { Hooks::traceExec(\$L, \$ci, $pc); }");
     }

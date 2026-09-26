@@ -216,7 +216,7 @@ final class Calls
             $L->ci = $ci;
             $ci->R = $arguments;
             if ($L->hookmask & Lua::LUA_MASKCALL) {
-                Hooks::hook($L, Lua::LUA_HOOKCALL, -1, 1, \count($arguments));
+                Hooks::hook($L, Lua::LUA_HOOKCALL, -1, 1, \count($arguments), \count($arguments));
             }
             $results = ($function->function)($L, $arguments);
             if ($L->hookmask !== 0) {  // ldo.c: luaD_poscall
@@ -262,7 +262,7 @@ final class Calls
         $L->ci = $ci;
         $ci->R = $arguments;
         if ($L->hookmask & Lua::LUA_MASKCALL) {
-            Hooks::hook($L, Lua::LUA_HOOKCALL, -1, 1, \count($arguments));
+            Hooks::hook($L, Lua::LUA_HOOKCALL, -1, 1, \count($arguments), \count($arguments));
         }
         $results = ($function->function)($L, $arguments);
         if ($L->hookmask !== 0) {  // ldo.c: luaD_poscall

@@ -111,7 +111,8 @@ function test_hooks_in_the_middle_of_constructors_see_and_change_the_same_state(
         local function describe(v)
           if type(v) ~= "table" then return tostring(v) end
           local keys = {}
-          for k in pairs(v) do keys[#keys + 1] = tostring(k) end
+          -- (the hook table's keys are threads: addresses differ between the runs)
+          for k in pairs(v) do keys[#keys + 1] = (tostring(k):gsub("0x%x+", "0x?")) end
           table.sort(keys)
           return "{" .. table.concat(keys, ",") .. "}"
         end

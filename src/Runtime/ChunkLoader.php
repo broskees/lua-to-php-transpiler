@@ -11,6 +11,8 @@ use LuaPhp\Compiler\Dump;
 use LuaPhp\Compiler\Proto;
 use LuaPhp\Compiler\Undump;
 use LuaPhp\Emitter\Emitter;
+use LuaPhp\Lib\Io\CFile;
+use LuaPhp\Lib\Io\Errno;
 
 /**
  * Chunks -> Lua functions (lapi.c: lua_load, ldo.c: f_parser/checkmode,
@@ -187,14 +189,14 @@ final class ChunkLoader
                 throw new LuaError('cannot read stdin', Lua::LUA_ERRFILE);
             }
         } else {
+            $filename = DebugInfo::cString($filename);  // C's fopen and "@%s" see a C string
             $chunkname = '@' . $filename;
-            if (is_dir($filename)) {
-                // C's fopen succeeds on a directory; the read then fails with EISDIR
-                throw new LuaError("cannot read $filename: Is a directory", Lua::LUA_ERRFILE);
-            }
-            $contents = @file_get_contents($filename);
-            if ($contents === false) {
-                throw new LuaError("cannot open $filename: " . self::lastSystemError(), Lua::LUA_ERRFILE);
+            $file = self::openFile($filename);
+            $contents = $file->readAll();
+            $readFailed = $file->error;  // (a directory: C's fopen succeeds, its reads fail with EISDIR)
+            $file->close();
+            if ($readFailed) {
+                throw new LuaError("cannot read $filename: " . Errno::strerror(Errno::$errno), Lua::LUA_ERRFILE);
             }
         }
         // lauxlib.c: skipBOM (an incomplete BOM keeps its first character, forcing an error)
@@ -266,15 +268,14 @@ final class ChunkLoader
         $filename = DebugInfo::cString($filename);  // C's fopen sees a C string
         $phpFile = self::precompiledFileName($filename);
         if (!self::hasPrecompiledFile($filename)) {  // then it is as if only the Lua file were there
-            if (is_dir($filename)) {
-                throw new LuaError("cannot read $filename: Is a directory", Lua::LUA_ERRFILE);
-            }
-            if (!file_exists($filename)) {  // then say what C's fopen says
-                $file = @fopen($filename, 'r');
-                if ($file === false) {
-                    throw new LuaError("cannot open $filename: " . self::lastSystemError(), Lua::LUA_ERRFILE);
+            if (!file_exists($filename) || is_dir($filename)) {  // say what C's fopen, or its first read, says
+                $file = self::openFile($filename);
+                $file->getc();  // (a directory: fails with EISDIR)
+                $readFailed = $file->error;
+                $file->close();
+                if ($readFailed) {
+                    throw new LuaError("cannot read $filename: " . Errno::strerror(Errno::$errno), Lua::LUA_ERRFILE);
                 }
-                fclose($file);
             }
             $from = self::precompiledFrom($phpFile);
             $why = match (true) {
@@ -359,11 +360,17 @@ final class ChunkLoader
         }
     }
 
-    /** the OS error text of PHP's last warning ("...: No such file or directory") */
-    private static function lastSystemError(): string
+    /**
+     * lauxlib.c: luaL_loadfilex's fopen of $filename (errno as C's), or
+     * the LuaError(LUA_ERRFILE) "cannot open <name>: <strerror>".
+     */
+    private static function openFile(string $filename): CFile
     {
-        $lastError = error_get_last()['message'] ?? '';
-        $separatorPosition = strrpos($lastError, ': ');
-        return $separatorPosition === false ? $lastError : substr($lastError, $separatorPosition + 2);
+        Errno::$errno = 0;
+        $file = CFile::open($filename, 'r');
+        if ($file === null) {
+            throw new LuaError("cannot open $filename: " . Errno::strerror(Errno::$errno), Lua::LUA_ERRFILE);
+        }
+        return $file;
     }
 }

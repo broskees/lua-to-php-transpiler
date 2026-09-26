@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace LuaPhp\Runtime;
 
+use LuaPhp\Compiler\OpCodes;
 use LuaPhp\Compiler\Proto;
 
 /**
@@ -11,9 +12,10 @@ use LuaPhp\Compiler\Proto;
  * luaD_hookcall and rethook from ldo.c.
  *
  * A thread's hook ($L->hook, C: lua_Hook) is a PHP closure
- * (Coroutine $L, int $event, int $line, CallInfo $ci): void; the debug
- * library installs DebugLib's hookf, which calls the Lua function stored
- * in the registry's hook table.
+ * (Coroutine $L, int $event, int $line, CallInfo $ci, int $top): void,
+ * where $top is the hooked frame's stack top (C: L->top - base, see
+ * hook()); the debug library installs DebugLib's hookf, which calls the
+ * Lua function stored in the registry's hook table.
  *
  * Where the hooks run (see AGENTS.md, "Runtime conventions"):
  * - line and count hooks: emitted code checks $trap before every
@@ -49,8 +51,11 @@ final class Hooks
      * are allowed (they are not inside a hook). The hook runs on top of the
      * current CallInfo, which is marked CIST_HOOKED while it runs (and
      * CIST_TRAN when values are being transferred, for getinfo's 'r').
+     * $top is the number of slots in use in the current frame (C: L->top -
+     * base); the hook runs above them, and above a Lua frame's whole
+     * register window.
      */
-    public static function hook(Coroutine $L, int $event, int $line, int $ftransfer, int $ntransfer): void
+    public static function hook(Coroutine $L, int $event, int $line, int $ftransfer, int $ntransfer, int $top): void
     {
         $hook = $L->hook;
         if ($hook === null || !$L->allowhook) {  // make sure there is a hook
@@ -63,9 +68,12 @@ final class Hooks
             $L->ftransfer = $ftransfer;
             $L->ntransfer = $ntransfer;
         }
+        if ($ci->func instanceof LuaClosure && $top < $ci->func->proto->maxstacksize) {
+            $top = $ci->func->proto->maxstacksize;  // protect entire activation register
+        }
         $L->allowhook = false;  // cannot call hooks inside a hook
         $ci->callstatus |= $mask;
-        $hook($L, $event, $line, $ci);
+        $hook($L, $event, $line, $ci, $top);
         $L->allowhook = true;
         $ci->callstatus &= ~$mask;
     }
@@ -82,7 +90,12 @@ final class Hooks
         if ($L->hookmask & Lua::LUA_MASKCALL) {  // is call hook on?
             $event = ($ci->callstatus & Lua::CIST_TAIL) ? Lua::LUA_HOOKTAILCALL : Lua::LUA_HOOKCALL;
             $ci->savedpc = $pc;
-            self::hook($L, $event, -1, 1, $ci->func->proto->numparams);
+            $proto = $ci->func->proto;
+            // the stack top: after the arguments (ldo.c: luaD_precall), or
+            // after the fixed parameters, moved above the others (ltm.c:
+            // luaT_adjustvarargs)
+            $top = $proto->is_vararg ? $proto->numparams : \count($ci->R);
+            self::hook($L, $event, -1, 1, $proto->numparams, $top);
         }
     }
 
@@ -96,7 +109,7 @@ final class Hooks
     public static function retHook(Coroutine $L, CallInfo $ci, int $ftransfer, int $nres): void
     {
         if ($L->hookmask & Lua::LUA_MASKRET) {  // is return hook on?
-            self::hook($L, Lua::LUA_HOOKRET, -1, $ftransfer, $nres);
+            self::hook($L, Lua::LUA_HOOKRET, -1, $ftransfer, $nres, $ftransfer + $nres - 1);  // (the results end at the top)
         }
         $previous = $ci->previous;
         if ($previous !== null && $previous->func instanceof LuaClosure) {
@@ -106,9 +119,11 @@ final class Hooks
 
     /**
      * ldebug.c: luaG_traceexec: the count and line hooks, called before the
-     * instruction at $pc of the Lua function running in $ci runs.
+     * instruction at $pc of the Lua function running in $ci runs. $top is
+     * the emitted code's $top when that instruction takes the values the
+     * previous one left up to there (lopcodes.h: isIT).
      */
-    public static function traceExec(Coroutine $L, CallInfo $ci, int $pc): void
+    public static function traceExec(Coroutine $L, CallInfo $ci, int $pc, int $top = 0): void
     {
         $mask = $L->hookmask;
         if (!($mask & (Lua::LUA_MASKLINE | Lua::LUA_MASKCOUNT))) {  // no hooks?
@@ -121,16 +136,19 @@ final class Hooks
         } elseif (!($mask & Lua::LUA_MASKLINE)) {
             return;  // no line hook and count != 0; nothing to be done now
         }
+        $p = $ci->func->proto;
+        if (!OpCodes::isIT($p->code[$pc])) {  // top not being used?
+            $top = 0;  // correct top (hook() raises it to the whole frame)
+        }
         if ($countHook) {
-            self::hook($L, Lua::LUA_HOOKCOUNT, -1, 0, 0);  // call count hook
+            self::hook($L, Lua::LUA_HOOKCOUNT, -1, 0, 0, $top);  // call count hook
         }
         if ($mask & Lua::LUA_MASKLINE) {
-            $p = $ci->func->proto;
             // 'L->oldpc' may be invalid; use zero in this case
             $oldpc = $L->oldpc < \count($p->code) ? $L->oldpc : 0;
             if ($pc <= $oldpc  // call hook when jump back (loop),
                 || self::changedLine($p, $oldpc, $pc)) {  // or when enter new line
-                self::hook($L, Lua::LUA_HOOKLINE, DebugInfo::getFuncLine($p, $pc), 0, 0);  // call line hook
+                self::hook($L, Lua::LUA_HOOKLINE, DebugInfo::getFuncLine($p, $pc), 0, 0, $top);  // call line hook
             }
             $L->oldpc = $pc;  // 'pc' of last call to line hook
         }
