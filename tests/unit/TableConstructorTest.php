@@ -170,3 +170,36 @@ function test_small_constructors_get_a_fast_path_of_literals(): void
     assertTrue(str_contains($code, "\$table1->arr = [1 => true];"), 'nested table');
     assertTrue(str_contains($code, 'TableConstructor::run($L, $ci, $R, 6, 17);'), 'steps otherwise');
 }
+
+function test_the_fast_path_of_literals_keeps_no_table_alive(): void
+{
+    // the fast path builds its tables in locals ($table0 ...): kept after
+    // the run, a local held the table after Lua dropped it, with all it
+    // refers to (here 50 suspended coroutines and their fiber stacks), until
+    // the function returned
+    $script = scratchDirectory() . '/constructor_locals.lua';
+    file_put_contents($script, <<<'LUA'
+        local function vmsize()
+          local file = io.open("/proc/self/status")
+          local text = file:read("a")
+          file:close()
+          return tonumber(text:match("VmSize:%s*(%d+)"))
+        end
+        local before = vmsize()
+        local t = {}
+        local n = 50
+        for i = 1, n do
+          t[i] = coroutine.wrap(function () coroutine.yield() end)
+          t[i]()
+        end
+        local during = vmsize()
+        t = nil
+        collectgarbage()
+        print(during - before, vmsize() - before)
+        LUA);
+    [$status, $stdout, $stderr] = runCommand(['php', REPO_ROOT . '/bin/lua', $script]);
+    assertSame(0, $status, $stderr);
+    [$held, $left] = array_map('intval', explode("\t", trim($stdout)));
+    assertTrue($held > 50 * 200, "50 suspended coroutines map their fiber stacks: $held KB");
+    assertTrue($left < $held / 4, "after t = nil and a collection: $left of $held KB still mapped");
+}

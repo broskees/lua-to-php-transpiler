@@ -75,16 +75,19 @@ function test_load_in_a_coroutine_from_the_warm_disk_cache(): void
 function test_a_hot_big_function_in_a_coroutine_with_the_tracing_jit(): void
 {
     // the tracing JIT builds the control flow graph of a function it compiles
-    // (ext/opcache/jit/zend_jit.c: zend_jit_build_cfg), here on the fiber's stack
+    // (ext/opcache/jit/zend_jit.c: zend_jit_build_cfg), here on the fiber's
+    // stack: 3,500 instructions of inline code (in a heavier chunk they would
+    // be compact, and the JIT kept from the function: see CompactFormsTest)
     $directory = scratchDirectory() . '/segments-jit';
     @mkdir($directory);
-    $source = 'local function make() return ' . mixedRows(1000) . " end\n"
+    $source = 'local function make() return ' . mixedRows(500) . " end\n"
         . "print(coroutine.wrap(function () local n = 0; for i = 1, 300 do n = n + #make() end; return n end)())\n";
     file_put_contents("$directory/jit.lua", $source);
-    assertSame([0, "300000\n", ''], runCommand(['lua5.4', 'jit.lua'], '', $directory));
+    assertSame([0, "150000\n", ''], runCommand(['lua5.4', 'jit.lua'], '', $directory));
     assertSame([0, '', ''], runCommand(['php', REPO_ROOT . '/bin/lua2php', 'jit.lua'], '', $directory));
+    assertTrue(!str_contains(file_get_contents("$directory/jit.php"), 'Op::'), 'inline code');
     $jit = ['-d', 'opcache.jit=tracing', '-d', 'opcache.jit_buffer_size=64M'];
-    assertSame([0, "300000\n", ''], runCommand(['php', ...OPCACHE_ON_NEW_FILES, ...$jit, 'jit.php'], '', $directory));
+    assertSame([0, "150000\n", ''], runCommand(['php', ...OPCACHE_ON_NEW_FILES, ...$jit, 'jit.php'], '', $directory));
 }
 
 /**

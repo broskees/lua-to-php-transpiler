@@ -14,6 +14,7 @@ use LuaPhp\Runtime\LuaClosure;
 use LuaPhp\Runtime\LuaTable;
 use LuaPhp\Runtime\MemoryLimit;
 use LuaPhp\Runtime\MetaMethods;
+use LuaPhp\Runtime\Vm;
 
 /**
  * Emits the PHP closure for one Proto: lvm.c's luaV_execute with the
@@ -27,7 +28,9 @@ use LuaPhp\Runtime\MetaMethods;
  * concatenation, ...) are inline; everything else calls the runtime
  * (Vm, MetaMethods, Calls, Upvalues), after storing the instruction's
  * index in $ci->savedpc so errors, tracebacks and debug.getinfo see the
- * exact position.
+ * exact position. In a chunk too heavy to compile inline, the code outside
+ * loops of its heaviest functions is compact instead: one call per
+ * instruction (emitCompact, Runtime\Op; see Emitter::emitChunk).
  */
 final class FunctionEmitter
 {
@@ -112,18 +115,99 @@ final class FunctionEmitter
     /** @var array<string, true> labels jumped to from another segment: each gets a case in the dispatcher */
     private array $entries = [];
 
+    /** whether the code outside loops is compact (compactCodeOutsideLoops) */
+    private bool $compact = false;
+
+    /** @var array<int, true> the instructions inside loops (findLoops) */
+    private array $inLoop = [];
+
+    /**
+     * Tests only: emit the compact form (emitCompact) of every instruction
+     * that has one, in every function, in loops too (compact_forms.php).
+     */
+    public static bool $compactEverywhere = false;
+
     public function __construct(
         private readonly Proto $proto,
         private readonly string $path,
     ) {
+        $this->findJumpTargets();
+        $this->findConstructorRuns();
+        $this->findLoops();
+    }
+
+    /**
+     * What PHP compiles of the function's inline code, roughly, in units of
+     * an ordinary instruction's inline code (3 to 8 KB of memory to compile,
+     * see Emitter::INLINE_WEIGHT_MAXIMUM): [all of it, the part outside
+     * loops]. An instruction weighs instructionWeight, a constructor run 1
+     * for its code plus 1 per 16 of its instructions when it has a fast path
+     * of literals (about 20 bytes of PHP each).
+     *
+     * @return array{int, int}
+     */
+    public function inlineWeights(): array
+    {
+        $code = $this->proto->code;
+        $instructionCount = \count($code);
+        $weight = 0;
+        $weightOutsideLoops = 0;
+        for ($pc = 0; $pc < $instructionCount; $pc++) {
+            if (isset($this->constructorRuns[$pc])) {
+                $last = $this->constructorRuns[$pc];
+                $pieceWeight = 1 + ($this->constructorLiterals ? intdiv($last - $pc + 1, 16) : 0);
+            } else {
+                $last = $pc;
+                $pieceWeight = self::instructionWeight($code[$pc]);
+            }
+            $weight += $pieceWeight;
+            if (!isset($this->inLoop[$pc])) {
+                $weightOutsideLoops += $pieceWeight;
+            }
+            $pc = $last;
+        }
+        return [$weight, $weightOutsideLoops];
+    }
+
+    /**
+     * Emits the code outside loops, which runs once per call, in compact
+     * form (emitCompact) wherever an instruction has one: Emitter::emitChunk
+     * does this for the heaviest functions of a chunk whose inline code
+     * would need too much memory to compile.
+     */
+    public function compactCodeOutsideLoops(): void
+    {
+        $this->compact = true;
     }
 
     public function emit(): string
     {
         $proto = $this->proto;
-        $this->findJumpTargets();
-        $this->findConstructorRuns();
         $this->planSegments();
+
+        // the code of each instruction (or constructor run) first: the
+        // dispatcher's cases are known once every jump is emitted, and the
+        // frame's size once the compact instructions are
+        $pieces = [];
+        $compactInstructions = 0;
+        $instructionCount = \count($proto->code);
+        for ($pc = 0; $pc < $instructionCount; $pc++) {
+            if (isset($this->constructorRuns[$pc])) {
+                $last = $this->constructorRuns[$pc];
+                $pieces[$pc] = $this->emitConstructorRun($pc, $last);
+                $pc = $last;
+                continue;
+            }
+            $pieces[$pc] = $this->comment($pc);
+            if (isset($this->consumed[$pc])) {
+                continue;
+            }
+            $compact = $this->isCompact($pc) ? $this->emitCompact($pc) : null;
+            if ($compact !== null) {
+                $compactInstructions++;
+            }
+            $pieces[$pc] .= $compact ?? ($this->hookCheck($pc) . $this->emitInstruction($pc));
+        }
 
         $uses = [];
         foreach (array_keys($proto->p) as $childIndex) {
@@ -141,7 +225,7 @@ final class FunctionEmitter
         // ldo.c: luaD_precall for a Lua function (CallInfo::push, inline)
         $code .= self::lines(
             '$ci = new CallInfo(); $ci->func = $cl; $ci->callstatus = $callstatus;',
-            '$ci->previous = $previous = $L->ci; $ci->top = $previous->top + ' . ($proto->maxstacksize + 1) . '; $ci->frameBytes = $previous->frameBytes + ' . $this->frameBytes() . ';',
+            '$ci->previous = $previous = $L->ci; $ci->top = $previous->top + ' . ($proto->maxstacksize + 1) . '; $ci->frameBytes = $previous->frameBytes + ' . $this->frameBytes($compactInstructions) . ';',
             'if ($ci->top > $L->stackLimit || $ci->frameBytes > $L->frameBytesLimit) {',
             '    Calls::stackOverflow($L);',
             '}',
@@ -161,23 +245,6 @@ final class FunctionEmitter
             $code .= self::lines('if ($L->hookmask !== 0) {', '    Hooks::hookCall($L, $ci, 0);', '}');
         }
 
-        // the code of each instruction (or constructor run) first: the
-        // dispatcher's cases are known once every jump is emitted
-        $pieces = [];
-        $instructionCount = \count($proto->code);
-        for ($pc = 0; $pc < $instructionCount; $pc++) {
-            if (isset($this->constructorRuns[$pc])) {
-                $last = $this->constructorRuns[$pc];
-                $pieces[$pc] = $this->emitConstructorRun($pc, $last);
-                $pc = $last;
-                continue;
-            }
-            $pieces[$pc] = $this->comment($pc);
-            if (isset($this->consumed[$pc])) {
-                continue;
-            }
-            $pieces[$pc] .= $this->hookCheck($pc) . $this->emitInstruction($pc);
-        }
         $segmentStarts = array_flip($this->segmentStarts);
         if ($segmentStarts !== []) {
             $code .= self::lines(
@@ -202,6 +269,16 @@ final class FunctionEmitter
             $code .= self::lines('} }');
         }
         $code .= "    };\n";
+        if ($compactInstructions > 0) {
+            // PHP's tracing JIT starts a trace after each hot return from an
+            // Op method: for a big function that runs often, thousands of
+            // traces (3,000 calls of a function of 32,500 instructions: 6.8 s
+            // with the JIT, 1.2 s without tracing it, 2.4 s without the JIT).
+            // The Op methods are JIT-compiled anyway; a loop in the function
+            // runs as fast as the function did before it was compact, which
+            // the JIT did not speed up either.
+            $code .= "    if (\\function_exists('opcache_jit_blacklist')) { \\opcache_jit_blacklist(\$function_{$this->path}); }\n";
+        }
         return $code;
     }
 
@@ -348,17 +425,20 @@ final class FunctionEmitter
      * and register array, plus the PHP frame, which for eval'd (unoptimized)
      * code has a slot for every temporary and so grows with the code
      * (measured: about 150-190 bytes per instruction emitted inline). A
-     * constructor run without literals is one call.
+     * constructor run without literals is one call, and a compact
+     * instruction needs no temporary, but Op::call's frame (about 30 slots
+     * of 16 bytes) stays under the frame of the function it calls.
      */
-    private function frameBytes(): int
+    private function frameBytes(int $compactInstructions): int
     {
-        $emittedInstructions = \count($this->proto->code);
+        $emittedInstructions = \count($this->proto->code) - $compactInstructions;
         if (!$this->constructorLiterals) {
             foreach ($this->constructorRuns as $first => $last) {
                 $emittedInstructions -= $last - $first;
             }
         }
-        return 1000 + 16 * $this->proto->maxstacksize + 160 * $emittedInstructions;
+        $callFrame = $compactInstructions > 0 ? 512 : 0;
+        return 1000 + 16 * $this->proto->maxstacksize + 160 * $emittedInstructions + $callFrame;
     }
 
     /**
@@ -373,7 +453,8 @@ final class FunctionEmitter
      * nor instructions the previous one consumes: OP_EXTRAARG, the OP_MMBIN*
      * after a successful arithmetic instruction (checked in
      * metamethodFallback instead), the OP_JMP after a test when the jump is
-     * taken (conditionalJump jumps directly), OP_TFORCALL when entered from
+     * taken (conditionalJump jumps directly; the OP_JMP has code only when
+     * something else jumps there), OP_TFORCALL when entered from
      * OP_TFORPREP (which jumps past this check, to T<pc>). An instruction
      * that takes the values the previous one left up to $top (isIT) passes
      * it: the hook runs above them.
@@ -440,6 +521,50 @@ final class FunctionEmitter
             if (($opcode === OpCodes::OP_LOADKX || $opcode === OpCodes::OP_NEWTABLE || $opcode === OpCodes::OP_SETLIST)
                 && $pc + 1 < \count($code) && OpCodes::GET_OPCODE($code[$pc + 1]) === OpCodes::OP_EXTRAARG) {
                 $this->consumed[$pc + 1] = true;
+            }
+            // the code of a test ends with its jumps (conditionalJump): the
+            // OP_JMP after it runs only when something else jumps there
+            if (self::isTest($opcode) && !isset($this->jumpTargets[$pc + 1])) {
+                $this->consumed[$pc + 1] = true;
+            }
+        }
+    }
+
+    /** whether $opcode is a test: it skips the next instruction (an OP_JMP) or does that jump (lvm.c: docondjump) */
+    private static function isTest(int $opcode): bool
+    {
+        return match ($opcode) {
+            OpCodes::OP_EQ, OpCodes::OP_LT, OpCodes::OP_LE, OpCodes::OP_EQK, OpCodes::OP_EQI, OpCodes::OP_LTI,
+            OpCodes::OP_LEI, OpCodes::OP_GTI, OpCodes::OP_GEI, OpCodes::OP_TEST, OpCodes::OP_TESTSET => true,
+            default => false,
+        };
+    }
+
+    /**
+     * Marks the instructions inside loops: a backward jump from $pc to
+     * $target repeats $target .. $pc.
+     */
+    private function findLoops(): void
+    {
+        $code = $this->proto->code;
+        $loopChanges = [];
+        foreach ($code as $pc => $instruction) {
+            $target = match (OpCodes::GET_OPCODE($instruction)) {
+                OpCodes::OP_JMP => $pc + 1 + OpCodes::GETARG_sJ($instruction),
+                OpCodes::OP_FORLOOP, OpCodes::OP_TFORLOOP => $pc + 1 - OpCodes::GETARG_Bx($instruction),
+                default => null,
+            };
+            if ($target !== null && $target <= $pc) {
+                $loopChanges[$target] = ($loopChanges[$target] ?? 0) + 1;
+                $loopChanges[$pc + 1] = ($loopChanges[$pc + 1] ?? 0) - 1;
+            }
+        }
+        $loops = 0;
+        $instructionCount = \count($code);
+        for ($pc = 0; $pc < $instructionCount; $pc++) {
+            $loops += $loopChanges[$pc] ?? 0;
+            if ($loops > 0) {
+                $this->inLoop[$pc] = true;
             }
         }
     }
@@ -508,6 +633,8 @@ final class FunctionEmitter
         foreach ($registers as $register => $value) {
             $fastPath[] = self::r($register) . ' = ' . $this->constructorValue($value) . ';';
         }
+        // (the tables live in registers now: a local would keep one alive after Lua drops it)
+        $fastPath[] = 'unset(' . implode(', ', array_map(static fn (int $index): string => '$table' . $index, array_keys($tables))) . ');';
         return $code . self::lines("if (!\$trap && \$L->globalState->gcDebt + $charge <= 0) {")
             . self::lines(...array_map(static fn (string $line): string => "    $line", $fastPath))
             . self::lines('} else {', "    $call", '}');
@@ -909,6 +1036,203 @@ final class FunctionEmitter
             return $code . self::lines($this->jump($pc, $pc + 2));
         }
         return $code . self::INDENT . "} else {\n" . self::INDENT . "    $fallback\n" . self::INDENT . "}\n";
+    }
+
+    /** whether the instruction at $pc is emitted in compact form when it has one (compactCodeOutsideLoops) */
+    private function isCompact(int $pc): bool
+    {
+        return self::$compactEverywhere || ($this->compact && !isset($this->inLoop[$pc]));
+    }
+
+    /**
+     * The compact form of the instruction at $pc: one call to an Op method
+     * with the program counter and the operands as literals (registers as
+     * numbers, constants as values), which does exactly what the inline
+     * code of emitInstruction does, hook check included; an instruction
+     * that jumps is followed by its jumps. Null when it has none: the
+     * instructions that return, loop or create a closure (they need the
+     * emitted function's locals), OP_SELF with a key in a register, and
+     * what luac never produces (an OP_MMBIN* that is a jump target or does
+     * not repeat its arithmetic instruction's operands, a constant key or
+     * operand of another type).
+     */
+    private function emitCompact(int $pc): ?string
+    {
+        $proto = $this->proto;
+        $instruction = $proto->code[$pc];
+        $opcode = OpCodes::GET_OPCODE($instruction);
+        $a = OpCodes::GETARG_A($instruction);
+        $b = OpCodes::GETARG_B($instruction);
+        $c = OpCodes::GETARG_C($instruction);
+        $k = OpCodes::GETARG_k($instruction);
+        $call = static fn (string $method, int|string ...$operands): string => "Op::$method(" . implode(', ', ['$L', $pc, ...$operands]) . ')';
+        $isStringConstant = static fn (int $index): bool => \is_string($proto->k[$index]);
+        if ($opcode >= OpCodes::OP_ADDI && $opcode <= OpCodes::OP_SHR) {
+            return $this->emitCompactArithmetic($pc);
+        }
+        switch ($opcode) {
+            case OpCodes::OP_MOVE:
+                return self::lines($call('move', $a, $b) . ';');
+            case OpCodes::OP_LOADI:
+                return self::lines($call('load', $a, PhpLiteral::of(OpCodes::GETARG_sBx($instruction))) . ';');
+            case OpCodes::OP_LOADF:
+                return self::lines($call('load', $a, PhpLiteral::of((float) OpCodes::GETARG_sBx($instruction))) . ';');
+            case OpCodes::OP_LOADK:
+                return self::lines($call('load', $a, $this->k(OpCodes::GETARG_Bx($instruction))) . ';');
+            case OpCodes::OP_LOADKX:
+                return self::lines($call('load', $a, $this->k(OpCodes::GETARG_Ax($proto->code[$pc + 1]))) . ';');
+            case OpCodes::OP_LOADFALSE:
+                return self::lines($call('load', $a, 'false') . ';');
+            case OpCodes::OP_LFALSESKIP:
+                return self::lines($call('load', $a, 'false') . ';', $this->jump($pc, $pc + 2));
+            case OpCodes::OP_LOADTRUE:
+                return self::lines($call('load', $a, 'true') . ';');
+            case OpCodes::OP_LOADNIL:
+                return self::lines($call('loadNil', $a, $b) . ';');
+            case OpCodes::OP_GETUPVAL:
+                return self::lines($call('getUpval', $a, $b) . ';');
+            case OpCodes::OP_SETUPVAL:
+                return self::lines($call('setUpval', $a, $b) . ';');
+            case OpCodes::OP_GETTABUP:
+                return $isStringConstant($c) ? self::lines($call('getTabUp', $a, $b, $this->k($c)) . ';') : null;
+            case OpCodes::OP_GETTABLE:
+                return self::lines($call('getTable', $a, $b, $c) . ';');
+            case OpCodes::OP_GETI:
+                return self::lines($call('getField', $a, $b, $c) . ';');
+            case OpCodes::OP_GETFIELD:
+                return $isStringConstant($c) ? self::lines($call('getField', $a, $b, $this->k($c)) . ';') : null;
+            case OpCodes::OP_SETTABUP:
+                if (!$isStringConstant($b)) {
+                    return null;
+                }
+                return self::lines(($k ? $call('setTabUpK', $a, $this->k($b), $this->k($c)) : $call('setTabUp', $a, $this->k($b), $c)) . ';');
+            case OpCodes::OP_SETTABLE:
+                return self::lines(($k ? $call('setTableK', $a, $b, $this->k($c)) : $call('setTable', $a, $b, $c)) . ';');
+            case OpCodes::OP_SETI:
+                return self::lines(($k ? $call('setFieldK', $a, $b, $this->k($c)) : $call('setField', $a, $b, $c)) . ';');
+            case OpCodes::OP_SETFIELD:
+                if (!$isStringConstant($b)) {
+                    return null;
+                }
+                return self::lines(($k ? $call('setFieldK', $a, $this->k($b), $this->k($c)) : $call('setField', $a, $this->k($b), $c)) . ';');
+            case OpCodes::OP_NEWTABLE:
+                $arraySize = $c;
+                if ($k) {  // non-zero extra argument?
+                    $arraySize += OpCodes::GETARG_Ax($proto->code[$pc + 1]) * (OpCodes::MAXARG_C + 1);
+                }
+                $hashSize = $b > 0 ? 1 << ($b - 1) : 0;  // size is 2^(b - 1)
+                return self::lines($call('newTable', $a, $arraySize, Collector::tableSize($arraySize, $hashSize)) . ';');
+            case OpCodes::OP_SELF:
+                return ($k && $isStringConstant($c)) ? self::lines($call('self', $a, $b, $this->k($c)) . ';') : null;
+            case OpCodes::OP_UNM:
+                return self::lines($call('unm', $a, $b) . ';');
+            case OpCodes::OP_BNOT:
+                return self::lines($call('bnot', $a, $b) . ';');
+            case OpCodes::OP_NOT:
+                return self::lines($call('not', $a, $b) . ';');
+            case OpCodes::OP_LEN:
+                return self::lines($call('len', $a, $b) . ';');
+            case OpCodes::OP_CONCAT:
+                return self::lines($call('concat', $a, $b) . ';');
+            case OpCodes::OP_CLOSE:
+                return self::lines($call('close', $a) . ';');
+            case OpCodes::OP_TBC:
+                return self::lines($call('tbc', $a) . ';');
+            case OpCodes::OP_JMP:
+                return self::lines($call('jump') . ';', $this->jump($pc, $pc + 1 + OpCodes::GETARG_sJ($instruction)));
+            case OpCodes::OP_EQ:
+                return $this->conditionalJump($pc, $call('eq', $a, $b), $k);
+            case OpCodes::OP_LT:
+                return $this->conditionalJump($pc, $call('lt', $a, $b), $k);
+            case OpCodes::OP_LE:
+                return $this->conditionalJump($pc, $call('le', $a, $b), $k);
+            case OpCodes::OP_EQK:
+                return $this->conditionalJump($pc, $call('eqK', $a, $this->k($b)), $k);
+            case OpCodes::OP_EQI:
+                return $this->conditionalJump($pc, $call('eqK', $a, PhpLiteral::of(OpCodes::GETARG_sB($instruction))), $k);
+            case OpCodes::OP_LTI:
+            case OpCodes::OP_LEI:
+            case OpCodes::OP_GTI:
+            case OpCodes::OP_GEI:
+                $method = [OpCodes::OP_LTI => 'ltI', OpCodes::OP_LEI => 'leI', OpCodes::OP_GTI => 'gtI', OpCodes::OP_GEI => 'geI'][$opcode];
+                $condition = $call($method, $a, PhpLiteral::of(OpCodes::GETARG_sB($instruction)), $c ? 'true' : 'false');
+                return $this->conditionalJump($pc, $condition, $k);
+            case OpCodes::OP_TEST:
+                return $this->conditionalJump($pc, $call('test', $a), $k);
+            case OpCodes::OP_TESTSET:
+                return self::lines('if (' . $call('testSet', $a, $b, $k ? 'true' : 'false') . ') ' . $this->jump($pc, $pc + 2), $this->nextJump($pc));
+            case OpCodes::OP_CALL:
+                // B = 0: the arguments up to $top (also for the hook: isIT); C = 0: all results, up to the new $top
+                $expression = $b === 0 ? $call('call', $a, $b, $c, '$top') : $call('call', $a, $b, $c);
+                return self::lines(($c === 0 ? '$top = ' : '') . $expression . ';');
+            case OpCodes::OP_SETLIST:
+                $index = $c;
+                if ($k) {
+                    $index += OpCodes::GETARG_Ax($proto->code[$pc + 1]) * (OpCodes::MAXARG_C + 1);
+                }
+                return self::lines(($b === 0 ? $call('setList', $a, $b, $index, '$top') : $call('setList', $a, $b, $index)) . ';');
+            case OpCodes::OP_VARARG:
+                return self::lines($c === 0 ? '$top = ' . $call('vararg', $a, -1) . ';' : $call('vararg', $a, $c - 1) . ';');
+        }
+        return null;
+    }
+
+    /**
+     * The compact form of the arithmetic instruction at $pc with the
+     * OP_MMBIN* after it (which it consumes): Op::arith (R[B] op R[C]),
+     * arithK (R[B] op K[C]) or arithI (R[B] op sC, sC << R[B] for OP_SHLI),
+     * whose metamethod call repeats the arithmetic instruction's operands,
+     * as luac's OP_MMBIN* do (lcode.c: finishbinexpval); null for one that
+     * does not, or that something jumps to.
+     */
+    private function emitCompactArithmetic(int $pc): ?string
+    {
+        $code = $this->proto->code;
+        $mmPc = $pc + 1;
+        if (!isset($this->consumed[$mmPc])) {
+            return null;
+        }
+        $instruction = $code[$pc];
+        $opcode = OpCodes::GET_OPCODE($instruction);
+        $a = OpCodes::GETARG_A($instruction);
+        $b = OpCodes::GETARG_B($instruction);
+        $c = OpCodes::GETARG_C($instruction);
+        $mm = $code[$mmPc];
+        $mmOpcode = OpCodes::GET_OPCODE($mm);
+        $flip = OpCodes::GETARG_k($mm) ? 'true' : 'false';
+        if ($opcode >= OpCodes::OP_ADD) {  // OP_ADD .. OP_SHR: R[B] op R[C]
+            $operation = $opcode - OpCodes::OP_ADD;
+            $method = 'arith';
+            $operands = [$a, $b, $c, $operation];
+            $repeats = $mmOpcode === OpCodes::OP_MMBIN && OpCodes::GETARG_B($mm) === $c;
+        } elseif ($opcode >= OpCodes::OP_ADDK && $opcode <= OpCodes::OP_BXORK) {  // R[B] op K[C]
+            $constant = $this->proto->k[$c];
+            $operation = $opcode - OpCodes::OP_ADDK;
+            $method = 'arithK';
+            $operands = [$a, $b, PhpLiteral::of($constant), $operation, $flip];
+            $repeats = $mmOpcode === OpCodes::OP_MMBINK && OpCodes::GETARG_B($mm) === $c && (\is_int($constant) || \is_float($constant));
+        } else {  // OP_ADDI, OP_SHRI: R[B] op sC; OP_SHLI: sC << R[B]
+            $immediate = OpCodes::GETARG_sC($instruction);
+            $operation = match ($opcode) {
+                OpCodes::OP_ADDI => Vm::LUA_OPADD,
+                OpCodes::OP_SHRI => Vm::LUA_OPSHR,
+                OpCodes::OP_SHLI => Vm::LUA_OPSHL,
+            };
+            if ($opcode === OpCodes::OP_ADDI && $immediate !== 0 && OpCodes::GETARG_C($mm) === MetaMethods::TM_SUB && OpCodes::GETARG_sB($mm) === -$immediate) {
+                // R[B] - n as R[B] + -n, the metamethod __sub with n (lcode.c:
+                // finishbinexpneg): R[B] - n is the same number (x - y is
+                // x + -y, but not for n = 0: -0.0 + 0 is 0.0, -0.0 - 0 is -0.0)
+                $operation = Vm::LUA_OPSUB;
+                $immediate = -$immediate;
+            }
+            $method = 'arithI';
+            $operands = [$a, $b, PhpLiteral::of($immediate), $operation, $flip];
+            $repeats = $mmOpcode === OpCodes::OP_MMBINI && OpCodes::GETARG_sB($mm) === $immediate;
+        }
+        if (!$repeats || OpCodes::GETARG_A($mm) !== $b || OpCodes::GETARG_C($mm) !== MetaMethods::TM_ADD + $operation) {
+            return null;
+        }
+        return self::lines("Op::$method(" . implode(', ', ['$L', $pc, ...$operands]) . ');');
     }
 
     private function emitInstruction(int $pc): string

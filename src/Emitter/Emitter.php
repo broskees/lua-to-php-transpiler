@@ -40,16 +40,51 @@ final class Emitter
         . "use LuaPhp\\Runtime\\LuaClosureN;\n"
         . "use LuaPhp\\Runtime\\LuaTable;\n"
         . "use LuaPhp\\Runtime\\MetaMethods;\n"
+        . "use LuaPhp\\Runtime\\Op;\n"
         . "use LuaPhp\\Runtime\\TableConstructor;\n"
         . "use LuaPhp\\Runtime\\Upvalues;\n"
         . "use LuaPhp\\Runtime\\Vm;\n";
+
+    /**
+     * The most weight (FunctionEmitter::inlineWeights: about one per
+     * instruction) of inline code in one chunk. PHP needs 3 to 8 KB of
+     * memory to compile each instruction's inline code (more with opcache,
+     * whose optimizer works on the whole function), so 4096 take up to about
+     * 32 MB. In a heavier chunk, the code outside loops of its heaviest
+     * functions is compact (FunctionEmitter::compactCodeOutsideLoops: one
+     * call per instruction, about 1 to 2 KB to compile), the heaviest first,
+     * until the rest weighs at most this: the code that runs once per call,
+     * like a module's main chunk, rather than loops. Measured: 3,000 lines
+     * of if-statements in one function (32,500 instructions) needed 146 MB
+     * to compile with opcache, beyond PHP's default memory_limit.
+     */
+    public const INLINE_WEIGHT_MAXIMUM = 4096;
 
     /** PHP source of the factory expression for the chunk whose main function is $main */
     public static function emitChunk(Proto $main): string
     {
         $protoDeclarations = '';
+        $emitters = [];
+        self::createEmitters($main, '0', $protoDeclarations, $emitters);
+        $inlineWeight = 0;
+        $weightsOutsideLoops = [];
+        foreach ($emitters as $index => $emitter) {
+            [$weight, $weightOutsideLoops] = $emitter->inlineWeights();
+            $inlineWeight += $weight;
+            $weightsOutsideLoops[$index] = $weightOutsideLoops;
+        }
+        arsort($weightsOutsideLoops);  // (stable: equal weights in the order of the functions)
+        foreach ($weightsOutsideLoops as $index => $weightOutsideLoops) {
+            if ($inlineWeight <= self::INLINE_WEIGHT_MAXIMUM) {
+                break;
+            }
+            $emitters[$index]->compactCodeOutsideLoops();
+            $inlineWeight -= $weightOutsideLoops;
+        }
         $functionDefinitions = '';
-        self::emitProtoTree($main, '0', $protoDeclarations, $functionDefinitions);
+        foreach ($emitters as $emitter) {
+            $functionDefinitions .= $emitter->emit() . "\n";
+        }
         return "static function (Proto \$proto_0): \\Closure {\n"
             . $protoDeclarations
             . $functionDefinitions
@@ -59,17 +94,20 @@ final class Emitter
 
     /**
      * Declares $proto_<path> for the children of $proto and appends the
-     * function definitions, children before parents.
+     * emitters of their functions and of $proto's, children before parents
+     * (the order of the function definitions).
+     *
+     * @param list<FunctionEmitter> $emitters
      */
-    private static function emitProtoTree(Proto $proto, string $path, string &$protoDeclarations, string &$functionDefinitions): void
+    private static function createEmitters(Proto $proto, string $path, string &$protoDeclarations, array &$emitters): void
     {
         foreach ($proto->p as $childIndex => $child) {
             $childPath = $path . '_' . $childIndex;
             $protoDeclarations .= '    $proto_' . $childPath . ' = $proto_' . $path . '->p[' . $childIndex . "];\n";
         }
         foreach ($proto->p as $childIndex => $child) {
-            self::emitProtoTree($child, $path . '_' . $childIndex, $protoDeclarations, $functionDefinitions);
+            self::createEmitters($child, $path . '_' . $childIndex, $protoDeclarations, $emitters);
         }
-        $functionDefinitions .= (new FunctionEmitter($proto, $path))->emit() . "\n";
+        $emitters[] = new FunctionEmitter($proto, $path);
     }
 }

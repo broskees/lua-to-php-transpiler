@@ -46,6 +46,13 @@ function test_transpiled_diff_cases_behave_like_lua_in_tiny_segments(): void
     runTranspiledDiffCases('lua2php-tiny-segments', ['-d', 'auto_prepend_file=' . REPO_ROOT . '/tests/unit/tiny_segments.php']);
 }
 
+function test_transpiled_diff_cases_behave_like_lua_compact_in_tiny_segments(): void
+{
+    // every instruction that has a compact form in it (see CompactFormsTest),
+    // every function as segments of one instruction
+    runTranspiledDiffCases('lua2php-compact-tiny-segments', ['-d', 'auto_prepend_file=' . REPO_ROOT . '/tests/unit/compact_tiny_segments.php']);
+}
+
 function test_transpiled_diff_cases_behave_like_lua_on_a_shared_host(): void
 {
     // lua2php and its output under a typical shared host's disable_functions

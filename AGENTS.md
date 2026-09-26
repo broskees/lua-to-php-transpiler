@@ -232,7 +232,8 @@ Lua string keys and integer keys distinct.
   runs total at most 4096 instructions, a fast path comes first, taken
   when `!$trap` and the run's tables leave `gcDebt` <= 0 (so nothing can
   run or look in between): the run's final tables built from PHP array
-  literals (`$table<i>`, long strings from the Proto) and the final value
+  literals (`$table<i>`, long strings from the Proto, unset after the
+  run: a local would keep a table Lua dropped alive) and the final value
   of every register it writes, charging the same debt. A bigger function
   (a data module) gets only the calls: its literals would need more memory
   to compile than PHP's default limit, while the Proto is there anyway.
@@ -265,6 +266,46 @@ Lua string keys and integer keys distinct.
   run the diff corpus with every function cut into one-instruction
   segments (`tests/unit/tiny_segments.php`, `$maximumSegmentWeight = 1`;
   for official files, `OFFICIAL_PHP_OPTIONS` in tests/official.sh).
+  Compact forms: PHP needs 3 to 8 KB of memory to compile one
+  instruction's inline code (a function of 32,500 instructions needed
+  146 MB with opcache, over PHP's default memory_limit of 128M), about
+  1 KB for a call. So when a chunk's inline code weighs more than
+  `Emitter::INLINE_WEIGHT_MAXIMUM` (4096, `FunctionEmitter::inlineWeights`:
+  instructionWeight, a constructor run 1 plus 1 per 16 of its literal
+  instructions), the code outside loops (backward jumps) of its heaviest
+  functions, heaviest first until the rest fits, is compact
+  (`FunctionEmitter::compactCodeOutsideLoops`): code that runs once per
+  call, typically a module's main chunk; loops keep their inline fast
+  paths, and so does every chunk that fits (all the speed workloads). A
+  compact instruction is its comment and one call to a `Runtime\Op`
+  method with `$L`, its pc and its operands as literals (registers as
+  numbers, constants as values, long strings from the Proto), e.g.
+  `Op::setField($L, 8, 1, 'fmt', 2);`, `if (Op::lt($L, 5, 1, 2)) goto L7;`,
+  `$top = Op::call($L, 9, 3, 2, 0);`. The method does exactly what the
+  inline code does, in the same order: hook check (with `$top` for isIT),
+  operands read after it, the same fast paths, savedpc before anything that
+  can raise, call or look, the GC check; it takes the frame from `$L->ci`
+  (always the emitted function's `$ci` between instructions) and writes
+  `$L->ci->R` (a reference to `$R`). Jumps stay in emitted code: a test's
+  method returns its condition, OP_JMP's only checks the hook. Arithmetic
+  takes its consumed OP_MMBIN*'s flip (lcode.c repeats the operands; x - n
+  is OP_ADDI -n with `__sub` n, compact as a subtraction). Inline: RETURN*,
+  TAILCALL, the for/generic-for loop instructions, CLOSURE (they use the
+  function's locals), VARARGPREP, OP_SELF with a register key, and what
+  luac never produces (an OP_MMBIN* that is a jump target or does not
+  repeat the operands, a non-string constant key). A change to an
+  instruction's inline code changes its Op method too. A function with
+  compact code is kept from PHP's tracing JIT (`opcache_jit_blacklist`,
+  when defined): the JIT starts a trace after each hot return from an Op
+  method, thousands for a big function that runs often (3,000 calls of a
+  32,500-instruction function: 6.8 s with the JIT, 1.2 s without tracing
+  it); its Op methods are JIT-compiled anyway, and the JIT did not speed
+  up such a function's loops before either. The OP_JMP after a test is
+  emitted only as its comment unless something jumps to it (the test's
+  code ends with its jumps). Tests run the diff corpus and the official
+  files with every instruction that has a compact form compact, loops too
+  (`FunctionEmitter::$compactEverywhere`, `tests/unit/compact_forms.php`;
+  with tiny segments, `compact_tiny_segments.php`).
   Never use `array_slice`/array functions on `$R`: open upvalues make its
   elements PHP references.
 - **Calls.** Lua function: `($f->code)($L, $f, $args)` returns the result list,
@@ -431,7 +472,8 @@ Lua string keys and integer keys distinct.
   path, not the OP_JMP after a test (the test jumps to its target
   directly: donextjump), not OP_TFORCALL when entered from OP_TFORPREP
   (`goto T<pc>`, a label after its check); `TableConstructor::run` does
-  the same for the instructions of a constructor run. Call hooks: `Hooks::hookCall`
+  the same for the instructions of a constructor run, and each `Op`
+  method for its compact instruction. Call hooks: `Hooks::hookCall`
   in the prologue (after OP_VARARGPREP for vararg functions) and in
   `Calls::callNative`; return hooks: `Hooks::retHook` in OP_RETURN* (before
   the results are collected), `Calls::callNative` (a native's results are
