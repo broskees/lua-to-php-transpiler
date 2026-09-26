@@ -15,6 +15,8 @@ use LuaPhp\Lib\Io\CFile;
 use LuaPhp\Lib\Io\Errno;
 
 /**
+ * @internal
+ *
  * Chunks -> Lua functions (lapi.c: lua_load, ldo.c: f_parser/checkmode,
  * lauxlib.c: luaL_loadfilex).
  *
@@ -156,8 +158,11 @@ final class ChunkLoader
         return self::factoryForSource(Emitter::emitChunk($proto));
     }
 
-    /** the compiled factory whose PHP source (Emitter::emitChunk) is $source */
-    private static function factoryForSource(string $source): \Closure
+    /**
+     * The compiled factory whose PHP source (Emitter::emitChunk) is
+     * $source (also the embedding API's compile cache).
+     */
+    public static function factoryForSource(string $source): \Closure
     {
         $key = hash('xxh128', $source);
         $factory = self::$factoryCache[$key] ?? null;

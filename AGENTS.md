@@ -201,7 +201,8 @@ Lua string keys and integer keys distinct.
   must be root's or ours and not group/other-writable unless sticky; else no
   disk cache. It is then used by its real path. Writes are temp file +
   rename under the flock of its `usage` counter, which empties the directory
-  before it passes 20000 entries or 256 MB.
+  before it passes 20000 entries or 256 MB (`CacheDirectory`, shared with
+  the embedding API's compile cache).
 - **Emitted function** (one per Proto): `static function (Coroutine $L,
   LuaClosure $cl, array $R, int $callstatus = 0) use ($proto_<path>,
   $function_<path>...): ?array`. `$R` is the register file; the incoming
@@ -546,6 +547,60 @@ Lua string keys and integer keys distinct.
   leave the descriptors out so the child inherits them. Dates/times:
   `Lib\Os\CTime` (glibc gmtime/localtime/mktime/strftime, zone from TZ or
   /etc/localtime, never PHP's default zone).
+
+## Embedding conventions
+
+`LuaPhp\Embed` (src/Embed/) is the only public API: hosts run Lua inside
+a PHP app (a web request) through it. Everything else is `@internal`, and
+nothing public takes or returns a Coroutine, CallInfo, Proto or runtime
+LuaTable: handles wrap them.
+
+- **Shape.** `Environment` (once per process: loader, compile cache,
+  libraries, host modules and globals, limits) -> `Sandbox` (one Lua
+  state per run; `Embed\Internal\State` is its inside) -> `Result`
+  (values, output, usage). `Environment::run` makes a sandbox and drops
+  it (handles in the result keep it alive); `Lua::run` uses a default
+  SAFE environment. Never call `Standalone::configurePhp` on this path:
+  no ini_set, no handler or output buffer left behind, no echo.
+- **Calls into Lua** (`State::call`, `compile`) go through `State::enter`
+  and run on `State::$runningThread` (the thread whose Lua code called
+  the PHP function running now) or the main thread, as protected calls
+  whose message handler takes the traceback. A Lua error is a
+  `RuntimeError` (luaMessage: string, number or tostring; value converted;
+  traceback: luaL_traceback at level 1); the sandbox stays usable. Any
+  other exception closes the sandbox (`stoppedBy`) and goes on unchanged:
+  protectedRun and resume catch only LuaError and PHP's C-stack \Error,
+  and no emitted `finally` runs Lua, so no pcall, handler or `__close`
+  sees it. Later uses are `SandboxClosed` (previous: that exception).
+- **PHP functions** (`Internal\HostFunction`): a Closure's signature is
+  read once (a WeakMap by Closure) into luaL_check* rules per parameter;
+  `bind` makes the NativeFunction of one sandbox. Its body runs through
+  `State::callHost`: ScriptError -> Lua error (message with luaL_error's
+  position, or a value); a RuntimeError of the same sandbox the PHP code
+  let through -> the Lua error it was (as lua_call); after the body, a
+  closed sandbox (it caught what stopped the run) rethrows. A result or
+  a ScriptError value that cannot convert is a host bug: it stops the run.
+- **Values** (`Internal\Convert`): see its class comment for the rules
+  (lists 1..n <-> 0-based, raw contents, depth 100, paths). Paths use the
+  keys of the side the value comes from. A handle registers its value in
+  a table under `$G->libraryState['embed.handles']` (luaL_ref), so Lua's
+  collector sees what PHP holds; its destructor only unsets that entry.
+- **Chunks** (`Internal\CompileCache`): text only (mode "t"), key =
+  chunk name + sha256 of the bytes + whether the code counts steps; in
+  memory per Environment, on disk in a `Runtime\CacheDirectory` (the same
+  trust rules, entry format and bounds as load()'s LoadCache). Chunk names
+  are "@" + the loader's name; `Sandbox::load` defaults to the code
+  itself (luaL_loadstring). `require`: host modules, then loader
+  "a/b.lua", then "a/b/init.lua" (searchers returning [loader, data] or
+  [null, message]; loader errors as loadlib.c's checkload).
+- **Loaders** never read outside their root: `FilesystemLoader` refuses
+  absolute names and ".." components and checks the real path is under
+  the root's real path.
+- **Closing** runs no Lua code: pending `__gc` finalizers are skipped
+  (close(), a stopped run, a dropped sandbox).
+- Tests: `tests/unit/Embed*Test.php`, compared with lua5.4 where Lua
+  decides (argument errors, tracebacks, syntax errors, what a table
+  holds).
 
 ## Testing
 
