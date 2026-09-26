@@ -6,6 +6,8 @@ namespace LuaPhp\Runtime;
 
 /**
  * Port of ltm.c: tag methods (metamethods).
+ *
+ * @internal
  */
 final class MetaMethods
 {

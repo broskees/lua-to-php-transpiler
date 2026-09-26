@@ -11,6 +11,8 @@ use LuaPhp\Runtime\Gc\Collector;
  * Pieces of lua.c (the stand-alone interpreter) shared by bin/lua and the
  * scripts bin/lua2php generates: process setup, the message handler that
  * appends a traceback, protected calls and error reporting.
+ *
+ * @internal
  */
 final class Standalone
 {
@@ -35,12 +37,7 @@ final class Standalone
             ini_set('zend.exception_ignore_args', '1');
             ini_set('serialize_precision', '-1');
         }
-        set_error_handler(static function (int $severity, string $message, string $file, int $line): bool {
-            if (!(error_reporting() & $severity)) {
-                return false;  // silenced with @
-            }
-            throw new \ErrorException($message, 0, $severity, $file, $line);
-        });
+        set_error_handler(PhpErrors::throwAsException(...));
         ob_start(null, 8192);
     }
 

@@ -6,6 +6,7 @@ namespace LuaPhp\Lib\String;
 
 use LuaPhp\Lib\StringLib;
 use LuaPhp\Runtime\Auxiliary;
+use LuaPhp\Runtime\Budget;
 use LuaPhp\Runtime\Coroutine;
 use LuaPhp\Runtime\DebugInfo;
 use LuaPhp\Runtime\MemoryLimit;
@@ -17,6 +18,8 @@ use LuaPhp\Runtime\MemoryLimit;
  * double 8, maximum alignment 8).
  *
  * One instance is C's Header plus the read position in the format.
+ *
+ * @internal
  */
 final class Pack
 {
@@ -239,7 +242,7 @@ final class Pack
             $totalSize += $alignmentPadding + $size;
             // room for the alignment and a number (strings are checked below, after their argument)
             if (\strlen($result) + $alignmentPadding + self::MAXINTSIZE > $capacity) {
-                $capacity = MemoryLimit::grow(\strlen($result) + $alignmentPadding + self::MAXINTSIZE);
+                $capacity = MemoryLimit::grow(\strlen($result) + $alignmentPadding + self::MAXINTSIZE, $L->globalState->budget);
             }
             $result .= str_repeat("\0", $alignmentPadding);  // fill alignment
             $arg++;
@@ -271,7 +274,7 @@ final class Pack
                     $length = \strlen($string);
                     Auxiliary::argCheck($L, $length <= $size, $arg, 'string longer than given size');
                     if (\strlen($result) + $size > $capacity) {
-                        $capacity = MemoryLimit::grow(\strlen($result) + $size);
+                        $capacity = MemoryLimit::grow(\strlen($result) + $size, $L->globalState->budget);
                     }
                     $result .= $string . str_repeat("\0", $size - $length);  // pad extra space
                     break;
@@ -285,7 +288,7 @@ final class Pack
                         'string length does not fit in given size',
                     );
                     if (\strlen($result) + $size + $length > $capacity) {
-                        $capacity = MemoryLimit::grow(\strlen($result) + $size + $length);
+                        $capacity = MemoryLimit::grow(\strlen($result) + $size + $length, $L->globalState->budget);
                     }
                     $result .= $header->packInteger($length, $size, false) . $string;  // pack length, add string
                     $totalSize += $length;
@@ -294,7 +297,7 @@ final class Pack
                     $string = Auxiliary::checkString($L, $args, $arg);
                     Auxiliary::argCheck($L, !str_contains($string, "\0"), $arg, 'string contains zeros');
                     if (\strlen($result) + \strlen($string) + 1 > $capacity) {
-                        $capacity = MemoryLimit::grow(\strlen($result) + \strlen($string) + 1);
+                        $capacity = MemoryLimit::grow(\strlen($result) + \strlen($string) + 1, $L->globalState->budget);
                     }
                     $result .= $string . "\0";  // add zero at the end
                     $totalSize += \strlen($string) + 1;
@@ -308,6 +311,7 @@ final class Pack
                     break;
             }
         }
+        $L->globalState->budget?->chargeSteps(intdiv(\strlen($result), Budget::BYTES_PER_STEP));
         return $result;
     }
 

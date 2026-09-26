@@ -17,6 +17,8 @@ namespace LuaPhp\Runtime;
  * (luaconf.h), which rounds decimal and hexadecimal numerals correctly.
  * Decimal digits go through PHP's float conversion (zend_strtod, also
  * correctly rounded); hexadecimal floats are rounded here, half to even.
+ *
+ * @internal
  */
 final class StringToNumber
 {

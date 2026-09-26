@@ -27,6 +27,8 @@ use LuaPhp\Runtime\Vm;
  * A file handle is a Userdata whose payload is a LuaStream (C:
  * luaL_Stream) holding a CFile (C: FILE *) and its close function; its
  * metatable is registry["FILE*"].
+ *
+ * @internal
  */
 final class IoLib
 {
@@ -66,9 +68,9 @@ final class IoLib
         ]);
         self::createMeta($L);
         // create (and set) default files
-        self::createStdFile($L, $io, CFile::standard(0), self::IO_INPUT, 'stdin');
-        self::createStdFile($L, $io, CFile::standard(1), self::IO_OUTPUT, 'stdout');
-        self::createStdFile($L, $io, CFile::standard(2), null, 'stderr');
+        self::createStdFile($L, $io, CFile::standard(0, $L->globalState), self::IO_INPUT, 'stdin');
+        self::createStdFile($L, $io, CFile::standard(1, $L->globalState), self::IO_OUTPUT, 'stdout');
+        self::createStdFile($L, $io, CFile::standard(2, $L->globalState), null, 'stderr');
         return $io;
     }
 
@@ -286,7 +288,7 @@ final class IoLib
         $handle = self::newPreFile($L);
         Auxiliary::argCheck($L, $mode === 'r' || $mode === 'w', 2, 'invalid mode');  // l_checkmodep
         Errno::$errno = 0;
-        $handle->payload->file = CFile::popen($command, $mode);
+        $handle->payload->file = CFile::popen($command, $mode, $L->globalState);
         $handle->payload->closef = self::pipeCloseFunction(...);
         if ($handle->payload->file === null) {
             return Errno::fileResult(false, $command);

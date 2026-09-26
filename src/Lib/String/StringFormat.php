@@ -5,8 +5,10 @@ declare(strict_types=1);
 namespace LuaPhp\Lib\String;
 
 use LuaPhp\Runtime\Auxiliary;
+use LuaPhp\Runtime\Budget;
 use LuaPhp\Runtime\Coroutine;
 use LuaPhp\Runtime\DebugInfo;
+use LuaPhp\Runtime\GlobalState;
 use LuaPhp\Runtime\Lua;
 use LuaPhp\Runtime\LuaObject;
 use LuaPhp\Runtime\MemoryLimit;
@@ -17,6 +19,8 @@ use LuaPhp\Runtime\NumberFormat;
  * validity checks (getformat, checkformat), '%q' (addliteral, addquoted,
  * quotefloat) and the C printf conversions it hands to l_sprintf, done
  * here for integers and by NumberFormat::formatFloat for floats.
+ *
+ * @internal
  */
 final class StringFormat
 {
@@ -40,9 +44,6 @@ final class StringFormat
     private const QUOTED_SPECIALS = "\"\\\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f"
         . "\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f\x7f";
 
-    /** @var list<string> long strings whose address '%p' gave out (see stringAddress) */
-    private static array $addressedLongStrings = [];
-
     /** holds a string while isSameString counts references */
     private static ?string $extraCopy = null;
 
@@ -61,7 +62,7 @@ final class StringFormat
             // room for the text before the next item and for the item, unless it is a string (checked below)
             $bytes = \strlen($result) + ($escapePosition === false ? $formatEnd : $escapePosition) - $position + self::MAX_ITEM;
             if ($bytes > $capacity) {
-                $capacity = MemoryLimit::grow($bytes);
+                $capacity = MemoryLimit::grow($bytes, $L->globalState->budget);
             }
             if ($escapePosition === false) {
                 $result .= substr($format, $position);
@@ -125,7 +126,7 @@ final class StringFormat
                     $result .= self::formatFloat($form, $conversion, $number);
                     break;
                 case 'p':
-                    $pointer = self::toPointer($value);
+                    $pointer = self::toPointer($L, $value);
                     self::checkFormat($L, $form, self::L_FMTFLAGSC, false);
                     // avoid calling 'printf' with argument NULL: format "(null)" as a string
                     $result .= self::pad($form, $pointer ?? '(null)');
@@ -136,7 +137,7 @@ final class StringFormat
                     }
                     $literal = self::literal($L, $args, $arg);
                     if (\strlen($result) + \strlen($literal) > $capacity) {
-                        $capacity = MemoryLimit::grow(\strlen($result) + \strlen($literal));
+                        $capacity = MemoryLimit::grow(\strlen($result) + \strlen($literal), $L->globalState->budget);
                     }
                     $result .= $literal;
                     break;
@@ -147,7 +148,7 @@ final class StringFormat
                         : Auxiliary::toLString($L, $value);
                     if (\strlen($form) === 2) {  // no modifiers?
                         if (\strlen($result) + \strlen($string) > $capacity) {
-                            $capacity = MemoryLimit::grow(\strlen($result) + \strlen($string));
+                            $capacity = MemoryLimit::grow(\strlen($result) + \strlen($string), $L->globalState->budget);
                         }
                         $result .= $string;  // keep entire string
                         break;
@@ -157,7 +158,7 @@ final class StringFormat
                     if (!str_contains($form, '.') && \strlen($string) >= 100) {
                         // no precision and string is too long to be formatted
                         if (\strlen($result) + \strlen($string) > $capacity) {
-                            $capacity = MemoryLimit::grow(\strlen($result) + \strlen($string));
+                            $capacity = MemoryLimit::grow(\strlen($result) + \strlen($string), $L->globalState->budget);
                         }
                         $result .= $string;  // keep entire string
                         break;
@@ -172,6 +173,7 @@ final class StringFormat
                     Auxiliary::error($L, "invalid conversion '" . DebugInfo::cString($form) . "' to 'format'");
             }
         }
+        $L->globalState->budget?->chargeSteps(intdiv(\strlen($result), Budget::BYTES_PER_STEP));
         return $result;
     }
 
@@ -303,7 +305,7 @@ final class StringFormat
     {
         $value = $args[$arg - 1];
         if (\is_string($value)) {
-            return self::quoted($value);
+            return self::quoted($value, $L->globalState->budget);
         }
         if (\is_int($value)) {
             // corner case: LUA_MININTEGER is not a numeral; use hex
@@ -319,7 +321,7 @@ final class StringFormat
     }
 
     // lstrlib.c: addquoted
-    private static function quoted(string $s): string
+    private static function quoted(string $s, ?Budget $budget): string
     {
         $length = \strlen($s);
         $quoted = '"';
@@ -328,7 +330,7 @@ final class StringFormat
         while ($position < $length) {
             $plainLength = strcspn($s, self::QUOTED_SPECIALS, $position);
             if (\strlen($quoted) + $plainLength + 5 > $capacity) {  // (plain text and one escape, '\ddd')
-                $capacity = MemoryLimit::grow(\strlen($quoted) + $plainLength + 5);
+                $capacity = MemoryLimit::grow(\strlen($quoted) + $plainLength + 5, $budget);
             }
             $quoted .= substr($s, $position, $plainLength);
             $position += $plainLength;
@@ -371,10 +373,10 @@ final class StringFormat
      * object (strings included), null (C's NULL) for numbers, booleans and
      * nil.
      */
-    private static function toPointer(mixed $value): ?string
+    private static function toPointer(Coroutine $L, mixed $value): ?string
     {
         if (\is_string($value)) {
-            return self::stringAddress($value);
+            return self::stringAddress($L->globalState, $value);
         }
         if (\is_object($value)) {
             return LuaObject::address($value);
@@ -398,18 +400,18 @@ final class StringFormat
      * return an unchanged argument, such as substr of a whole string, so
      * string.sub(s, 1) keeps the address of a long s, where C makes a copy.)
      */
-    private static function stringAddress(string $s): string
+    private static function stringAddress(GlobalState $G, string $s): string
     {
         if (\strlen($s) <= Lua::LUAI_MAXSHORTLEN) {
             return sprintf('0x5556%08x', crc32($s));
         }
-        foreach (self::$addressedLongStrings as $index => $addressedString) {
+        foreach ($G->addressedLongStrings as $index => $addressedString) {
             if ($addressedString === $s && self::isSameString($addressedString, $s)) {
                 return sprintf('0x5557%08x', $index * 16);
             }
         }
-        self::$addressedLongStrings[] = $s;  // (keys are never reused, see forgetUnreferencedStrings)
-        return sprintf('0x5557%08x', array_key_last(self::$addressedLongStrings) * 16);
+        $G->addressedLongStrings[] = $s;  // (keys are never reused, see forgetUnreferencedStrings)
+        return sprintf('0x5557%08x', array_key_last($G->addressedLongStrings) * 16);
     }
 
     /**
@@ -417,18 +419,18 @@ final class StringFormat
      * any more. The collector calls this at every cycle: C frees such a
      * string, so keeping it would only leak memory.
      */
-    public static function forgetUnreferencedStrings(): void
+    public static function forgetUnreferencedStrings(GlobalState $G): void
     {
-        if (self::$addressedLongStrings === []) {
+        if ($G->addressedLongStrings === []) {
             return;
         }
         // the count PHP reports for a string only the table holds
-        self::$addressedLongStrings['probe'] = str_repeat('.', Lua::LUAI_MAXSHORTLEN + 1);
-        $countWhenUnreferenced = self::referenceCount(self::$addressedLongStrings['probe']);
-        unset(self::$addressedLongStrings['probe']);
-        foreach (array_keys(self::$addressedLongStrings) as $index) {
-            if (self::referenceCount(self::$addressedLongStrings[$index]) === $countWhenUnreferenced) {
-                unset(self::$addressedLongStrings[$index]);
+        $G->addressedLongStrings['probe'] = str_repeat('.', Lua::LUAI_MAXSHORTLEN + 1);
+        $countWhenUnreferenced = self::referenceCount($G->addressedLongStrings['probe']);
+        unset($G->addressedLongStrings['probe']);
+        foreach (array_keys($G->addressedLongStrings) as $index) {
+            if (self::referenceCount($G->addressedLongStrings[$index]) === $countWhenUnreferenced) {
+                unset($G->addressedLongStrings[$index]);
             }
         }
     }

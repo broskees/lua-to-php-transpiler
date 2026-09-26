@@ -15,6 +15,8 @@ namespace LuaPhp\Runtime;
  * coroutine, so everything between the resume and the yield (pcall,
  * metamethods, iterators) simply continues. Which yields are allowed is
  * decided as in C, by counting non-yieldable calls ($nny).
+ *
+ * @internal
  */
 final class Coroutine
 {
@@ -198,9 +200,22 @@ final class Coroutine
     public static function newThread(Coroutine $L, mixed $body): self
     {
         $L1 = new self($L->globalState);
+        $L->globalState->budget?->countCoroutine($L1);
         Hooks::setHook($L1, $L->hook, $L->hookmask, $L->basehookcount);
         $L1->body = $body;
         return $L1;
+    }
+
+    /**
+     * Whether this coroutine finished: returned, died with an error or was
+     * closed (lcorolib.c: auxstatus "dead").
+     */
+    public function isDead(): bool
+    {
+        if ($this->status !== Lua::LUA_OK) {
+            return $this->status !== Lua::LUA_YIELD;  // an error occurred
+        }
+        return $this->ci === $this->baseCi && $this->body === null && $this !== $this->globalState->mainThread;
     }
 
     /**

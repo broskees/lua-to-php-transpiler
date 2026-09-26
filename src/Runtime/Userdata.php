@@ -7,6 +7,8 @@ namespace LuaPhp\Runtime;
 /**
  * A full userdata (C: Udata in lobject.h): an opaque PHP payload with a
  * metatable and user values (lua_newuserdatauv).
+ *
+ * @internal
  */
 final class Userdata
 {

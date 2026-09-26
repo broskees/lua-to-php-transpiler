@@ -16,6 +16,8 @@ namespace LuaPhp\Runtime;
  *
  * "Slot" parameters say where an operand came from, for error messages
  * (ldebug.c: varinfo): see DebugInfo::NO_SLOT / DebugInfo::upvalueSlot().
+ *
+ * @internal
  */
 final class Vm
 {
@@ -598,7 +600,7 @@ final class Vm
                         $length += \strlen($piece);
                     }
                     if ($length > MemoryLimit::CHECK_ABOVE) {
-                        MemoryLimit::reserve($length);
+                        MemoryLimit::reserve($length, $L->globalState->budget);
                     }
                     $values[$top - $handled] = implode('', array_reverse($pieces));
                 }

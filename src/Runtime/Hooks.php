@@ -27,6 +27,8 @@ use LuaPhp\Compiler\Proto;
  *   vararg functions), Calls::callNative for native functions.
  * - return hooks: OP_RETURN* in emitted code, Calls::callNative,
  *   Calls::tailCall for a native function called in tail position.
+ *
+ * @internal
  */
 final class Hooks
 {

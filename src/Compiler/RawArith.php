@@ -11,6 +11,8 @@ namespace LuaPhp\Compiler;
  * into floats, so + - * go through the wrapping helpers below.
  *
  * Operation codes are lua.h's LUA_OPADD..LUA_OPBNOT ("ORDER TM, ORDER OP").
+ *
+ * @internal
  */
 final class RawArith
 {

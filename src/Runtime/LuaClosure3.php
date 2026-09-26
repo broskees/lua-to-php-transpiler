@@ -6,7 +6,11 @@ namespace LuaPhp\Runtime;
 
 use LuaPhp\Compiler\Proto;
 
-/** a Lua closure with exactly 3 upvalues (see LuaClosure) */
+/**
+ * a Lua closure with exactly 3 upvalues (see LuaClosure)
+ *
+ * @internal
+ */
 final class LuaClosure3 extends LuaClosure
 {
     public function __construct(

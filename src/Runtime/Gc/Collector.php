@@ -49,6 +49,8 @@ use LuaPhp\Runtime\Userdata;
  * C would allocate; the budget between cycles follows lgc.c's setpause.
  * "count" is the estimate of the last cycle (C sizes of what it found
  * reachable) plus what was allocated since.
+ *
+ * @internal
  */
 final class Collector
 {
@@ -255,6 +257,21 @@ final class Collector
         self::callAllPendingFinalizers($L);
     }
 
+    /**
+     * Not in C: gives up the state of $G without running more Lua code (an
+     * embedded state its host throws away, or whose run LimitReached or a
+     * PHP exception stopped): the pending finalizers are dropped, never
+     * called, and the collector stops, so no '__gc' runs from here on;
+     * pending '__close' variables are never closed either. PHP then frees
+     * the state as any garbage (see Teardown).
+     */
+    public static function abandonState(GlobalState $G): void
+    {
+        $G->gcstp |= self::GCSTPCLS;
+        $G->finobj = [];
+        $G->tobefnz = [];
+    }
+
     /** lstate.c: luaE_setdebt: keeps gettotalbytes() */
     private static function setDebt(GlobalState $G, int $debt): void
     {
@@ -305,7 +322,7 @@ final class Collector
         }
         self::setDebt($G, 0);
         $G->gcTotalBytes = $G->gcEstimate;
-        StringFormat::forgetUnreferencedStrings();
+        StringFormat::forgetUnreferencedStrings($G);
         $G->gcRealBase = memory_get_usage();
         self::callAllPendingFinalizers($L);
         self::setPause($G);

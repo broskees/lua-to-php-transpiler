@@ -7,6 +7,8 @@ namespace LuaPhp\Compiler;
 /**
  * Description of an active local variable; mirrors C 'Vardesc' in
  * lparser.h. 'k' is the value of a compile-time constant (kind RDKCTC).
+ *
+ * @internal
  */
 final class Vardesc
 {

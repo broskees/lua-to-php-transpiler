@@ -15,6 +15,8 @@ use LuaPhp\Runtime\Vm;
 /**
  * Port of lmathlib.c: the math library, including the LUA_COMPAT_MATHLIB
  * functions (the reference build defines LUA_COMPAT_5_3).
+ *
+ * @internal
  */
 final class MathLib
 {

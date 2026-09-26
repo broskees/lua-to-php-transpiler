@@ -15,6 +15,8 @@ use LuaPhp\Runtime\StringToNumber;
  * Characters are ints (0..255) like C's 'current'; EOZ (-1) marks the end
  * of input. The token buffer is a byte string; error messages quote it as C
  * does, so an embedded '\0' ends the quoted text.
+ *
+ * @internal
  */
 final class Lexer
 {

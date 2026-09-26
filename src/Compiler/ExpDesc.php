@@ -10,6 +10,8 @@ namespace LuaPhp\Compiler;
  * ind.t/ind.idx as indT/indIdx, var.ridx/var.vidx as varRidx/varVidx);
  * lparser.c and lcode.c only read the member that matches 'k'.
  * C copies expdescs by value: use copyFrom(), never share one object.
+ *
+ * @internal
  */
 final class ExpDesc
 {

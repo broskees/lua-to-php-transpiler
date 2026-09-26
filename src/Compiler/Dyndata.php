@@ -9,6 +9,8 @@ namespace LuaPhp\Compiler;
  * For the label lists the C 'n' counts are the array lengths. The active
  * variable list keeps its C count separately: lparser.c reads entries just
  * past it (movegotosout after removevars) and new_localvar reuses them.
+ *
+ * @internal
  */
 final class Dyndata
 {

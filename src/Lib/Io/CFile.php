@@ -4,8 +4,10 @@ declare(strict_types=1);
 
 namespace LuaPhp\Lib\Io;
 
+use LuaPhp\Runtime\GlobalState;
 use LuaPhp\Runtime\MemoryLimit;
-use LuaPhp\Runtime\Standalone;
+use LuaPhp\Runtime\StandardError;
+use LuaPhp\Runtime\StandardOutput;
 
 /**
  * A C stdio stream (FILE *) as glibc implements it, over a PHP stream:
@@ -19,10 +21,14 @@ use LuaPhp\Runtime\Standalone;
  * go through PHP's stream (its read buffer plays the role of glibc's).
  *
  * Standard output is special: print() and io.write share C's stdout
- * buffer, so this stream writes through PHP's output buffer, like print
- * (see Standalone::configurePhp and flushStdout).
+ * buffer, so this stream writes to the state's output sink, like print
+ * (GlobalState::$output: by default PHP's output buffer, see
+ * Standalone::configurePhp and flushStdout). Standard error writes to
+ * the state's error sink when it is not the process's stderr.
  *
  * Every failing operation sets Errno::$errno and the error indicator.
+ *
+ * @internal
  */
 final class CFile
 {
@@ -76,6 +82,9 @@ final class CFile
     private bool $isDirectory = false;
 
     private bool $closed = false;
+
+    /** standard output and error: the state whose output sinks they write to */
+    private ?GlobalState $sinkState = null;
 
     /**
      * @param resource $stream
@@ -153,14 +162,23 @@ final class CFile
         return new self($stream, true, true, true);
     }
 
-    /** stdio.h: stdin, stdout, stderr (stderr is unbuffered) */
-    public static function standard(int $fd): self
+    /**
+     * stdio.h: stdin, stdout, stderr (stderr is unbuffered) of state $G:
+     * stdout writes to $G's output sink, stderr to its error sink (see
+     * writeOut). Outside the command line PHP has no STDIN, STDOUT and
+     * STDERR constants: the streams are opened then.
+     */
+    public static function standard(int $fd, GlobalState $G): self
     {
-        return match ($fd) {
-            0 => new self(STDIN, true, false, false),
-            1 => new self(STDOUT, false, true, false, true),
-            default => (new self(STDERR, false, true, false))->unbuffered(),
+        $file = match ($fd) {
+            0 => new self(\defined('STDIN') ? STDIN : fopen('php://stdin', 'r'), true, false, false),
+            1 => new self(\defined('STDOUT') ? STDOUT : fopen('php://stdout', 'w'), false, true, false, true),
+            default => (new self(\defined('STDERR') ? STDERR : fopen('php://stderr', 'w'), false, true, false))->unbuffered(),
         };
+        if ($fd !== 0) {
+            $file->sinkState = $G;
+        }
+        return $file;
     }
 
     /** glibc: stderr is unbuffered (a one-byte buffer) */
@@ -187,9 +205,9 @@ final class CFile
      * stdio.h: popen: run $command with /bin/sh, reading its standard
      * output ($mode "r") or writing its standard input ("w").
      */
-    public static function popen(string $command, string $mode): ?self
+    public static function popen(string $command, string $mode, GlobalState $G): ?self
     {
-        self::flushAll();  // liolib.c: l_popen does fflush(NULL) first
+        self::flushAll($G);  // liolib.c: l_popen does fflush(NULL) first
         if (!self::canStartProcesses()) {
             Errno::$errno = Errno::ENOSYS;
             return null;
@@ -207,15 +225,19 @@ final class CFile
         return new self($stream, $mode === 'r', $mode === 'w', true, false, $process);
     }
 
-    /** stdio.h: fflush(NULL): flush every output stream, standard output included */
-    public static function flushAll(): void
+    /**
+     * stdio.h: fflush(NULL): flush every output stream, and $G's standard
+     * output. Like C's, the list of streams is the process's: the files of
+     * every state.
+     */
+    public static function flushAll(GlobalState $G): void
     {
         foreach (self::$openFiles ?? [] as $file => $unused) {
             if ($file->writeBuffer !== '') {
                 $file->flush();
             }
         }
-        Standalone::flushStdout();
+        $G->flushOutput();
     }
 
     /** stdio.h: clearerr */
@@ -482,19 +504,24 @@ final class CFile
         return true;
     }
 
-    /** standard output: through PHP's output buffer, which print() uses too */
+    /** standard output: the state's output sink, which print() uses too */
     private function writeStdout(string $data): bool
     {
-        if ($this->bufferMode === self::IOLBF && str_contains($data, "\n")) {
-            $newlinePosition = strrpos($data, "\n");
-            echo substr($data, 0, $newlinePosition + 1);
-            Standalone::flushStdout();
-            echo substr($data, $newlinePosition + 1);
+        $G = $this->sinkState;
+        if ($this->bufferMode === self::IOFBF && $G->budget === null && $G->output instanceof StandardOutput) {
+            echo $data;  // the command line: as StandardOutput::write, without the calls
             return true;
         }
-        echo $data;
+        if ($this->bufferMode === self::IOLBF && str_contains($data, "\n")) {
+            $newlinePosition = strrpos($data, "\n");
+            $G->writeOutput(substr($data, 0, $newlinePosition + 1));
+            $G->flushOutput();
+            $G->writeOutput(substr($data, $newlinePosition + 1));
+            return true;
+        }
+        $G->writeOutput($data);
         if ($this->bufferMode === self::IONBF) {
-            Standalone::flushStdout();
+            $G->flushOutput();
         }
         return true;
     }
@@ -502,6 +529,13 @@ final class CFile
     /** write $data to the underlying stream now */
     private function writeOut(string $data): bool
     {
+        if ($this->sinkState !== null) {  // standard error
+            if (!($this->sinkState->errorOutput instanceof StandardError)) {
+                $this->sinkState->writeErrorOutput($data);
+                return true;
+            }
+            $this->sinkState->budget?->chargeOutput(\strlen($data));  // (the process's stderr: write errors are seen)
+        }
         $length = \strlen($data);
         $written = 0;
         while ($written < $length) {
@@ -524,7 +558,7 @@ final class CFile
     public function flush(): bool
     {
         if ($this->isStdout) {
-            Standalone::flushStdout();
+            $this->sinkState->flushOutput();
             return true;
         }
         if ($this->writeBuffer === '') {
@@ -576,6 +610,11 @@ final class CFile
         $this->atEndAfterAppend = false;
         $this->pushback = '';
         $stream = $this->stream;
+        if ($this->sinkState !== null
+            && !($this->isStdout ? $this->sinkState->output instanceof StandardOutput : $this->sinkState->errorOutput instanceof StandardError)) {
+            Errno::$errno = Errno::ESPIPE;  // an output sink is like a pipe
+            return null;
+        }
         if ($this->isStdout) {  // PHP writes stdout past its STDOUT stream; use the descriptor itself
             $stream = @fopen('php://fd/1', 'r');
             if ($stream === false) {

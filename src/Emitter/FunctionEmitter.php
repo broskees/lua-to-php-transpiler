@@ -31,6 +31,8 @@ use LuaPhp\Runtime\Vm;
  * exact position. In a chunk too heavy to compile inline, the code outside
  * loops of its heaviest functions is compact instead: one call per
  * instruction (emitCompact, Runtime\Op; see Emitter::emitChunk).
+ *
+ * @internal
  */
 final class FunctionEmitter
 {
@@ -127,9 +129,22 @@ final class FunctionEmitter
      */
     public static bool $compactEverywhere = false;
 
+    /** whether the function has a backward jump (a loop: findLoops) */
+    private bool $hasBackwardJumps = false;
+
+    /**
+     * @param bool $countSteps code for an embedded state (Emitter::emitChunk):
+     *   the function charges its size in steps when called and a loop's
+     *   size at each jump back (Runtime\Budget: GlobalState::$stepsLeft,
+     *   bound to $steps by reference in a function with loops), so the
+     *   steps charged are at least the instructions run; and its frame
+     *   counts a Lua call level (CallInfo::$depth, limited by
+     *   GlobalState::$callDepthLimit)
+     */
     public function __construct(
         private readonly Proto $proto,
         private readonly string $path,
+        private readonly bool $countSteps = false,
     ) {
         $this->findJumpTargets();
         $this->findConstructorRuns();
@@ -229,6 +244,16 @@ final class FunctionEmitter
             'if ($ci->top > $L->stackLimit || $ci->frameBytes > $L->frameBytesLimit) {',
             '    Calls::stackOverflow($L);',
             '}',
+        );
+        if ($this->countSteps) {
+            $code .= self::lines(
+                '$ci->depth = ($previous->depth ?: Calls::luaDepth($previous)) + 1;  // (0: a native frame, which stores none)',
+                'if ($ci->depth > $L->globalState->callDepthLimit) {',
+                '    Calls::callDepthOverflow($L, $ci->depth);',
+                '}',
+            );
+        }
+        $code .= self::lines(
             '$L->ci = $ci;',
             '$ci->R = &$R;',
         );
@@ -240,6 +265,12 @@ final class FunctionEmitter
         }
         // lvm.c: luaV_execute's 'trap' (see hookCheck)
         $code .= self::lines('$trap = &$L->trap;');
+        if ($this->countSteps) {  // the function's size (see $countSteps)
+            $size = \count($proto->code);
+            $code .= $this->hasBackwardJumps
+                ? self::lines('$steps = &$L->globalState->stepsLeft;', "if ((\$steps -= $size) < 0) { \\LuaPhp\\Runtime\\Budget::stepsUsedUp(\$L); }")
+                : self::lines("if ((\$L->globalState->stepsLeft -= $size) < 0) { \\LuaPhp\\Runtime\\Budget::stepsUsedUp(\$L); }");
+        }
         if (!$proto->is_vararg) {
             // ldebug.c: luaG_tracecall (vararg functions call the hook at OP_VARARGPREP)
             $code .= self::lines('if ($L->hookmask !== 0) {', '    Hooks::hookCall($L, $ci, 0);', '}');
@@ -414,10 +445,17 @@ final class FunctionEmitter
     private function jump(int $pc, int $target, string $label = 'L'): string
     {
         if ($this->segmentStarts === [] || $this->segmentOf($pc) === $this->segmentOf($target)) {
-            return "goto $label$target;";
+            $transfer = "goto $label$target;";
+        } else {
+            $this->entries[$label . $target] = true;
+            $transfer = "{ \$entry = '$label$target'; continue 2; }";
         }
-        $this->entries[$label . $target] = true;
-        return "{ \$entry = '$label$target'; continue 2; }";
+        if (!$this->countSteps || $target > $pc) {
+            return $transfer;
+        }
+        // a jump back (every loop has one): the loop's size (see $countSteps)
+        $size = $pc - $target + 1;
+        return "{ if ((\$steps -= $size) < 0) { \\LuaPhp\\Runtime\\Budget::stepsUsedUp(\$L); } $transfer }";
     }
 
     /**
@@ -557,6 +595,7 @@ final class FunctionEmitter
             if ($target !== null && $target <= $pc) {
                 $loopChanges[$target] = ($loopChanges[$target] ?? 0) + 1;
                 $loopChanges[$pc + 1] = ($loopChanges[$pc + 1] ?? 0) - 1;
+                $this->hasBackwardJumps = true;
             }
         }
         $loops = 0;

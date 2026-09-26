@@ -10,6 +10,8 @@ namespace LuaPhp\Compiler;
  * The C 'size*' fields are the counts of the corresponding arrays. Where C
  * holds a NULL TString (stripped debug info), the PHP field holds null.
  * Constants ('k') are PHP null|bool|int|float|string; strings are raw bytes.
+ *
+ * @internal
  */
 final class Proto
 {

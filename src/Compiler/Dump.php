@@ -7,6 +7,8 @@ namespace LuaPhp\Compiler;
 /**
  * Port of ldump.c: save precompiled Lua chunks (Proto -> bytes).
  * Output is byte-identical to `luac5.4 -o` (and `luac5.4 -s -o` when stripping).
+ *
+ * @internal
  */
 final class Dump
 {

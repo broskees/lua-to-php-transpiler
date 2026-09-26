@@ -8,6 +8,8 @@ namespace LuaPhp\Compiler;
  * Mirrors C 'Token' in llex.h. 'seminfo' (C union SemInfo) holds the
  * string of a TK_NAME/TK_STRING, the int of a TK_INT or the float of a
  * TK_FLT; null for other tokens.
+ *
+ * @internal
  */
 final class Token
 {

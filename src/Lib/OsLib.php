@@ -15,12 +15,13 @@ use LuaPhp\Runtime\Gc\Collector;
 use LuaPhp\Runtime\Lua;
 use LuaPhp\Runtime\LuaTable;
 use LuaPhp\Runtime\MemoryLimit;
-use LuaPhp\Runtime\Standalone;
 use LuaPhp\Runtime\Vm;
 
 /**
  * Port of loslib.c: the os library. Dates and times go through CTime
  * (C's time.h as glibc behaves in the "C" locale).
+ *
+ * @internal
  */
 final class OsLib
 {
@@ -292,7 +293,7 @@ final class OsLib
             // room for the text before the next conversion and for the conversion (loslib.c: SIZETIMEFMT)
             $bytes = \strlen($result) + ($percentPosition === false ? $length : $percentPosition) - $position + 250;
             if ($bytes > $capacity) {
-                $capacity = MemoryLimit::grow($bytes);
+                $capacity = MemoryLimit::grow($bytes, $L->globalState->budget);
             }
             if ($percentPosition === false) {  // no more conversion specifiers
                 $result .= substr($format, $position);
@@ -378,8 +379,7 @@ final class OsLib
             Collector::closeState($L);
         }
         // exit: flush all streams, then end the process
-        CFile::flushAll();
-        Standalone::flushStdout();
+        CFile::flushAll($L->globalState);
         exit($status & 0xFF);
     }
 }

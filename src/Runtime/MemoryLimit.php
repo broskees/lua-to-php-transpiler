@@ -14,6 +14,12 @@ namespace LuaPhp\Runtime;
  * below memory_limit. Results of up to CHECK_ABOVE bytes are not checked.
  * Memory that grows a little at a time while Lua code runs (tables,
  * closures, call frames) is not checked here.
+ *
+ * With a Budget (an embedded state), a result must also fit its
+ * memoryBytes, else LimitReached('memory'): callers pass the state's
+ * budget (null: none).
+ *
+ * @internal
  */
 final class MemoryLimit
 {
@@ -38,9 +44,13 @@ final class MemoryLimit
      * collects garbage before it fails (lmem.c: tryagain), a failed check
      * frees PHP's garbage cycles and cached chunks and checks again.
      */
-    public static function reserve(int $bytes): void
+    public static function reserve(int $bytes, ?Budget $budget = null): void
     {
-        if ($bytes <= self::CHECK_ABOVE || self::fits($bytes)) {
+        if ($bytes <= self::CHECK_ABOVE) {
+            return;
+        }
+        $budget?->reserveMemory($bytes);
+        if (self::fits($bytes)) {
             return;
         }
         gc_collect_cycles();
@@ -58,9 +68,9 @@ final class MemoryLimit
      * allocated). Returns the length up to which it may grow before the
      * next check. Builders start with a capacity of CHECK_ABOVE.
      */
-    public static function grow(int $length): int
+    public static function grow(int $length, ?Budget $budget = null): int
     {
-        self::reserve(2 * $length);
+        self::reserve(2 * $length, $budget);
         return 2 * $length;
     }
 

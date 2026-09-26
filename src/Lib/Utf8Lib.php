@@ -7,6 +7,7 @@ namespace LuaPhp\Lib;
 use LuaPhp\Runtime\Auxiliary;
 use LuaPhp\Runtime\Coroutine;
 use LuaPhp\Runtime\LuaTable;
+use LuaPhp\Runtime\MemoryLimit;
 use LuaPhp\Runtime\NativeFunction;
 use LuaPhp\Runtime\Vm;
 
@@ -15,6 +16,8 @@ use LuaPhp\Runtime\Vm;
  *
  * C reads the '\0' that ends every Lua string; here reads at the end of a
  * string give 0 explicitly.
+ *
+ * @internal
  */
 final class Utf8Lib
 {
@@ -130,6 +133,7 @@ final class Utf8Lib
         $lax = ($args[3] ?? null) !== null && ($args[3] ?? null) !== false;
         Auxiliary::argCheck($L, 1 <= $start && --$start <= $length, 2, 'initial position out of bounds');
         Auxiliary::argCheck($L, --$end < $length, 3, 'final position out of bounds');
+        $L->globalState->budget?->chargeSteps(max(0, $end - $start + 1));  // (a step per byte: a decode is about an instruction's work)
         while ($start <= $end) {
             $decoded = self::decode($s, $start, !$lax);
             if ($decoded === null) {  // conversion error?
@@ -161,6 +165,7 @@ final class Utf8Lib
             Auxiliary::error($L, 'string slice too long');
         }
         Auxiliary::checkStack($L, $end - $start + 1, 'string slice too long');
+        $L->globalState->budget?->chargeSteps($end - $start + 1);
         $codes = [];
         for ($position = $start - 1; $position < $end;) {
             $decoded = self::decode($s, $position, !$lax);
@@ -200,6 +205,8 @@ final class Utf8Lib
     private static function utfChar(Coroutine $L, array $args): array
     {
         $count = \count($args);
+        MemoryLimit::reserve(6 * $count, $L->globalState->budget);  // (at most 6 bytes each: MAXUTF is 0x7FFFFFFF)
+        $L->globalState->budget?->chargeSteps($count);
         $result = '';
         for ($i = 1; $i <= $count; $i++) {
             $result .= self::utfCharOf($L, $args, $i);
@@ -220,6 +227,7 @@ final class Utf8Lib
         $position = ($n >= 0) ? 1 : $length + 1;
         $position = self::relativePosition(Auxiliary::optInteger($L, $args, 3, $position), $length);
         Auxiliary::argCheck($L, 1 <= $position && --$position <= $length, 3, 'position out of bounds');
+        $initialPosition = $position;
         if ($n === 0) {
             // find beginning of current byte sequence
             while ($position > 0 && self::isContinuation($s, $position)) {
@@ -246,6 +254,7 @@ final class Utf8Lib
                 }
             }
         }
+        $L->globalState->budget?->chargeSteps(abs($position - $initialPosition));
         if ($n === 0) {  // did it find given character?
             return [$position + 1];
         }
@@ -262,9 +271,11 @@ final class Utf8Lib
             return [];  // (lua_Unsigned)n >= len: no more codepoints
         }
         if ($n < $length) {
+            $skipFrom = $n;
             while (self::isContinuation($s, $n)) {
                 $n++;  // go to next character
             }
+            $L->globalState->budget?->chargeSteps($n - $skipFrom);
         }
         if ($n >= $length) {
             return [];  // no more codepoints

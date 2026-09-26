@@ -7,6 +7,8 @@ namespace LuaPhp\Compiler;
 /**
  * Description of an upvalue for function prototypes; mirrors C 'Upvaldesc'
  * in lobject.h.
+ *
+ * @internal
  */
 final class UpvalDesc
 {

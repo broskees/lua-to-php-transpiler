@@ -33,6 +33,8 @@ use LuaPhp\Runtime\Gc\Collector;
  * Lua code can only run at those points (traceExec's hooks,
  * Collector::step's finalizers, Vm::setTable's metamethods), and each
  * instruction reads its operands after them.
+ *
+ * @internal
  */
 final class TableConstructor
 {

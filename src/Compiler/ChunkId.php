@@ -7,6 +7,8 @@ namespace LuaPhp\Compiler;
 /**
  * Port of lobject.c: luaO_chunkid. Turns a chunk name ("@file", "=name", or
  * source text) into the short, printable 'short_src' used in messages.
+ *
+ * @internal
  */
 final class ChunkId
 {

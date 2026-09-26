@@ -13,6 +13,8 @@ use LuaPhp\Compiler\OpCodes as O;
  * Port of lparser.c (Lua 5.4.9): the recursive-descent parser. Every
  * function keeps its C name. C's 'ls' is $this->ls; C pointer arguments
  * that the callee assigns are PHP references.
+ *
+ * @internal
  */
 final class Parser
 {

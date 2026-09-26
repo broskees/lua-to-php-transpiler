@@ -7,6 +7,8 @@ namespace LuaPhp\Compiler;
 /**
  * The only way Lua source becomes a Proto: the front-end ported from
  * llex.c, lparser.c and lcode.c (see Lexer, Parser, CodeGen).
+ *
+ * @internal
  */
 final class Compiler
 {

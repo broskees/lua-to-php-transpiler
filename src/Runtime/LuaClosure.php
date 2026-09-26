@@ -27,6 +27,8 @@ use LuaPhp\Compiler\Proto;
  * upvalue.) create() picks the class. The emitted code of a Proto knows the
  * class of its closures and reads $cl->u0 or $cl->upvals[$i] directly;
  * other code uses getUpval()/setUpval().
+ *
+ * @internal
  */
 abstract class LuaClosure
 {

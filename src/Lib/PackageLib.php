@@ -31,6 +31,8 @@ use LuaPhp\Runtime\Vm;
  * Functions that C gives the 'package' table as upvalue (require and the
  * searchers) read it from their NativeFunction's upvalues through
  * $L->ci->func, as lua_upvalueindex(1) does.
+ *
+ * @internal
  */
 final class PackageLib
 {
@@ -448,8 +450,66 @@ final class PackageLib
         }
     }
 
+    /**
+     * A sandbox's package library: only package.loaded (its 'require' is
+     * openSandboxRequire's).
+     */
+    public static function openSandboxed(Coroutine $L): LuaTable
+    {
+        $package = new LuaTable();
+        $package->hash['loaded'] = self::registrySubtable($L, Lua::LUA_LOADED_TABLE);
+        return $package;
+    }
+
+    /**
+     * Installs the global 'require' of a sandbox: ll_require with PHP
+     * searchers in place of package.searchers. package.loaded (the registry's
+     * LOADED table) first; then each searcher in order, a PHP callable
+     * fn (Coroutine $L, string $name): array returning [loader, loader data]
+     * or [null, message] (a message, or null for none, as a Lua searcher
+     * returns); the loader (any function) is called with the name and the
+     * loader data, and its result stored as ll_require stores it. When no
+     * searcher finds the module, the error is findloader's: "module 'x' not
+     * found:" followed by "\n\t" and each message. The collector does not
+     * see what the searchers hold: Lua values they keep must also be
+     * reachable from Lua (as loaders are, through package.loaded).
+     *
+     * @param list<callable(Coroutine, string): array{mixed, mixed}> $searchers
+     */
+    public static function openSandboxRequire(Coroutine $L, array $searchers): void
+    {
+        $findLoader = static function (Coroutine $L, string $name) use ($searchers): array {
+            $message = '';  // to build error message
+            foreach ($searchers as $searcher) {
+                [$loader, $data] = $searcher($L, $name);
+                if ($loader instanceof LuaClosure || $loader instanceof NativeFunction) {  // did it find a loader?
+                    return [$loader, $data];  // module loader found
+                }
+                if (\is_string($data)) {  // searcher returned error message?
+                    $message .= "\n\t" . $data;  // concatenate error message
+                }
+            }
+            Auxiliary::error($L, "module '$name' not found:" . DebugInfo::cString($message));
+        };
+        $L->globalState->globals->hash['require'] = new NativeFunction(
+            'require',
+            static fn (Coroutine $L, array $args): array => self::requireWith($L, $args, $findLoader),
+        );
+    }
+
     // loadlib.c: ll_require
     private static function require(Coroutine $L, array $args): array
+    {
+        return self::requireWith($L, $args, self::findLoader(...));
+    }
+
+    /**
+     * loadlib.c: ll_require, finding loaders with $findLoader (findloader:
+     * [loader, loader data] or a Lua error).
+     *
+     * @param \Closure(Coroutine, string): array{mixed, mixed} $findLoader
+     */
+    private static function requireWith(Coroutine $L, array $args, \Closure $findLoader): array
     {
         $fullName = Auxiliary::checkString($L, $args, 1);
         $name = DebugInfo::cString($fullName);
@@ -459,7 +519,7 @@ final class PackageLib
             return [$module];  // package is already loaded
         }
         // else must load package
-        [$loader, $loaderData] = self::findLoader($L, $name);
+        [$loader, $loaderData] = $findLoader($L, $name);
         // run loader to load module, with name and loader data as arguments
         $results = Calls::call($L, $loader, [$fullName, $loaderData]);
         $result = $results[0] ?? null;

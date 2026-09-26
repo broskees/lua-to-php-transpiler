@@ -15,6 +15,8 @@ namespace LuaPhp\Lib\Os;
  *
  * The local time zone is the one C uses: TZ, else /etc/localtime; PHP's
  * own default time zone is not involved.
+ *
+ * @internal
  */
 final class CTime
 {

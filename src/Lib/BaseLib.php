@@ -19,6 +19,7 @@ use LuaPhp\Runtime\MemoryLimit;
 use LuaPhp\Runtime\MetaMethods;
 use LuaPhp\Runtime\NativeFunction;
 use LuaPhp\Runtime\Standalone;
+use LuaPhp\Runtime\StandardOutput;
 use LuaPhp\Runtime\StringToNumber;
 use LuaPhp\Runtime\Vm;
 
@@ -27,11 +28,19 @@ use LuaPhp\Runtime\Vm;
  *
  * Every function has the native signature (Coroutine $L, array $args):
  * array (see NativeFunction).
+ *
+ * @internal
  */
 final class BaseLib
 {
     // lbaselib.c: SPACECHARS
     private const SPACECHARS = " \f\n\r\t\v";
+
+    /** collectgarbage's options (lbaselib.c: luaB_collectgarbage's opts) */
+    private const GC_OPTIONS = ['stop', 'restart', 'collect', 'count', 'step', 'setpause', 'setstepmul', 'isrunning', 'generational', 'incremental'];
+
+    /** the options collectgarbage has in a sandbox */
+    private const SANDBOX_GC_OPTIONS = ['collect', 'count', 'step'];
 
     // lbaselib.c: luaopen_base
     public static function open(Coroutine $L): LuaTable
@@ -72,13 +81,26 @@ final class BaseLib
     // lbaselib.c: luaB_print
     private static function print(Coroutine $L, array $args): array
     {
+        $G = $L->globalState;
+        // the command line (StandardOutput, no budget): echo as its write() does, without a call per piece
+        $echo = $G->budget === null && $G->output instanceof StandardOutput;
         $count = \count($args);
         for ($i = 0; $i < $count; $i++) {
             $text = Auxiliary::toLString($L, $args[$i]);  // convert it to string
-            echo $i > 0 ? "\t" . $text : $text;
+            $piece = $i > 0 ? "\t" . $text : $text;
+            if ($echo) {
+                echo $piece;
+            } else {
+                $G->writeOutput($piece);
+            }
         }
-        echo "\n";
-        Standalone::flushStdout();  // lauxlib.h: lua_writeline flushes stdout
+        if ($echo) {
+            echo "\n";
+            Standalone::flushStdout();  // lauxlib.h: lua_writeline flushes stdout
+            return [];
+        }
+        $G->writeOutput("\n");
+        $G->flushOutput();
         return [];
     }
 
@@ -100,7 +122,7 @@ final class BaseLib
     /**
      * lapi.c: lua_warning with lauxlib.c's warning functions (warnfoff,
      * warnfon, warnfcont): control messages "@on"/"@off"; warnings go to
-     * stderr as "Lua warning: <message>\n".
+     * standard error (the state's error output) as "Lua warning: <message>\n".
      */
     public static function warning(Coroutine $L, string $message, bool $toContinue): void
     {
@@ -122,18 +144,18 @@ final class BaseLib
         if (!$G->warningsOn) {
             return;  // warnfoff
         }
-        fwrite(STDERR, 'Lua warning: ');  // start a new warning
+        $G->writeErrorOutput('Lua warning: ');  // start a new warning
         self::continueWarning($L, $message, $toContinue);
     }
 
     // lauxlib.c: warnfcont
     private static function continueWarning(Coroutine $L, string $message, bool $toContinue): void
     {
-        fwrite(STDERR, DebugInfo::cString($message));  // write message
+        $L->globalState->writeErrorOutput(DebugInfo::cString($message));  // write message
         if ($toContinue) {  // not the last part?
             $L->globalState->warningContinues = true;  // to be continued
         } else {  // last part
-            fwrite(STDERR, "\n");  // finish message with end-of-line
+            $L->globalState->writeErrorOutput("\n");  // finish message with end-of-line
             $L->globalState->warningContinues = false;
         }
     }
@@ -276,9 +298,8 @@ final class BaseLib
      * Parameters are stored as C stores them (lgc.h: setgcparam keeps
      * value / 4 in a byte; C int arguments).
      */
-    private static function collectgarbage(Coroutine $L, array $args): array
+    private static function collectgarbage(Coroutine $L, array $args, array $options = self::GC_OPTIONS): array
     {
-        $options = ['stop', 'restart', 'collect', 'count', 'step', 'setpause', 'setstepmul', 'isrunning', 'generational', 'incremental'];
         $option = $options[Auxiliary::checkOption($L, $args, 1, 'collect', $options)];
         $G = $L->globalState;
         $cInt = static fn (int $index): int => ((Auxiliary::optInteger($L, $args, $index, 0) & 0xFFFFFFFF) ^ 0x80000000) - 0x80000000;
@@ -469,11 +490,39 @@ final class BaseLib
         return self::loadResult(static fn (): LuaClosure => ChunkLoader::loadFile($L, $filename, $mode), $args, 3);
     }
 
-    // lbaselib.c: luaB_load
-    private static function load(Coroutine $L, array $args): array
+    /**
+     * A sandbox's restrictions on the base library, once open (see
+     * StandardLibraries::openSelected): no dofile and loadfile; load only
+     * with $allowLoad, and then for text chunks only; collectgarbage only
+     * with the options "collect", "count" and "step".
+     */
+    public static function restrictForSandbox(Coroutine $L, bool $allowLoad): void
+    {
+        $globals = $L->globalState->globals;
+        $globals->set('dofile', null);
+        $globals->set('loadfile', null);
+        $globals->set('load', null);
+        if ($allowLoad) {
+            $globals->hash['load'] = new NativeFunction('load', static fn (Coroutine $L, array $args): array => self::load($L, $args, true));
+        }
+        $globals->hash['collectgarbage'] = new NativeFunction(
+            'collectgarbage',
+            static fn (Coroutine $L, array $args): array => self::collectgarbage($L, $args, self::SANDBOX_GC_OPTIONS),
+        );
+    }
+
+    /**
+     * lbaselib.c: luaB_load. $textOnly (a sandbox): binary chunks are
+     * refused as mode "t" refuses them, whatever mode the caller asks for
+     * ('b' is taken out of it).
+     */
+    private static function load(Coroutine $L, array $args, bool $textOnly = false): array
     {
         $chunk = LuaObject::toStringCoerced($args[0] ?? null);
         $mode = Auxiliary::optString($L, $args, 3, 'bt');
+        if ($textOnly) {
+            $mode = str_replace('b', '', $mode);
+        }
         if ($chunk !== null) {  // loading a string?
             $chunkname = Auxiliary::optString($L, $args, 2, $chunk);
             return self::loadResult(static fn (): LuaClosure => ChunkLoader::load($L, $chunk, $chunkname, $mode), $args, 4);
@@ -501,7 +550,7 @@ final class BaseLib
                     break;
                 }
                 if (\strlen($pieces) + \strlen($piece) > $capacity) {
-                    $capacity = MemoryLimit::grow(\strlen($pieces) + \strlen($piece));
+                    $capacity = MemoryLimit::grow(\strlen($pieces) + \strlen($piece), $L->globalState->budget);
                 }
                 $pieces .= $piece;
             }

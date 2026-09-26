@@ -7,6 +7,8 @@ namespace LuaPhp\Compiler;
 /**
  * Description of a local variable for function prototypes (debug
  * information); mirrors C 'LocVar' in lobject.h.
+ *
+ * @internal
  */
 final class LocVar
 {

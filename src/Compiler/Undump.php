@@ -9,6 +9,8 @@ namespace LuaPhp\Compiler;
  *
  * The format is native to the reference build: little-endian, 4-byte
  * instructions, 8-byte lua_Integer and lua_Number.
+ *
+ * @internal
  */
 final class Undump
 {
