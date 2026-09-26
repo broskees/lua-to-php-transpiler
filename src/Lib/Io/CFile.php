@@ -169,12 +169,28 @@ final class CFile
     }
 
     /**
+     * Whether processes can be started: hosts may disable proc_open and the
+     * functions that go with it (disable_functions; a disabled function is
+     * undefined, and calling it a PHP fatal error). Without them popen and
+     * system (OsLib::execute) fail with ENOSYS ("Function not implemented"),
+     * and system(NULL) finds no shell.
+     */
+    public static function canStartProcesses(): bool
+    {
+        return \function_exists('proc_open') && \function_exists('proc_get_status') && \function_exists('proc_close');
+    }
+
+    /**
      * stdio.h: popen: run $command with /bin/sh, reading its standard
      * output ($mode "r") or writing its standard input ("w").
      */
     public static function popen(string $command, string $mode): ?self
     {
         self::flushAll();  // liolib.c: l_popen does fflush(NULL) first
+        if (!self::canStartProcesses()) {
+            Errno::$errno = Errno::ENOSYS;
+            return null;
+        }
         // the other standard descriptors are inherited: passing PHP's STDOUT
         // would make PHP seek descriptor 1 to that stream's own idea of its position
         $descriptors = $mode === 'r' ? [1 => ['pipe', 'w']] : [0 => ['pipe', 'r']];

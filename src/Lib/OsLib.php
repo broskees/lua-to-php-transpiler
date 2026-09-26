@@ -64,7 +64,11 @@ final class OsLib
         $command = Auxiliary::optString($L, $args, 1, null);
         Errno::$errno = 0;
         if ($command === null) {
-            return [is_executable('/bin/sh')];  // true if there is a shell
+            return [CFile::canStartProcesses() && is_executable('/bin/sh')];  // true if there is a shell
+        }
+        if (!CFile::canStartProcesses()) {  // disabled by the host: system() fails with ENOSYS
+            Errno::$errno = Errno::ENOSYS;
+            return Errno::execResult(null);
         }
         // standard descriptors inherited (see CFile::popen)
         $process = @proc_open(DebugInfo::cString($command), [], $pipes);

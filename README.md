@@ -118,10 +118,20 @@ against `lua5.4`:
 - A deployed program cannot `dofile` or `require` Lua files it writes while
   running: they were never transpiled, so it gets a "not transpiled ahead of
   time" error.
-- Shared hosting: the runtime works without the `posix` and `pcntl`
-  extensions. Two known gaps: if the host disables `ini_set`, nothing runs,
-  and if it disables `proc_open`, `os.execute` and `io.popen` stop the program
-  with a PHP error instead of returning a Lua error.
+- Shared hosting: `bin/lua2php`, its output and `bin/lua` run under a typical
+  host's `disable_functions` (`ini_set`, `set_time_limit`, `getmypid`,
+  `putenv`, `symlink`, `link`, `dl`, `exec`, `system`, `shell_exec`,
+  `passthru`, `popen`, the `proc_*` functions, every `posix_*` and `pcntl_*`
+  function). Without `ini_set` the host's settings stay: the JIT
+  stays as configured, `bin/lua` keeps the host's `memory_limit`, and each
+  coroutine reserves PHP's default 2 MB of address space instead of 256 KB
+  (`php -d fiber.stack_size=256K` restores it; where the address space is
+  capped, a coroutine that cannot get its stack fails with Lua's "not enough
+  memory").
+  Without `proc_open`, `proc_get_status` or `proc_close`, `os.execute(cmd)`
+  returns `fail, "Function not implemented", 38`, `io.popen(cmd)` returns
+  `fail, "cmd: Function not implemented", 38`, and `os.execute()` returns
+  `false` (no shell).
 
 ## Tests
 

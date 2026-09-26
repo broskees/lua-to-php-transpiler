@@ -282,9 +282,31 @@ final class Coroutine
             }
             return Calls::callNonLua($L, $body, $arguments);
         });
-        // read when a fiber starts; every fiber the runtime starts sets its own size
-        ini_set('fiber.stack_size', (string) self::FIBER_STACK_BYTES);
-        return $this->fiber->start($this, $body, $arguments);
+        // read when a fiber starts; every fiber the runtime starts sets its own
+        // size. Hosts may disable ini_set: fibers then get the host's size
+        // (PHP's default is 2 MB: the same memory, but 2 MB of address space)
+        if (\function_exists('ini_set')) {
+            ini_set('fiber.stack_size', (string) self::FIBER_STACK_BYTES);
+        }
+        $triedAgain = false;
+        while (true) {
+            try {
+                return $this->fiber->start($this, $body, $arguments);
+            } catch (\Exception $exception) {
+                if ($this->fiber->isStarted()) {
+                    throw $exception;  // raised by the body
+                }
+                // its C stack could not be mapped (the address space is used
+                // up, e.g. under ulimit -v): PHP frees the fibers of unreachable
+                // coroutines and it tries again, else Lua's memory error
+                // (lmem.c: tryagain, then LUA_ERRMEM)
+                if ($triedAgain) {
+                    throw new LuaError(Lua::MEMERRMSG, Lua::LUA_ERRMEM);
+                }
+                gc_collect_cycles();
+                $triedAgain = true;
+            }
+        }
     }
 
     /**

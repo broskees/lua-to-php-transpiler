@@ -46,14 +46,29 @@ function test_transpiled_diff_cases_behave_like_lua_in_tiny_segments(): void
     runTranspiledDiffCases('lua2php-tiny-segments', ['-d', 'auto_prepend_file=' . REPO_ROOT . '/tests/unit/tiny_segments.php']);
 }
 
+function test_transpiled_diff_cases_behave_like_lua_on_a_shared_host(): void
+{
+    // lua2php and its output under a typical shared host's disable_functions
+    // (ini_set and the process functions among them), compared with lua5.4
+    // whose C library cannot start processes either: see
+    // DisabledFunctionsTest (loaded before this file), which runs bin/lua so
+    runTranspiledDiffCases(
+        'lua2php-shared-host',
+        \Tests\DisabledFunctionsTest\disabling(\Tests\DisabledFunctionsTest\sharedHostDisabledFunctions()),
+        ['env', 'LUA_INIT_5_4=' . \Tests\DisabledFunctionsTest\PROCESSES_FAIL_INIT],
+    );
+}
+
 /**
  * tests/diff transpiled into scratchDirectory()/$directoryName and run (the
  * cases that load() chunks again with the cache warm), with the PHP options
- * $phpOptions for bin/lua2php and every run
+ * $phpOptions for bin/lua2php and every run; lua5.4 runs with the command
+ * prefix $referencePrefix
  *
  * @param list<string> $phpOptions
+ * @param list<string> $referencePrefix
  */
-function runTranspiledDiffCases(string $directoryName, array $phpOptions): void
+function runTranspiledDiffCases(string $directoryName, array $phpOptions, array $referencePrefix = []): void
 {
     $diffDirectory = REPO_ROOT . '/tests/diff';
     $outputDirectory = scratchDirectory() . "/$directoryName";
@@ -82,7 +97,7 @@ function runTranspiledDiffCases(string $directoryName, array $phpOptions): void
                 $name = basename($file);
                 $outputFile = $outputDirectory . '/' . basename($name, '.lua') . '.php';
                 $running[$name] = [
-                    startProcess(['lua5.4', $name, ...$arguments], $diffDirectory),
+                    startProcess([...$referencePrefix, 'lua5.4', $name, ...$arguments], $diffDirectory),
                     startProcess(['env', "LUAPHP_CACHE_DIR=$cacheDirectory", 'php', ...OPCACHE_ON_NEW_FILES, ...$phpOptions, '-d', 'memory_limit=4G', $outputFile, ...$arguments], $outputDirectory),
                     $outputFile,
                 ];

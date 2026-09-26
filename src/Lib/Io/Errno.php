@@ -21,6 +21,7 @@ final class Errno
     public const EINVAL = 22;
     public const ESPIPE = 29;
     public const EISDIR = 21;
+    public const ENOSYS = 38;
 
     /** the last error, like C's global 'errno' (0: none) */
     public static int $errno = 0;
