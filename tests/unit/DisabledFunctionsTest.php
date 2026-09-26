@@ -322,7 +322,8 @@ function test_os_execute_and_io_popen_fail_without_the_process_functions(): void
  */
 function test_the_differential_corpus_runs_on_a_shared_host(): void
 {
-    $casesThatStartProcesses = ['os_library.lua', 'print_flush.lua'];
+    // io_errno.lua builds its fixtures with os.execute (mkdir, chmod, ln -s)
+    $casesThatStartProcesses = ['io_errno.lua', 'os_library.lua', 'print_flush.lua'];
     $diffDirectory = REPO_ROOT . '/tests/diff';
     $files = glob("$diffDirectory/*.lua");
     sort($files);
