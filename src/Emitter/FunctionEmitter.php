@@ -19,8 +19,9 @@ use LuaPhp\Runtime\MetaMethods;
  * Emits the PHP closure for one Proto: lvm.c's luaV_execute with the
  * dispatch loop unrolled. Each instruction becomes a few PHP statements
  * preceded by a "// [pc] OPNAME args ; line N" comment; jumps become
- * `goto L<pc>`. Registers are the elements of the PHP array $R; the
- * running CallInfo is $ci, the closure $cl, the thread $L.
+ * `goto L<pc>` (a big function is segments under a dispatcher, see
+ * $maximumSegmentWeight). Registers are the elements of the PHP array $R;
+ * the running CallInfo is $ci, the closure $cl, the thread $L.
  *
  * Fast paths (integer/float arithmetic, plain table access, string
  * concatenation, ...) are inline; everything else calls the runtime
@@ -74,6 +75,43 @@ final class FunctionEmitter
      */
     private const CONSTRUCTOR_LITERALS_MAXIMUM = 4096;
 
+    /**
+     * The most weight (instructionWeight: about one per instruction) one
+     * segment of a function may have. A heavier function is emitted as
+     * segments under a dispatcher:
+     *
+     *     $entry = 'L0';
+     *     while (true) { switch ($entry) {
+     *     case 'L0':
+     *         ... the code of the instructions of segment 0 ...
+     *         $entry = 'L230'; continue 2;
+     *     case 'L230':
+     *         ...
+     *     } }
+     *
+     * A jump within a segment is a goto; a jump to another segment is
+     * { $entry = 'L<pc>'; continue 2; } with a case at its target, so the
+     * only path from one segment into another is through the switch.
+     * Reason: opcache's optimizer and the JIT number the basic blocks of a
+     * function with a recursive depth-first search (Zend/Optimizer/zend_cfg.c:
+     * compute_postnum_recursive, from zend_cfg_compute_dominators_tree and
+     * the JIT's zend_jit_build_cfg), about 40 bytes of C stack per block
+     * on its deepest path, and a PHP function of 2,300 Lua instructions
+     * already overflowed a coroutine's 256 KB fiber stack
+     * (Coroutine::FIBER_STACK_BYTES): a segfault. With segments, the search
+     * goes no deeper than one segment: at most 256 ordinary instructions,
+     * measured 40 to 108 bytes each, so 27 KB of the fiber's 256 KB.
+     * Tests set it to 1 to run code of any size as segments of one
+     * instruction (tiny_segments.php).
+     */
+    public static int $maximumSegmentWeight = 256;
+
+    /** @var list<int> the first instruction of each segment (planSegments), empty when the function is one piece */
+    private array $segmentStarts = [];
+
+    /** @var array<string, true> labels jumped to from another segment: each gets a case in the dispatcher */
+    private array $entries = [];
+
     public function __construct(
         private readonly Proto $proto,
         private readonly string $path,
@@ -85,6 +123,7 @@ final class FunctionEmitter
         $proto = $this->proto;
         $this->findJumpTargets();
         $this->findConstructorRuns();
+        $this->planSegments();
 
         $uses = [];
         foreach (array_keys($proto->p) as $childIndex) {
@@ -122,26 +161,186 @@ final class FunctionEmitter
             $code .= self::lines('if ($L->hookmask !== 0) {', '    Hooks::hookCall($L, $ci, 0);', '}');
         }
 
+        // the code of each instruction (or constructor run) first: the
+        // dispatcher's cases are known once every jump is emitted
+        $pieces = [];
         $instructionCount = \count($proto->code);
         for ($pc = 0; $pc < $instructionCount; $pc++) {
-            if (isset($this->jumpTargets[$pc])) {
-                $code .= "    L$pc:\n";
-            }
             if (isset($this->constructorRuns[$pc])) {
                 $last = $this->constructorRuns[$pc];
-                $code .= $this->emitConstructorRun($pc, $last);
+                $pieces[$pc] = $this->emitConstructorRun($pc, $last);
                 $pc = $last;
                 continue;
             }
-            $code .= $this->comment($pc);
+            $pieces[$pc] = $this->comment($pc);
             if (isset($this->consumed[$pc])) {
                 continue;
             }
-            $code .= $this->hookCheck($pc);
-            $code .= $this->emitInstruction($pc);
+            $pieces[$pc] .= $this->hookCheck($pc) . $this->emitInstruction($pc);
+        }
+        $segmentStarts = array_flip($this->segmentStarts);
+        if ($segmentStarts !== []) {
+            $code .= self::lines(
+                '// ' . \count($segmentStarts) . ' segments (see FunctionEmitter::$maximumSegmentWeight)',
+                "\$entry = 'L0';",
+                'while (true) { switch ($entry) {',
+            );
+        }
+        foreach ($pieces as $pc => $piece) {
+            if ($pc > 0 && isset($segmentStarts[$pc])) {
+                $code .= self::lines("\$entry = 'L$pc'; continue 2;");  // on into the next segment
+            }
+            if (isset($segmentStarts[$pc]) || isset($this->entries["L$pc"])) {
+                $code .= "    case 'L$pc':\n";
+            }
+            if (isset($this->jumpTargets[$pc])) {
+                $code .= "    L$pc:\n";
+            }
+            $code .= $piece;
+        }
+        if ($segmentStarts !== []) {
+            $code .= self::lines('} }');
         }
         $code .= "    };\n";
         return $code;
+    }
+
+    /**
+     * Cuts a function heavier than $maximumSegmentWeight into segments:
+     * $segmentStarts. A segment starts where the code of an instruction or
+     * of a constructor run starts (not at an instruction the previous one
+     * consumes, nor inside a run) and weighs at most the maximum, or is one
+     * instruction heavier than that. Of the places where it may end, it
+     * ends at the last one inside the fewest loops: a jump between segments
+     * passes through the dispatcher, so a loop that fits in a segment stays
+     * in one.
+     */
+    private function planSegments(): void
+    {
+        $code = $this->proto->code;
+        // most functions weigh less than a segment even with every
+        // instruction of their constructor runs weighed
+        $weightAtMost = 0;
+        foreach ($code as $instruction) {
+            $weightAtMost += self::instructionWeight($instruction);
+        }
+        if ($weightAtMost <= self::$maximumSegmentWeight) {
+            return;
+        }
+        // a backward jump from $pc to $target repeats $target..$pc: a cut
+        // before any of $target + 1 .. $pc splits that loop
+        $loopDepthChanges = [];
+        foreach ($code as $pc => $instruction) {
+            $target = match (OpCodes::GET_OPCODE($instruction)) {
+                OpCodes::OP_JMP => $pc + 1 + OpCodes::GETARG_sJ($instruction),
+                OpCodes::OP_FORLOOP, OpCodes::OP_TFORLOOP => $pc + 1 - OpCodes::GETARG_Bx($instruction),
+                default => null,
+            };
+            if ($target !== null && $target <= $pc) {
+                $loopDepthChanges[$target + 1] = ($loopDepthChanges[$target + 1] ?? 0) + 1;
+                $loopDepthChanges[$pc + 1] = ($loopDepthChanges[$pc + 1] ?? 0) - 1;
+            }
+        }
+        // the places a segment may start ("pieces"), with the weight of the
+        // code up to the next one and the number of loops a cut there splits
+        $pieceStarts = [];
+        $pieceWeights = [];
+        $pieceLoopDepths = [];
+        $loopDepth = 0;
+        $runLast = -1;
+        $instructionCount = \count($code);
+        for ($pc = 0; $pc < $instructionCount; $pc++) {
+            $loopDepth += $loopDepthChanges[$pc] ?? 0;
+            if ($pc <= $runLast) {
+                continue;
+            }
+            if (isset($this->consumed[$pc])) {
+                $pieceWeights[\count($pieceWeights) - 1] += self::instructionWeight($code[$pc]);
+                continue;
+            }
+            $pieceStarts[] = $pc;
+            $pieceLoopDepths[] = $loopDepth;
+            if (isset($this->constructorRuns[$pc])) {
+                $runLast = $this->constructorRuns[$pc];
+                $pieceWeights[] = 1;  // a call, or its fast path of literals
+            } else {
+                $pieceWeights[] = self::instructionWeight($code[$pc]);
+            }
+        }
+        if (array_sum($pieceWeights) <= self::$maximumSegmentWeight) {
+            return;
+        }
+        $pieceCount = \count($pieceStarts);
+        $this->segmentStarts = [0];
+        $first = 0;  // the first piece of the segment being cut
+        while (true) {
+            // the segment may end before any piece $end it can reach
+            $best = $first + 1;
+            $weight = $pieceWeights[$first];
+            for ($end = $first + 1; $end < $pieceCount; $end++) {
+                if ($pieceLoopDepths[$end] <= $pieceLoopDepths[$best]) {
+                    $best = $end;
+                }
+                $weight += $pieceWeights[$end];
+                if ($weight > self::$maximumSegmentWeight) {
+                    break;
+                }
+            }
+            if ($end === $pieceCount) {
+                return;  // the rest fits in this segment
+            }
+            $this->segmentStarts[] = $pieceStarts[$best];
+            $first = $best;
+        }
+    }
+
+    /**
+     * Roughly the C stack opcache's optimizer needs for the code of
+     * $instruction (see $maximumSegmentWeight), in units of an ordinary
+     * instruction: 40 to 108 bytes, measured compiling long runs of one
+     * kind of statement in a fiber. Each value an instruction handles in a
+     * sequence of its own (call results, vararg values, OP_SETLIST's values,
+     * OP_CONCAT's operands, generic for variables) takes 40 to 60 more.
+     */
+    private static function instructionWeight(int $instruction): int
+    {
+        return 1 + match (OpCodes::GET_OPCODE($instruction)) {
+            OpCodes::OP_CALL, OpCodes::OP_VARARG => max(OpCodes::GETARG_C($instruction) - 1, 0),
+            OpCodes::OP_TFORCALL => OpCodes::GETARG_C($instruction),
+            OpCodes::OP_SETLIST, OpCodes::OP_CONCAT => OpCodes::GETARG_B($instruction),
+            default => 0,
+        };
+    }
+
+    /** the segment of instruction $pc: the last one starting at or before it (0 when the function is one piece) */
+    private function segmentOf(int $pc): int
+    {
+        $low = 0;
+        $high = \count($this->segmentStarts) - 1;
+        while ($low < $high) {  // binary search
+            $middle = ($low + $high + 1) >> 1;
+            if ($this->segmentStarts[$middle] <= $pc) {
+                $low = $middle;
+            } else {
+                $high = $middle - 1;
+            }
+        }
+        return $low;
+    }
+
+    /**
+     * A jump from the code of instruction $pc to the label $label$target
+     * (L: the start of instruction $target; T: OP_TFORCALL $target past its
+     * hook check): a goto within a segment, else through the dispatcher,
+     * which then has a case for the label.
+     */
+    private function jump(int $pc, int $target, string $label = 'L'): string
+    {
+        if ($this->segmentStarts === [] || $this->segmentOf($pc) === $this->segmentOf($target)) {
+            return "goto $label$target;";
+        }
+        $this->entries[$label . $target] = true;
+        return "{ \$entry = '$label$target'; continue 2; }";
     }
 
     /**
@@ -701,8 +900,8 @@ final class FunctionEmitter
         if ($fallback === '') {
             // the MMBIN at pc + 1 is emitted on its own (it is a jump
             // target): fall into it on failure, skip it on success
-            $code .= self::INDENT . "} else {\n" . self::INDENT . '    goto L' . ($pc + 1) . ";\n" . self::INDENT . "}\n";
-            return $code . self::lines('goto L' . ($pc + 2) . ';');
+            $code .= self::INDENT . "} else {\n" . self::INDENT . '    ' . $this->jump($pc, $pc + 1) . "\n" . self::INDENT . "}\n";
+            return $code . self::lines($this->jump($pc, $pc + 2));
         }
         return $code . self::INDENT . "} else {\n" . self::INDENT . "    $fallback\n" . self::INDENT . "}\n";
     }
@@ -738,7 +937,7 @@ final class FunctionEmitter
                 return self::lines("$ra = false;");
 
             case OpCodes::OP_LFALSESKIP:
-                return self::lines("$ra = false;", 'goto L' . ($pc + 2) . ';');
+                return self::lines("$ra = false;", $this->jump($pc, $pc + 2));
 
             case OpCodes::OP_LOADTRUE:
                 return self::lines("$ra = true;");
@@ -999,7 +1198,7 @@ final class FunctionEmitter
                 return self::lines(self::savePc($pc) . " Upvalues::newTbc(\$L, \$ci, $a);");
 
             case OpCodes::OP_JMP:
-                return self::lines('goto L' . ($pc + 1 + OpCodes::GETARG_sJ($instruction)) . ';');
+                return self::lines($this->jump($pc, $pc + 1 + OpCodes::GETARG_sJ($instruction)));
 
             case OpCodes::OP_EQ:
                 return self::lines(
@@ -1056,12 +1255,12 @@ final class FunctionEmitter
 
             case OpCodes::OP_TEST:
                 // jump (the next instruction) when truthiness equals k; else skip it
-                return self::lines('if ' . ($k ? self::falsy($ra) : self::truthy($ra)) . ' goto L' . ($pc + 2) . ';', $this->nextJump($pc));
+                return self::lines('if ' . ($k ? self::falsy($ra) : self::truthy($ra)) . ' ' . $this->jump($pc, $pc + 2), $this->nextJump($pc));
 
             case OpCodes::OP_TESTSET:
                 return self::lines(
                     '$x = ' . self::r($b) . ';',
-                    'if ' . ($k ? self::falsy('$x') : self::truthy('$x')) . ' goto L' . ($pc + 2) . ';',
+                    'if ' . ($k ? self::falsy('$x') : self::truthy('$x')) . ' ' . $this->jump($pc, $pc + 2),
                     "$ra = \$x;",
                     $this->nextJump($pc),
                 );
@@ -1124,10 +1323,10 @@ final class FunctionEmitter
                     '        ' . self::r($a + 1) . ' = $n - 1;',
                     "        \$x = $ra + \$y;",
                     "        $ra = \$x; " . self::r($a + 3) . ' = $x;',
-                    "        goto L$loopStart;",
+                    '        ' . $this->jump($pc, $loopStart),
                     '    }',
                     "} elseif (Vm::floatForLoop(\$R, $a)) {",
-                    "    goto L$loopStart;",
+                    '    ' . $this->jump($pc, $loopStart),
                     '}',
                 );
 
@@ -1135,7 +1334,7 @@ final class FunctionEmitter
                 return self::lines(
                     self::savePc($pc),
                     "if (Vm::forPrep(\$L, \$R, $a)) {",
-                    '    goto L' . ($pc + OpCodes::GETARG_Bx($instruction) + 2) . ';',
+                    '    ' . $this->jump($pc, $pc + OpCodes::GETARG_Bx($instruction) + 2),
                     '}',
                 );
 
@@ -1144,11 +1343,13 @@ final class FunctionEmitter
                     'if (' . self::r($a + 3) . ' !== null && ' . self::r($a + 3) . ' !== false) {',
                     '    ' . self::savePc($pc) . ' Upvalues::newTbc($L, $ci, ' . ($a + 3) . ');',
                     '}',
-                    'goto T' . ($pc + OpCodes::GETARG_Bx($instruction) + 1) . ';',  // to OP_TFORCALL, past its hook check
+                    $this->jump($pc, $pc + OpCodes::GETARG_Bx($instruction) + 1, 'T'),  // to OP_TFORCALL, past its hook check
                 );
 
             case OpCodes::OP_TFORCALL:
-                $code = "    T$pc:\n" . self::lines(
+                // (its OP_TFORPREP, the only jump to T<pc>, comes before it:
+                // whether it jumps here from another segment is known)
+                $code = (isset($this->entries["T$pc"]) ? "    case 'T$pc':\n" : '') . "    T$pc:\n" . self::lines(
                     self::savePc($pc),
                     "\$ret = Calls::call(\$L, $ra, [" . self::r($a + 1) . ', ' . self::r($a + 2) . ']);',
                 );
@@ -1161,7 +1362,7 @@ final class FunctionEmitter
                 return self::lines(
                     'if (($v = ' . self::r($a + 4) . ') !== null) {',
                     '    ' . self::r($a + 2) . ' = $v;',
-                    '    goto L' . ($pc + 1 - OpCodes::GETARG_Bx($instruction)) . ';',
+                    '    ' . $this->jump($pc, $pc + 1 - OpCodes::GETARG_Bx($instruction)),
                     '}',
                 );
 
@@ -1353,7 +1554,7 @@ final class FunctionEmitter
      */
     private function conditionalJump(int $pc, string $condition, int $k): string
     {
-        $skip = 'goto L' . ($pc + 2) . ';';
+        $skip = $this->jump($pc, $pc + 2);
         return self::lines(($k ? "if (!$condition) " : "if ($condition) ") . $skip, $this->nextJump($pc));
     }
 
@@ -1364,7 +1565,7 @@ final class FunctionEmitter
     private function nextJump(int $pc): string
     {
         $jump = $this->proto->code[$pc + 1];
-        return 'goto L' . ($pc + 2 + OpCodes::GETARG_sJ($jump)) . ';';
+        return $this->jump($pc, $pc + 2 + OpCodes::GETARG_sJ($jump));
     }
 
     /** builds $args from R[a+1 .. a+b-1], or up to $top when b is 0 */

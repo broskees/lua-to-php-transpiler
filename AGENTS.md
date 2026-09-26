@@ -132,7 +132,10 @@ Lua string keys and integer keys distinct.
   for a first load() that autoloads the compiler, 60 KB compiling a
   190-operand concatenation (PHP's compiler recurses per operand of emitted
   expressions: never emit expressions nested deeper than a bounded amount),
-  84 KB with opcache's JIT on. PHP keeps the last 48 KB in reserve; 256 KB
+  84 KB with opcache's JIT on; opcache's optimizer and JIT recurse per
+  basic block of a function, bounded by segments (see Emitted function:
+  never emit an unbounded amount of code a search can walk in one path).
+  PHP keeps the last 48 KB in reserve; 256 KB
   leaves 2.5 times the worst case. Linux allows about 65530 mappings per
   process by default and each fiber stack takes 2, so about 32000 live
   coroutines at most. Freeing: a finished coroutine's fiber is freed at
@@ -230,6 +233,34 @@ Lua string keys and integer keys distinct.
   (a data module) gets only the calls: its literals would need more memory
   to compile than PHP's default limit, while the Proto is there anyway.
   `FunctionEmitter::$inlineConstructors` (tests only) emits them inline.
+  A big function is segments: opcache's optimizer and the JIT number a
+  function's basic blocks with a recursive depth-first search
+  (zend_cfg.c: compute_postnum_recursive, about 40 bytes of C stack per
+  block on its deepest path), which overflowed a coroutine's 256 KB fiber
+  stack (segfault) at about 2,300 instructions in one PHP function. So
+  when a function's weight (`FunctionEmitter::instructionWeight`: 1 per
+  instruction, 1 more per value of a call's results, OP_VARARG,
+  OP_SETLIST, OP_CONCAT, OP_TFORCALL; a constructor run is 1) exceeds
+  `FunctionEmitter::$maximumSegmentWeight` (256), its body after the
+  prologue is `$entry = 'L0'; while (true) { switch ($entry) { case 'L0':
+  ...segment... $entry = 'L<next>'; continue 2; case 'L<next>': ... } }`.
+  A segment is at most 256 weight (measured at most 108 bytes of C stack
+  per unit, so 27 KB), cut only between pieces of code (never before a
+  consumed instruction nor inside a constructor run), at the last place
+  in its reach inside the fewest loops. A jump within a segment is a
+  goto; a jump to another segment is `{ $entry = 'L<pc>'; continue 2; }`
+  (`FunctionEmitter::jump`), with a `case 'L<pc>':` (or `case 'T<pc>':`
+  for OP_TFORPREP's jump past OP_TFORCALL's hook check) at its target:
+  no path of the graph leads from one segment into another except
+  through the switch, so the search goes no deeper than one segment.
+  Every emitted jump goes through `jump()`: a plain goto between segments
+  brings the crash back. Instruction code, hook checks and savedpc are the
+  same; only the transfers differ. Measured: require, a warm load() cache
+  and the tracing JIT in a coroutine need 58-77 KB of fiber stack (48 KB
+  of it PHP's reserve); a crossing costs 6-7 ns without the JIT. Tests
+  run the diff corpus with every function cut into one-instruction
+  segments (`tests/unit/tiny_segments.php`, `$maximumSegmentWeight = 1`;
+  for official files, `OFFICIAL_PHP_OPTIONS` in tests/official.sh).
   Never use `array_slice`/array functions on `$R`: open upvalues make its
   elements PHP references.
 - **Calls.** Lua function: `($f->code)($L, $f, $args)` returns the result list,

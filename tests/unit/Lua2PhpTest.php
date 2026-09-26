@@ -36,11 +36,30 @@ function expectedDifference(string $name, string $stdout): string
 
 function test_transpiled_diff_cases_behave_like_lua(): void
 {
+    runTranspiledDiffCases('lua2php', []);
+}
+
+function test_transpiled_diff_cases_behave_like_lua_in_tiny_segments(): void
+{
+    // every function as segments of one instruction (see SegmentsTest),
+    // transpiled and loaded so, with opcache optimizing the dispatchers
+    runTranspiledDiffCases('lua2php-tiny-segments', ['-d', 'auto_prepend_file=' . REPO_ROOT . '/tests/unit/tiny_segments.php']);
+}
+
+/**
+ * tests/diff transpiled into scratchDirectory()/$directoryName and run (the
+ * cases that load() chunks again with the cache warm), with the PHP options
+ * $phpOptions for bin/lua2php and every run
+ *
+ * @param list<string> $phpOptions
+ */
+function runTranspiledDiffCases(string $directoryName, array $phpOptions): void
+{
     $diffDirectory = REPO_ROOT . '/tests/diff';
-    $outputDirectory = scratchDirectory() . '/lua2php';
-    $cacheDirectory = scratchDirectory() . '/lua2php-cache';
+    $outputDirectory = scratchDirectory() . "/$directoryName";
+    $cacheDirectory = scratchDirectory() . "/$directoryName-cache";
     mkdir($cacheDirectory, 0700);
-    [$status, , $errorOutput] = runCommand(['php', REPO_ROOT . '/bin/lua2php', $diffDirectory, '-o', $outputDirectory]);
+    [$status, , $errorOutput] = runCommand(['php', ...$phpOptions, REPO_ROOT . '/bin/lua2php', $diffDirectory, '-o', $outputDirectory]);
     assertSame(1, $status, 'modules/syntax_error.lua does not compile');
     assertSame(REPO_ROOT . "/bin/lua2php: modules/syntax_error.lua:1: unexpected symbol near '='\n", $errorOutput);
     // the project's other files (data the cases read) go along, as a deployment would copy them
@@ -64,7 +83,7 @@ function test_transpiled_diff_cases_behave_like_lua(): void
                 $outputFile = $outputDirectory . '/' . basename($name, '.lua') . '.php';
                 $running[$name] = [
                     startProcess(['lua5.4', $name, ...$arguments], $diffDirectory),
-                    startProcess(['env', "LUAPHP_CACHE_DIR=$cacheDirectory", 'php', ...OPCACHE_ON_NEW_FILES, '-d', 'memory_limit=4G', $outputFile, ...$arguments], $outputDirectory),
+                    startProcess(['env', "LUAPHP_CACHE_DIR=$cacheDirectory", 'php', ...OPCACHE_ON_NEW_FILES, ...$phpOptions, '-d', 'memory_limit=4G', $outputFile, ...$arguments], $outputDirectory),
                     $outputFile,
                 ];
             }
