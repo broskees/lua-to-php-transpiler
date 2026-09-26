@@ -25,7 +25,7 @@ final class LuaTable extends LuaValue
     /** rawset: $value (converted to Lua; null removes the entry) at $key */
     public function set(mixed $key, mixed $value): void
     {
-        $this->sandboxState->ensureOpen();
+        $this->sandboxState->enterFromPhp();
         $luaKey = Convert::toLua($key, 'key', $this->sandboxState);
         if ($luaKey === null || (\is_float($luaKey) && is_nan($luaKey))) {
             throw new ConversionError('a table index cannot be ' . ($luaKey === null ? 'nil' : 'NaN'), '');
@@ -66,7 +66,7 @@ final class LuaTable extends LuaValue
     /** the table copied to a PHP array (see Environment: lists start at 0) */
     public function toArray(): array
     {
-        $this->sandboxState->ensureOpen();
+        $this->sandboxState->enterFromPhp();
         return Convert::toPhp($this->luaValue, 'table', $this->sandboxState);
     }
 }

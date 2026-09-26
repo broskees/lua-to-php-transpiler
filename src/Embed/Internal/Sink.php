@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace LuaPhp\Embed\Internal;
 
+use LuaPhp\Runtime\Budget;
+use LuaPhp\Runtime\MemoryLimit;
 use LuaPhp\Runtime\OutputSink;
 
 /**
@@ -23,6 +25,9 @@ final class Sink implements OutputSink
     /** bytes the current run wrote */
     public int $written = 0;
 
+    /** the state's budget (null: none): what it collects grows within its memory */
+    public ?Budget $budget = null;
+
     public function __construct(
         /** the host's sink (a callable, or StdoutSink::write), or null to collect */
         private readonly ?\Closure $host,
@@ -33,6 +38,7 @@ final class Sink implements OutputSink
     {
         $this->written += \strlen($bytes);
         if ($this->host === null) {
+            MemoryLimit::reserve(\strlen($this->collected) + \strlen($bytes), $this->budget);  // (it may move as it grows)
             $this->collected .= $bytes;
             return;
         }

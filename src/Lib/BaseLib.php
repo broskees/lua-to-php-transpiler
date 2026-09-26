@@ -220,6 +220,7 @@ final class BaseLib
         $level = Auxiliary::optInteger($L, $args, 2, 1);
         $value = $args[0] ?? null;
         if (\is_string($value) && $level > 0) {
+            MemoryLimit::reserve(\strlen($value), $L->globalState->budget);  // (copied)
             $value = Auxiliary::where($L, $level) . $value;  // add extra information
         }
         LuaError::raise($value);
@@ -605,6 +606,9 @@ final class BaseLib
             $index = $count;
         }
         Auxiliary::argCheck($L, 1 <= $index, 1, 'index out of range');
+        if (($count - $index) * MemoryLimit::RESULT_BYTES > MemoryLimit::CHECK_ABOVE) {
+            MemoryLimit::reserve(($count - $index) * MemoryLimit::RESULT_BYTES, $L->globalState->budget);
+        }
         return \array_slice($args, $index);
     }
 

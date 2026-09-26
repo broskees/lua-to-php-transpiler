@@ -51,6 +51,13 @@ final class GlobalState
     /** memory_get_usage() when the last collection ended */
     public int $gcRealBase = 0;
 
+    /**
+     * collectgarbage("count") reports only what this state charged
+     * (Collector::totalBytes), never the process's memory growth, which
+     * other states running meanwhile move: an embedded state (a sandbox)
+     */
+    public bool $countsOnlyChargedBytes = false;
+
     // collector parameters, stored as C stores them (lgc.h: setgcparam keeps value / 4 in a byte)
     public int $gcpause = 50;      // LUAI_GCPAUSE 200
     public int $gcstepmul = 25;    // LUAI_GCMUL 100
@@ -158,17 +165,26 @@ final class GlobalState
         $budget->start();
     }
 
-    /** lauxlib.h: lua_writestring: $bytes to standard output, charged to the budget first */
+    /**
+     * lauxlib.h: lua_writestring: $bytes to standard output, charged to the
+     * budget first (a sink copies them: PHP's output buffer, a collector)
+     */
     public function writeOutput(string $bytes): void
     {
         $this->budget?->chargeOutput(\strlen($bytes));
+        if (\strlen($bytes) > MemoryLimit::CHECK_ABOVE) {
+            MemoryLimit::reserve(\strlen($bytes), $this->budget);
+        }
         $this->output->write($bytes);
     }
 
-    /** lauxlib.h: lua_writestringerror: $bytes to standard error, charged to the budget first */
+    /** lauxlib.h: lua_writestringerror: $bytes to standard error, as writeOutput */
     public function writeErrorOutput(string $bytes): void
     {
         $this->budget?->chargeOutput(\strlen($bytes));
+        if (\strlen($bytes) > MemoryLimit::CHECK_ABOVE) {
+            MemoryLimit::reserve(\strlen($bytes), $this->budget);
+        }
         $this->errorOutput->write($bytes);
     }
 

@@ -59,6 +59,15 @@ final class ChunkLoader
     private static array $factoryCache = [];
 
     /**
+     * What PHP takes to compile emitted code, at most, per byte of it
+     * (measured: 9.6 to 19.6 bytes, eval'd or included, opcache on or off;
+     * 3.3 to 6.7 of them stay for good in eval'd code). Checked before PHP
+     * compiles it (MemoryLimit::reserve): running out while PHP compiles
+     * is a fatal error.
+     */
+    public const PHP_COMPILE_BYTES_PER_BYTE = 20;
+
+    /**
      * lapi.c: lua_load. Returns the main function of $chunk with its first
      * upvalue (_ENV) set to the global table, or throws
      * LuaError(LUA_ERRSYNTAX) with Lua's message.
@@ -72,21 +81,29 @@ final class ChunkLoader
         [$status, $result] = Calls::protectedRun($L, static function () use ($L, $chunk, $chunkname, $mode): LuaClosure {
             $isBinary = $chunk !== '' && $chunk[0] === Undump::LUA_SIGNATURE[0];
             self::checkMode($mode, $isBinary ? 'binary' : 'text');
+            $budget = $L->globalState->budget;
+            if ($budget?->sourceBytes !== null && \strlen($chunk) > $budget->sourceBytes) {
+                throw new LimitReached('source');
+            }
             $countSteps = $L->globalState->countSteps;
             $key = LoadCache::key($chunk, $chunkname, $countSteps);
             $cache = $L->globalState->chunkCache;  // (an embedded state's own, else LoadCache)
-            $cached = $cache === null ? LoadCache::find($key, $L->nCcalls) : $cache->find($key, $L->nCcalls);
+            $cached = $cache === null ? LoadCache::find($key, $L->nCcalls, $budget) : $cache->find($key, $L->nCcalls, $budget);
             if ($cached !== null) {
                 [$protos, $factory] = $cached;
                 // fresh Protos, as a compile (one string per contents) or an undump makes
                 return self::instantiate(Undump::undump($protos ?? $chunk, $chunkname, !$isBinary), $factory);
             }
-            $L->globalState->budget?->chargeSteps(\strlen($chunk));  // (compiling costs more than a step per byte)
+            $budget?->chargeSteps(\strlen($chunk));  // (compiling costs more than a step per byte)
+            // memory the compile would take beyond what is left is C's "not enough memory" (or the budget's limit)
+            $reserveMemory = static function (int $bytes) use ($budget): void {
+                MemoryLimit::reserve($bytes, $budget);
+            };
             $nesting = 0;
             try {
                 $proto = $isBinary
                     ? Undump::undump($chunk, $chunkname)
-                    : Compiler::compile($chunk, $chunkname, $L->nCcalls, $nesting);
+                    : Compiler::compile($chunk, $chunkname, $L->nCcalls, $nesting, $reserveMemory);
             } catch (CompileError $error) {
                 $status = match ($error->getCode()) {
                     Lua::LUA_ERRRUN => Lua::LUA_ERRRUN,
@@ -95,8 +112,8 @@ final class ChunkLoader
                 };
                 throw new LuaError($error->getMessage(), $status);
             }
-            $factorySource = Emitter::emitChunk($proto, $countSteps);
-            $factory = self::factoryForSource($factorySource);
+            $factorySource = Emitter::emitChunk($proto, $countSteps, $reserveMemory);
+            $factory = self::factoryForSource($factorySource, $budget);
             $protos = $isBinary ? null : Dump::dump($proto, false);
             if ($cache === null) {
                 LoadCache::store($key, $protos, $nesting, $factory, $factorySource);
@@ -168,15 +185,18 @@ final class ChunkLoader
 
     /**
      * The compiled factory whose PHP source (Emitter::emitChunk) is
-     * $source (also the embedding API's compile cache).
+     * $source (also the embedding API's compile cache). Before PHP compiles
+     * it, the memory that takes must fit (MemoryLimit::reserve with
+     * $budget: PHP_COMPILE_BYTES_PER_BYTE).
      */
-    public static function factoryForSource(string $source): \Closure
+    public static function factoryForSource(string $source, ?Budget $budget = null): \Closure
     {
         $key = hash('xxh128', $source);
         $factory = self::$factoryCache[$key] ?? null;
         if ($factory !== null) {
             return $factory;
         }
+        MemoryLimit::reserve(self::PHP_COMPILE_BYTES_PER_BYTE * \strlen($source), $budget);
         $factory = eval(Emitter::PREAMBLE . "\nreturn " . $source . ";\n");
         if (\count(self::$factoryCache) >= self::FACTORY_CACHE_LIMIT) {
             self::$factoryCache = [];

@@ -28,6 +28,7 @@ use LuaPhp\Runtime\LuaClosure;
 use LuaPhp\Runtime\LuaError;
 use LuaPhp\Runtime\LuaObject;
 use LuaPhp\Runtime\LuaTable as RuntimeTable;
+use LuaPhp\Runtime\MemoryLimit;
 use LuaPhp\Runtime\NativeFunction;
 use LuaPhp\Runtime\PhpErrors;
 
@@ -56,8 +57,12 @@ use LuaPhp\Runtime\PhpErrors;
  * PHP functions called from Lua run through callHost: a ScriptError is a
  * Lua error; a RuntimeError of this sandbox that a PHP function let
  * through goes on as the Lua error it was (as lua_call's would); anything
- * else stops the run; afterwards time and memory are checked (its time
- * counts).
+ * else stops the run. Whatever it threw, a run stopped meanwhile stays
+ * stopped (a PHP function that catches LimitExceeded cannot turn it into
+ * a Lua error), and time and memory are checked (its time counts) before
+ * its error or results reach Lua code. A limit reached anywhere stops the
+ * run at once (limitExceeded), so there is nothing a PHP function could
+ * catch and hide.
  *
  * Handles register their values in a table the collector marks
  * ($G->libraryState), as luaL_ref would, so a value PHP holds stays alive
@@ -127,6 +132,7 @@ final class State
         $this->L = $L;
         $G = $L->globalState;
         $G->setsFiberStackSize = false;
+        $G->countsOnlyChargedBytes = true;
         $G->chunkCache = $cache;
         $G->countSteps = $countSteps;
         $G->output = $this->sink;
@@ -137,12 +143,13 @@ final class State
         if (\in_array('package', $libraries, true)) {
             $this->openRequire($L, $libraries !== Libraries::ALL);
         }
-        foreach ($globals as $name => $value) {
-            $G->globals->set($name, Convert::toLua($value, $name, $this));
-        }
         $this->budget = self::budgetFor($limits);
         if ($this->budget !== null) {
             $G->setBudget($this->budget);
+        }
+        $this->sink->budget = $this->budget;
+        foreach ($globals as $name => $value) {
+            $G->globals->set($name, Convert::toLua($value, $name, $this));
         }
     }
 
@@ -152,7 +159,7 @@ final class State
         if ($limits == Limits::none()) {
             return null;
         }
-        $budget = new Budget($limits->steps, $limits->memoryBytes, $limits->seconds, $limits->outputBytes, $limits->coroutines, $limits->callDepth);
+        $budget = new Budget($limits->steps, $limits->memoryBytes, $limits->seconds, $limits->outputBytes, $limits->coroutines, $limits->callDepth, $limits->sourceBytes);
         $budget->hostMemoryIsLimit = true;
         return $budget;
     }
@@ -179,10 +186,51 @@ final class State
         $this->anchors = null;
     }
 
-    /** counts $steps against the run's step limit */
+    /** counts $steps against the run's step limit (over it, the run stops at once: see limitExceeded) */
     public function chargeSteps(int $steps): void
     {
-        $this->budget?->chargeSteps($steps);
+        try {
+            $this->budget?->chargeSteps($steps);
+        } catch (LimitReached $reached) {
+            throw $this->limitExceeded($reached);
+        }
+    }
+
+    /**
+     * Converting a value between PHP and Lua (Convert) is about to take
+     * about $bytes more memory: within the run's memory limit and what
+     * memory_limit leaves (after an emergency collection), else the run
+     * stops with LimitExceeded('memory'), also without limits: a value too
+     * big for the host's memory is never a PHP fatal error.
+     */
+    public function reserveConversionMemory(int $bytes): void
+    {
+        try {
+            if ($this->budget !== null) {
+                $this->budget->reserveMemory($bytes);
+                return;
+            }
+            if (!MemoryLimit::fits($bytes)) {
+                gc_collect_cycles();
+                gc_mem_caches();
+                if (!MemoryLimit::fits($bytes)) {
+                    throw new LimitReached('memory');
+                }
+            }
+        } catch (LimitReached $reached) {
+            throw $this->limitExceeded($reached);
+        }
+    }
+
+    /**
+     * A call from PHP that reads or writes this sandbox's values outside Lua
+     * code (getGlobal, setGlobal, a handle's toArray or set): outside any
+     * run it starts one, whose limits apply to the conversion.
+     */
+    public function enterFromPhp(): void
+    {
+        $this->ensureOpen();
+        $this->startRun();
     }
 
     /** the Source of script $name from the Environment's loader */
@@ -252,26 +300,33 @@ final class State
     {
         $previousThread = $this->runningThread;
         $this->runningThread = $L;
+        $error = null;
         try {
             $result = $body();
-        } catch (ScriptError $error) {
+        } catch (ScriptError|RuntimeError $error) {
+            if ($error instanceof RuntimeError && !isset($this->raisedErrors[$error])) {
+                throw $error;  // (another sandbox's: it stops the run)
+            }
+        } finally {
+            $this->runningThread = $previousThread;
+        }
+        // before its error or results reach Lua code: a run stopped
+        // meanwhile (it caught what stopped the run, or closed the sandbox)
+        // runs no more Lua code, and the time it took counts
+        if ($this->closed) {
+            throw $this->stoppedBy ?? new SandboxClosed('the sandbox was closed while it ran');
+        }
+        $this->budget?->checkLimits();
+        if ($error instanceof ScriptError) {
             if ($error->hasValue()) {
                 LuaError::raise(Convert::toLua($error->getValue(), 'ScriptError::value()', $this));
             }
             Auxiliary::error($L, $error->getMessage());  // luaL_error: with the position of the calling Lua code
-        } catch (RuntimeError $error) {
-            $raised = $this->raisedErrors[$error] ?? null;
-            if ($raised === null) {
-                throw $error;
-            }
-            throw new LuaError($raised[0], $raised[1]);
-        } finally {
-            $this->runningThread = $previousThread;
         }
-        if ($this->closed) {  // it caught what stopped the run, or closed the sandbox: no more Lua code runs
-            throw $this->stoppedBy ?? new SandboxClosed('the sandbox was closed while it ran');
+        if ($error instanceof RuntimeError) {
+            [$value, $status] = $this->raisedErrors[$error];
+            throw new LuaError($value, $status);
         }
-        $this->budget?->checkLimits();  // (the time it took counts)
         return $result;
     }
 
@@ -410,15 +465,25 @@ final class State
         } catch (LuaError $error) {
             throw $error;
         } catch (LimitReached $reached) {
-            $exceeded = new LimitExceeded($reached->limit, $this->usage());
-            $this->stop($exceeded);
-            throw $exceeded;
+            throw $this->limitExceeded($reached);
         } catch (\Throwable $thrown) {
             $this->stop($thrown);
             throw $thrown;
         } finally {
             $this->depth--;
         }
+    }
+
+    /**
+     * The LimitExceeded for $reached, with the run's usage; the run stops
+     * at once (the sandbox is closed), wherever the limit was reached: a
+     * PHP function that catches it cannot let Lua code go on.
+     */
+    private function limitExceeded(LimitReached $reached): LimitExceeded
+    {
+        $exceeded = new LimitExceeded($reached->limit, $this->usage());
+        $this->stop($exceeded);
+        return $exceeded;
     }
 
     /** a run was stopped by $thrown: the sandbox is closed and runs no more Lua code */
@@ -476,6 +541,7 @@ final class State
     private function hostModuleSearcher(Coroutine $L, string $name): array
     {
         if (!isset($this->modules[$name])) {
+            MemoryLimit::reserve(\strlen($name), $L->globalState->budget);
             return [null, "no host module '$name'"];
         }
         $loader = new NativeFunction($name, function (Coroutine $L, array $args) use ($name): array {
@@ -495,6 +561,7 @@ final class State
     private function fileSearcher(string $suffix): \Closure
     {
         return function (Coroutine $L, string $name) use ($suffix): array {
+            MemoryLimit::reserve(3 * \strlen($name), $L->globalState->budget);  // (the file name, the loader's path, the message)
             $file = str_replace('.', '/', $name) . $suffix;
             if ($this->loader === null || !$this->loader->exists($file)) {
                 return [null, "no file '$file'"];

@@ -744,6 +744,9 @@ final class Op
         $va = $ci->varargs;
         if ($wanted < 0) {
             $n = \count($va);
+            if ($L->globalState->countSteps && ($L->globalState->stepsLeft -= $n) < 0) {  // (code counting steps: a step per value)
+                Budget::stepsUsedUp($L);
+            }
             for ($i = 0; $i < $n; $i++) {
                 $R[$a + $i] = $va[$i];
             }

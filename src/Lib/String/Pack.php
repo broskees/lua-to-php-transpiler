@@ -24,6 +24,9 @@ use LuaPhp\Runtime\MemoryLimit;
 final class Pack
 {
     // lstrlib.c: KOption
+    /** string.unpack checks the memory of its results (MemoryLimit::RESULT_BYTES each) every this many */
+    private const RESULTS_PER_CHECK = 1024;
+
     private const Kint = 0;  // signed integers
     private const Kuint = 1;  // unsigned integers
     private const Kfloat = 2;  // single-precision floating-point numbers
@@ -350,6 +353,9 @@ final class Pack
             $position += $alignmentPadding;  // skip alignment
             // stack space for item + next position
             Auxiliary::checkStack($L, \count($results) + 2, 'too many results');
+            if (\count($results) % self::RESULTS_PER_CHECK === self::RESULTS_PER_CHECK - 1) {
+                MemoryLimit::reserve(self::RESULTS_PER_CHECK * MemoryLimit::RESULT_BYTES, $L->globalState->budget);
+            }
             switch ($option) {
                 case self::Kint:
                 case self::Kuint:
@@ -363,11 +369,13 @@ final class Pack
                     $results[] = unpack('e', $header->floatBytes(substr($data, $position, 8)))[1];
                     break;
                 case self::Kchar:
+                    MemoryLimit::reserve($size, $L->globalState->budget);
                     $results[] = substr($data, $position, $size);
                     break;
                 case self::Kstring:
                     $length = $header->unpackInteger($data, $position, $size, false);  // a size_t
                     Auxiliary::argCheck($L, $length >= 0 && $length <= $dataLength - $position - $size, 2, 'data string too short');
+                    MemoryLimit::reserve($length, $L->globalState->budget);
                     $results[] = substr($data, $position + $size, $length);
                     $position += $length;  // skip string
                     break;
@@ -375,6 +383,7 @@ final class Pack
                     $zeroPosition = strpos($data, "\0", $position);
                     $length = ($zeroPosition === false ? $dataLength : $zeroPosition) - $position;
                     Auxiliary::argCheck($L, $position + $length < $dataLength, 2, "unfinished string for format 'z'");
+                    MemoryLimit::reserve($length, $L->globalState->budget);
                     $results[] = substr($data, $position, $length);
                     $position += $length + 1;  // skip string plus final '\0'
                     break;

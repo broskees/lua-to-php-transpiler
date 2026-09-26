@@ -63,6 +63,7 @@ final class Auxiliary
         $value = $args[$arg - 1] ?? null;
         $metafield = self::getMetafield($L, $value, '__name');
         if (\is_string($metafield)) {
+            MemoryLimit::reserve(3 * \strlen($metafield), $L->globalState->budget);  // (the messages below copy it)
             $actualTypeName = $metafield;  // use the given type name
         } elseif ($value instanceof LightUserdata) {
             $actualTypeName = 'light userdata';  // special name for messages
@@ -225,6 +226,7 @@ final class Auxiliary
     /** lauxlib.c: luaL_error: raise $message with the position of the caller of the running function */
     public static function error(Coroutine $L, string $message): never
     {
+        MemoryLimit::reserve(\strlen($message), $L->globalState->budget);  // (copied with the position)
         LuaError::raise(self::where($L, 1) . $message);
     }
 
@@ -298,6 +300,7 @@ final class Auxiliary
         }
         $name = self::getMetafield($L, $value, '__name');  // try name
         $kind = \is_string($name) ? $name : LuaObject::typeName($value);
+        MemoryLimit::reserve(2 * \strlen($kind), $L->globalState->budget);  // (copied, maybe twice)
         return DebugInfo::cString($kind) . ': ' . LuaObject::address($value);
     }
 
@@ -309,10 +312,11 @@ final class Auxiliary
     {
         $function = $ci->func;
         $loaded = $L->globalState->registry->hash[Lua::LUA_LOADED_TABLE] ?? null;
-        $name = self::findField($function, $loaded, 2);
+        $name = self::findField($function, $loaded, 2, $L->globalState->budget);
         if ($name === null) {
             return null;
         }
+        MemoryLimit::reserve(3 * \strlen($name), $L->globalState->budget);  // (a module's name, any size: messages copy it)
         if (str_starts_with($name, Lua::LUA_GNAME . '.')) {  // name start with '_G.'?
             return substr($name, 3);  // push name without prefix
         }
@@ -320,7 +324,7 @@ final class Auxiliary
     }
 
     // lauxlib.c: findfield
-    private static function findField(mixed $object, mixed $table, int $level): ?string
+    private static function findField(mixed $object, mixed $table, int $level, ?Budget $budget): ?string
     {
         if ($level === 0 || !($table instanceof LuaTable)) {
             return null;  // not found
@@ -332,8 +336,9 @@ final class Auxiliary
                 if (Vm::rawEquals($object, $value)) {  // found object?
                     return $key;
                 }
-                $subName = self::findField($object, $value, $level - 1);
+                $subName = self::findField($object, $value, $level - 1, $budget);
                 if ($subName !== null) {  // try recursively
+                    MemoryLimit::reserve(\strlen($key) + \strlen($subName), $budget);
                     return $key . '.' . $subName;
                 }
             }
@@ -375,9 +380,17 @@ final class Auxiliary
     {
         $last = self::lastLevel($L1);
         $limitToShow = ($last - $level > self::LEVELS1 + self::LEVELS2) ? self::LEVELS1 : -1;
+        $budget = $L->globalState->budget;
+        if ($message !== null) {
+            MemoryLimit::reserve(\strlen($message), $budget);
+        }
         $buffer = $message !== null ? $message . "\n" : '';
         $buffer .= 'stack traceback:';
+        $capacity = MemoryLimit::CHECK_ABOVE;  // $buffer may grow to this length before the next check (a luaL_Buffer)
         while (($ci = DebugInfo::getStack($L1, $level++)) !== null) {
+            if (\strlen($buffer) > $capacity) {
+                $capacity = MemoryLimit::grow(\strlen($buffer), $budget);
+            }
             if ($limitToShow-- === 0) {  // too many levels?
                 $skipped = $last - $level - self::LEVELS2 + 1;  // number of levels to skip
                 $buffer .= "\n\t...\t(skipping $skipped levels)";

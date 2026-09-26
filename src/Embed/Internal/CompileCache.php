@@ -7,6 +7,7 @@ namespace LuaPhp\Embed\Internal;
 use LuaPhp\Compiler\ChunkId;
 use LuaPhp\Embed\Loader\Source;
 use LuaPhp\Embed\SyntaxError;
+use LuaPhp\Runtime\Budget;
 use LuaPhp\Runtime\CacheDirectory;
 use LuaPhp\Runtime\ChunkCache;
 use LuaPhp\Runtime\ChunkLoader;
@@ -69,9 +70,9 @@ final class CompileCache implements ChunkCache
         return new SyntaxError($message, $source->chunkName, $line);
     }
 
-    public function find(string $key, int $nCcalls): ?array
+    public function find(string $key, int $nCcalls, ?Budget $budget = null): ?array
     {
-        $entry = $this->memory[$key] ?? $this->readEntry($key);
+        $entry = $this->memory[$key] ?? $this->readEntry($key, $budget);
         if ($entry === null || ChunkLoader::nestingError($nCcalls, $entry[1]) !== null) {
             return null;  // (not usable at this depth: compiling it again raises the error)
         }
@@ -100,9 +101,9 @@ final class CompileCache implements ChunkCache
     }
 
     /** @return ?array{?string, int, \Closure} */
-    private function readEntry(string $key): ?array
+    private function readEntry(string $key, ?Budget $budget): ?array
     {
-        $entry = $this->disk?->read($key);
+        $entry = $this->disk?->read($key, $budget);
         return $entry === null ? null : $this->remember($key, $entry);
     }
 }

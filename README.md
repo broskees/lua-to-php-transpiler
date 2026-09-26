@@ -127,18 +127,37 @@ functions); `LuaPhp\Embed\Lua::run('return 1 + 1')` is the one-liner.
   1..n as a list), functions as `LuaFunction`, coroutines and userdata as
   `LuaValue`. Other PHP objects, cycles, tables PHP arrays cannot hold
   (`{[1] = "a", ["1"] = "b"}`, boolean keys) and nesting beyond 100 levels
-  are a `ConversionError` naming the path (`result[1].tags[3]`).
+  are a `ConversionError` naming the path (`result[1].tags[3]`). A table
+  that holds the same subtable twice comes back as two copies, so
+  converting counts against the memory limit (results, error values,
+  `getGlobal`, `toArray`, `array` parameters): a value too big is
+  `LimitExceeded('memory')`, also with `Limits::none()`, never a PHP
+  fatal error.
 - **Limits** (`Limits`; `Limits::none()` for none): steps (about one per
   Lua instruction, plus library work in proportion to its input), memory
   (never more than `memory_limit` leaves), seconds, output bytes,
-  coroutines alive (1,000 by default) and call depth (1,000 levels by
-  default, then Lua's own catchable "stack overflow"). Going over one is
-  `LimitExceeded` (`->limit`, `->usage`); no Lua code runs after it.
+  coroutines alive (1,000 by default), call depth (1,000 levels by
+  default, then Lua's own catchable "stack overflow") and source bytes (a
+  script, module or `load()` chunk: 2 MB by default, a bigger one is
+  `LimitExceeded('source')` before it is compiled). Going over one is
+  `LimitExceeded` (`->limit`, `->usage`); no Lua code runs after it, even
+  if a PHP function catches it.
+- **Compiling counts.** A script is compiled the first time its exact
+  bytes appear, and that takes memory: up to about 64 bytes per byte of
+  Lua, then 20 times the size of the PHP it becomes (almost nothing for a
+  table of data, over a hundred times the Lua for many small functions).
+  It counts against the run's memory limit; one that would not fit is
+  `LimitExceeded('memory')`. `$env->compile()` ahead of time (no limits)
+  takes that cost out of the runs.
 - **Errors.** `SyntaxError` (message as `lua5.4` prints it, `->chunkName`,
   `->luaLine`), `RuntimeError` (`->luaMessage`, `->value`, `->traceback`),
   `LimitExceeded`, `ConversionError`, and `SandboxClosed` for a sandbox
   used after a limit or a PHP exception stopped it. Pending `__gc`
   finalizers never run when a sandbox is closed or dropped.
+- **Isolation.** Each sandbox has its own globals, registry, string
+  metatable, `package.loaded` and random state, and
+  `collectgarbage("count")` reports only what the sandbox itself
+  allocated, never the process's memory (which other sandboxes move).
 - **Output.** Collected into `Result::$output` by default;
   `output: new StdoutSink()` echoes it, `output: $callable` receives it.
   `warn` writes there once a script turns warnings on (`warn("@on")`).
@@ -202,10 +221,13 @@ against `lua5.4`:
 - Transpiled scripts and sandboxes keep the `memory_limit` PHP was started
   with (`bin/lua` raises it to 4G, or to the host's `max_memory_limit`). A library call that
   would build a result too large for the memory left (`string.rep`,
-  `table.concat`, `string.format`, `..`, `io.read`, ...) raises Lua's
-  catchable "not enough memory", as `lua5.4` does when an allocation fails.
-  Memory that grows a little at a time (tables, closures) still ends in PHP's
-  fatal error at the limit, except in a sandbox with limits, where it is
+  `table.concat`, `string.format`, `..`, `io.read`, `table.unpack` with a
+  million results, an error message that copies a huge string, ...)
+  raises Lua's catchable "not enough memory", as `lua5.4` does when an
+  allocation fails; so does `load()` of a chunk too big to compile in the
+  memory left (it returns `fail` and the message). Memory that grows a
+  little at a time (tables, closures) still ends in PHP's fatal error at
+  the limit, except in a sandbox with limits, where it is
   `LimitExceeded('memory')` before `memory_limit` is reached.
 - A deployed program cannot `dofile` or `require` Lua files it writes while
   running: they were never transpiled, so it gets a "not transpiled ahead of

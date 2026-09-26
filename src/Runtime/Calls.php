@@ -269,19 +269,42 @@ final class Calls
             $L->ci = $ci->previous;
             return $results;
         }
-        while (!($function instanceof NativeFunction)) {
-            if ($function instanceof LuaClosure) {
-                return ($function->code)($L, $function, $arguments) ?? self::finishTailCall($L);
-            }
+        $calledObjects = [];  // (in the order they were called)
+        while (!($function instanceof LuaClosure || $function instanceof NativeFunction)) {
             // not a function: try '__call' metamethod (ldo.c: tryfuncTM)
+            self::checkStackForCallMetamethod($L, \count($arguments) + \count($calledObjects));
             $tm = MetaMethods::getByObject($L, $function, MetaMethods::TM_CALL);
             if ($tm === null) {
                 DebugInfo::callError($L, $function);  // nothing to call
             }
-            array_unshift($arguments, $function);  // the called object is the first argument
+            $calledObjects[] = $function;  // the called object is the first argument
             $function = $tm;  // metamethod is the new function to be called
         }
+        if ($calledObjects !== []) {
+            $arguments = array_merge(array_reverse($calledObjects), $arguments);
+        }
+        if ($function instanceof LuaClosure) {
+            return ($function->code)($L, $function, $arguments) ?? self::finishTailCall($L);
+        }
         return self::callNative($L, $function, $arguments, 0);
+    }
+
+    /**
+     * ldo.c: tryfuncTM's checkstackGCp(L, 1, func) for a call with
+     * $argumentCount arguments: a '__call' metamethod gets the called object
+     * as a new first argument, so a cycle of them (t's '__call' is t) grows
+     * the arguments until "stack overflow", as C's stack grows (the count
+     * of arguments stands for the slots). C moves the arguments at each hop,
+     * and a budget charges that work: a cycle stops at the limits of an
+     * embedded state long before the stack is full (without a budget,
+     * nothing is charged; the arguments are moved once, after the hops).
+     */
+    private static function checkStackForCallMetamethod(Coroutine $L, int $argumentCount): void
+    {
+        if ($argumentCount + 1 >= $L->stackLimit) {
+            self::stackOverflow($L);
+        }
+        $L->globalState->budget?->chargeSteps(1 + $argumentCount);
     }
 
     /**
@@ -346,24 +369,29 @@ final class Calls
      */
     public static function tailCall(Coroutine $L, CallInfo $ci, mixed $function, array $arguments, int $functionRegister = 0): ?array
     {
-        while (!($function instanceof LuaClosure)) {
-            if ($function instanceof NativeFunction) {
-                $results = self::callNative($L, $function, $arguments, 0);
-                if ($L->hookmask !== 0) {  // luaD_poscall of the caller: its return hook
-                    foreach ($results as $i => $result) {
-                        $ci->R[$functionRegister + $i] = $result;
-                    }
-                    Hooks::retHook($L, $ci, $functionRegister + 1, \count($results));
-                }
-                $L->ci = $ci->previous;  // caller returns after the tail call
-                return $results;
-            }
+        $calledObjects = [];  // (in the order they were called)
+        while (!($function instanceof LuaClosure || $function instanceof NativeFunction)) {
+            self::checkStackForCallMetamethod($L, \count($arguments) + \count($calledObjects));  // (ldo.c: tryfuncTM)
             $tm = MetaMethods::getByObject($L, $function, MetaMethods::TM_CALL);
             if ($tm === null) {
                 DebugInfo::callError($L, $function);
             }
-            array_unshift($arguments, $function);
+            $calledObjects[] = $function;
             $function = $tm;
+        }
+        if ($calledObjects !== []) {
+            $arguments = array_merge(array_reverse($calledObjects), $arguments);
+        }
+        if ($function instanceof NativeFunction) {
+            $results = self::callNative($L, $function, $arguments, 0);
+            if ($L->hookmask !== 0) {  // luaD_poscall of the caller: its return hook
+                foreach ($results as $i => $result) {
+                    $ci->R[$functionRegister + $i] = $result;
+                }
+                Hooks::retHook($L, $ci, $functionRegister + 1, \count($results));
+            }
+            $L->ci = $ci->previous;  // caller returns after the tail call
+            return $results;
         }
         $L->ci = $ci->previous;
         $L->tailCallFunction = $function;

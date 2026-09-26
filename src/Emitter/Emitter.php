@@ -63,35 +63,70 @@ final class Emitter
     public const INLINE_WEIGHT_MAXIMUM = 4096;
 
     /**
+     * What emitting a function takes at most (emitChunk's $reserveMemory):
+     * its PHP about 4 times over (the pieces, the lines and the joined code
+     * peak at 2.2 to 3.7 times the PHP), the PHP being measured at 1.5 to
+     * 3.2 KB per function, 190 to 330 bytes per unit of inline weight and
+     * 67 to 90 per compact instruction; PHP then needs about 20 times the
+     * PHP to compile it (ChunkLoader::PHP_COMPILE_BYTES_PER_BYTE), so this
+     * never stops a chunk that would compile (measured: at most 8.4 times
+     * the PHP, the emitter's peak at most 0.44 of it).
+     */
+    private const EMIT_BYTES_PER_FUNCTION = 16384;
+    private const EMIT_BYTES_PER_INLINE_WEIGHT = 2048;
+    private const EMIT_BYTES_PER_COMPACT_WEIGHT = 512;
+
+    /**
      * PHP source of the factory expression for the chunk whose main
      * function is $main. With $countSteps (code for an embedded state) the
      * functions charge steps to the state's budget and count call levels
      * (see FunctionEmitter::$countSteps); without it the code is the same
      * as ever, and costs nothing more.
+     *
+     * $reserveMemory, if given, is called before each function is emitted
+     * with the memory that takes at most (EMIT_BYTES_*), and raises what C's
+     * allocator would when it does not fit: a chunk's PHP can be a hundred
+     * times the size of its Lua source (a table of small functions).
+     *
+     * @param ?\Closure(int): void $reserveMemory
      */
-    public static function emitChunk(Proto $main, bool $countSteps = false): string
+    public static function emitChunk(Proto $main, bool $countSteps = false, ?\Closure $reserveMemory = null): string
     {
         $protoDeclarations = '';
         $emitters = [];
         self::createEmitters($main, '0', $protoDeclarations, $emitters, $countSteps);
         $inlineWeight = 0;
+        $weights = [];
         $weightsOutsideLoops = [];
         foreach ($emitters as $index => $emitter) {
             [$weight, $weightOutsideLoops] = $emitter->inlineWeights();
             $inlineWeight += $weight;
+            $weights[$index] = $weight;
             $weightsOutsideLoops[$index] = $weightOutsideLoops;
         }
         arsort($weightsOutsideLoops);  // (stable: equal weights in the order of the functions)
+        $compacted = [];
         foreach ($weightsOutsideLoops as $index => $weightOutsideLoops) {
             if ($inlineWeight <= self::INLINE_WEIGHT_MAXIMUM) {
                 break;
             }
             $emitters[$index]->compactCodeOutsideLoops();
+            $compacted[$index] = true;
             $inlineWeight -= $weightOutsideLoops;
         }
         $functionDefinitions = '';
-        foreach ($emitters as $emitter) {
+        foreach ($emitters as $index => $emitter) {
+            if ($reserveMemory !== null) {  // (appending to the code so far may copy it)
+                $compactWeight = isset($compacted[$index]) ? $weightsOutsideLoops[$index] : 0;
+                $reserveMemory(self::EMIT_BYTES_PER_FUNCTION
+                    + self::EMIT_BYTES_PER_INLINE_WEIGHT * ($weights[$index] - $compactWeight)
+                    + self::EMIT_BYTES_PER_COMPACT_WEIGHT * $compactWeight
+                    + \strlen($functionDefinitions));
+            }
             $functionDefinitions .= $emitter->emit() . "\n";
+        }
+        if ($reserveMemory !== null) {  // (joining the pieces copies them)
+            $reserveMemory(2 * (\strlen($protoDeclarations) + \strlen($functionDefinitions)));
         }
         return "static function (Proto \$proto_0): \\Closure {\n"
             . $protoDeclarations

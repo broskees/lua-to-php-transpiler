@@ -122,8 +122,10 @@ final class Environment
 
     /**
      * Compiles scripts ahead of time (at deploy or save time) into the
-     * cache, running nothing. Returns the SyntaxError of each script that
-     * does not compile, by name.
+     * cache, running nothing and without the Limits (runs then find them
+     * compiled: compiling counts against a run's memory). Returns the
+     * SyntaxError of each script that does not compile, by name ("not
+     * enough memory" for one too big to compile in the memory left).
      *
      * @param iterable<string> $names
      * @return array<string, SyntaxError>

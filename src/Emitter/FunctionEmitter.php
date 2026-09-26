@@ -137,7 +137,10 @@ final class FunctionEmitter
      *   the function charges its size in steps when called and a loop's
      *   size at each jump back (Runtime\Budget: GlobalState::$stepsLeft,
      *   bound to $steps by reference in a function with loops), so the
-     *   steps charged are at least the instructions run; and its frame
+     *   steps charged are at least the instructions run; OP_VARARG with
+     *   all varargs charges a step per value it copies (a loop of '{...}'
+     *   copies many per instruction; values from library functions are
+     *   charged there); and its frame
      *   counts a Lua call level (CallInfo::$depth, limited by
      *   GlobalState::$callDepthLimit)
      */
@@ -1783,8 +1786,12 @@ final class FunctionEmitter
             case OpCodes::OP_VARARG:
                 $wanted = $c - 1;  // required results
                 if ($wanted < 0) {  // get all extra arguments available
-                    return self::lines(
-                        '$va = $ci->varargs; $n = \count($va);',
+                    $code = self::lines('$va = $ci->varargs; $n = \count($va);');
+                    if ($this->countSteps) {  // copying them all is work in proportion: a step each (see $countSteps)
+                        $counter = $this->hasBackwardJumps ? '$steps' : '$L->globalState->stepsLeft';
+                        $code .= self::lines("if (($counter -= \$n) < 0) { \\LuaPhp\\Runtime\\Budget::stepsUsedUp(\$L); }");
+                    }
+                    return $code . self::lines(
                         'for ($i = 0; $i < $n; $i++) {',
                         "    \$R[$a + \$i] = \$va[\$i];",
                         '}',

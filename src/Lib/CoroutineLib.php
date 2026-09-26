@@ -10,6 +10,7 @@ use LuaPhp\Runtime\Coroutine;
 use LuaPhp\Runtime\Lua;
 use LuaPhp\Runtime\LuaError;
 use LuaPhp\Runtime\LuaTable;
+use LuaPhp\Runtime\MemoryLimit;
 use LuaPhp\Runtime\NativeFunction;
 
 /**
@@ -107,6 +108,7 @@ final class CoroutineLib
             [$status, $error] = $co->closeThread($L);  // close its tbc variables
         }
         if ($status !== Lua::LUA_ERRMEM && \is_string($error)) {  // not a memory error and error object is a string?
+            MemoryLimit::reserve(\strlen($error), $L->globalState->budget);  // (copied)
             $error = Auxiliary::where($L, 1) . $error;  // add extra info, if available
         }
         LuaError::raise($error);  // propagate error

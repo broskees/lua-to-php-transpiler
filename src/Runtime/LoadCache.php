@@ -85,13 +85,14 @@ final class LoadCache
     /**
      * The Protos (a binary chunk, or null: the chunk itself) and factory
      * of the chunk with $key, or null: not cached, or compiling it at
-     * C-call depth $nCcalls would fail.
+     * C-call depth $nCcalls would fail. An entry on disk must fit in
+     * memory to be included (CacheDirectory::read, with $budget).
      *
      * @return ?array{?string, \Closure}
      */
-    public static function find(string $key, int $nCcalls): ?array
+    public static function find(string $key, int $nCcalls, ?Budget $budget = null): ?array
     {
-        $entry = self::$memory[$key] ?? self::readEntry($key);
+        $entry = self::$memory[$key] ?? self::readEntry($key, $budget);
         if ($entry === null) {
             return null;
         }
@@ -129,9 +130,9 @@ final class LoadCache
     }
 
     /** @return ?array{?string, int, \Closure} the entry on disk, or null */
-    private static function readEntry(string $key): ?array
+    private static function readEntry(string $key, ?Budget $budget): ?array
     {
-        $entry = self::$disk?->read($key);
+        $entry = self::$disk?->read($key, $budget);
         return $entry === null ? null : self::remember($key, $entry);
     }
 }

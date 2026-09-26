@@ -6,7 +6,7 @@ namespace LuaPhp\Embed;
 
 /**
  * A run went over one of its Limits: $limit is 'steps', 'memory',
- * 'seconds', 'output' or 'coroutines'. (Call depth stays Lua's own
+ * 'seconds', 'output', 'coroutines' or 'source'. (Call depth stays Lua's own
  * catchable "stack overflow" error.) No Lua code runs after it: no pcall,
  * message handler, '__close' or '__gc' sees it, and the sandbox is closed.
  */

@@ -215,6 +215,7 @@ final class StringLib
         }
         $count = $end - $start + 1;
         Auxiliary::checkStack($L, $count, 'string slice too long');
+        MemoryLimit::reserve($count * MemoryLimit::RESULT_BYTES, $L->globalState->budget);
         if ($count > 1) {  // (one byte, as in the fast path above, is not charged)
             $L->globalState->budget?->chargeSteps($count);
         }

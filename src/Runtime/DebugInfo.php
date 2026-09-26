@@ -489,6 +489,7 @@ final class DebugInfo
     {
         $ci = $L->ci;
         if ($ci->func instanceof LuaClosure) {  // if Lua function, add source:line information
+            MemoryLimit::reserve(\strlen($message), $L->globalState->budget);  // (copied)
             $message = self::addInfo($message, $ci->func->proto->source, self::currentLine($ci));
         }
         throw new LuaError($message);

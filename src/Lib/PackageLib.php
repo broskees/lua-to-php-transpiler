@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace LuaPhp\Lib;
 
 use LuaPhp\Runtime\Auxiliary;
+use LuaPhp\Runtime\Budget;
 use LuaPhp\Runtime\Calls;
 use LuaPhp\Runtime\ChunkLoader;
 use LuaPhp\Runtime\Coroutine;
@@ -254,9 +255,9 @@ final class PackageLib
      *     no file 'blabla.so'
      *     	no file 'blublu.so'
      */
-    private static function errorNotFound(string $path): string
+    private static function errorNotFound(string $path, ?Budget $budget): string
     {
-        MemoryLimit::reserve(\strlen($path) + 10 + substr_count($path, self::LUA_PATH_SEP) * 11);
+        MemoryLimit::reserve(\strlen($path) + 10 + substr_count($path, self::LUA_PATH_SEP) * 11, $budget);
         return "no file '" . str_replace(self::LUA_PATH_SEP, "'\n\tno file '", $path) . "'";
     }
 
@@ -271,7 +272,7 @@ final class PackageLib
      *
      * @return array{?string, ?string}
      */
-    private static function searchPath(string $name, string $path, string $separator, string $directorySeparator, bool $precompiledFiles): array
+    private static function searchPath(string $name, string $path, string $separator, string $directorySeparator, bool $precompiledFiles, ?Budget $budget): array
     {
         $name = DebugInfo::cString($name);
         $path = DebugInfo::cString($path);
@@ -279,11 +280,11 @@ final class PackageLib
         $directorySeparator = DebugInfo::cString($directorySeparator);
         // separator is non-empty and appears in 'name'?
         if ($separator !== '' && str_contains($name, $separator[0])) {
-            MemoryLimit::reserve(\strlen($name) + substr_count($name, $separator) * max(0, \strlen($directorySeparator) - \strlen($separator)));
+            MemoryLimit::reserve(\strlen($name) + substr_count($name, $separator) * max(0, \strlen($directorySeparator) - \strlen($separator)), $budget);
             $name = str_replace($separator, $directorySeparator, $name);  // replace it by 'dirsep'
         }
         // add path to the buffer, replacing marks ('?') with the file name
-        MemoryLimit::reserve(\strlen($path) + substr_count($path, self::LUA_PATH_MARK) * \strlen($name));
+        MemoryLimit::reserve(\strlen($path) + substr_count($path, self::LUA_PATH_MARK) * \strlen($name), $budget);
         $pathName = str_replace(self::LUA_PATH_MARK, $name, $path);
         // loadlib.c: getnextfilename: the names in 'name1;name2;...' (none for an empty path)
         $end = \strlen($pathName);
@@ -297,7 +298,7 @@ final class PackageLib
                 return [$filename, null];  // return that name
             }
         }
-        return [null, self::errorNotFound($pathName)];  // not found
+        return [null, self::errorNotFound($pathName, $budget)];  // not found
     }
 
     // loadlib.c: ll_searchpath
@@ -308,7 +309,7 @@ final class PackageLib
         $separator = Auxiliary::optString($L, $args, 3, '.');
         $path = Auxiliary::checkString($L, $args, 2);
         $name = Auxiliary::checkString($L, $args, 1);
-        [$filename, $error] = self::searchPath($name, $path, $separator, $directorySeparator, $L->globalState->filesArePrecompiled);
+        [$filename, $error] = self::searchPath($name, $path, $separator, $directorySeparator, $L->globalState->filesArePrecompiled, $L->globalState->budget);
         if ($filename !== null) {
             return [$filename];
         }
@@ -322,7 +323,7 @@ final class PackageLib
         if ($path === null) {
             Auxiliary::error($L, "'package.$pathFieldName' must be a string");
         }
-        return self::searchPath($name, $path, '.', $directorySeparator, $L->globalState->filesArePrecompiled);
+        return self::searchPath($name, $path, '.', $directorySeparator, $L->globalState->filesArePrecompiled, $L->globalState->budget);
     }
 
     /** loadlib.c: checkload: the open function and file name, or the error */
@@ -436,6 +437,7 @@ final class PackageLib
         for ($i = 1; ; $i++) {
             $searcher = $searchers->get($i);
             if ($searcher === null) {  // no more searchers?
+                MemoryLimit::reserve(2 * (\strlen($name) + \strlen($message)), $L->globalState->budget);
                 Auxiliary::error($L, "module '$name' not found:" . DebugInfo::cString($message));
             }
             $results = Calls::call($L, $searcher, [$name]);  // call it
@@ -445,6 +447,7 @@ final class PackageLib
             }
             $searcherMessage = LuaObject::toStringCoerced($loader);
             if ($searcherMessage !== null) {  // searcher returned error message?
+                MemoryLimit::reserve(2 * (\strlen($message) + \strlen($searcherMessage)), $L->globalState->budget);
                 $message .= "\n\t" . $searcherMessage;  // concatenate error message
             }
         }
@@ -486,9 +489,11 @@ final class PackageLib
                     return [$loader, $data];  // module loader found
                 }
                 if (\is_string($data)) {  // searcher returned error message?
+                    MemoryLimit::reserve(2 * (\strlen($message) + \strlen($data)), $L->globalState->budget);
                     $message .= "\n\t" . $data;  // concatenate error message
                 }
             }
+            MemoryLimit::reserve(2 * (\strlen($name) + \strlen($message)), $L->globalState->budget);
             Auxiliary::error($L, "module '$name' not found:" . DebugInfo::cString($message));
         };
         $L->globalState->globals->hash['require'] = new NativeFunction(

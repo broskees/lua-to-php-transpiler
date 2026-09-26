@@ -34,14 +34,14 @@ final class Sandbox
     /** sets global $name to $value (converted to Lua; rawset) */
     public function setGlobal(string $name, mixed $value): void
     {
-        $this->state->ensureOpen();
+        $this->state->enterFromPhp();
         $this->state->L->globalState->globals->set($name, Convert::toLua($value, $name, $this->state));
     }
 
     /** global $name converted to PHP (rawget; tables copied) */
     public function getGlobal(string $name): mixed
     {
-        $this->state->ensureOpen();
+        $this->state->enterFromPhp();
         return Convert::toPhp($this->state->L->globalState->globals->get($name), $name, $this->state);
     }
 

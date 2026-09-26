@@ -77,6 +77,7 @@ final class MetaMethods
         if ($value instanceof LuaTable || $value instanceof Userdata) {
             $name = $value->metatable?->hash['__name'] ?? null;
             if (\is_string($name)) {
+                MemoryLimit::reserve(3 * \strlen($name), $L->globalState->budget);  // (error messages copy it)
                 return $name;
             }
         }

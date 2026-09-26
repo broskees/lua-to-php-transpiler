@@ -165,6 +165,7 @@ final class Utf8Lib
             Auxiliary::error($L, 'string slice too long');
         }
         Auxiliary::checkStack($L, $end - $start + 1, 'string slice too long');
+        MemoryLimit::reserve(($end - $start + 1) * MemoryLimit::RESULT_BYTES, $L->globalState->budget);  // (at most a code per byte)
         $L->globalState->budget?->chargeSteps($end - $start + 1);
         $codes = [];
         for ($position = $start - 1; $position < $end;) {

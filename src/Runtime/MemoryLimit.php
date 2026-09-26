@@ -27,6 +27,15 @@ final class MemoryLimit
     public const CHECK_ABOVE = 64 * 1024;
 
     /**
+     * What each value of a long list of results costs PHP until it lands,
+     * for functions whose argument sets how many results they return
+     * (table.unpack, string.byte, ...): the function's list and the copy
+     * the next call or constructor makes (measured: 84 bytes each for
+     * select("#", table.unpack(t, 1, n)), 112 into a vararg function)
+     */
+    public const RESULT_BYTES = 112;
+
+    /**
      * kept free below memory_limit after a checked allocation: room to
      * raise and report the error, and for PHP's next allocations (its
      * heap grows in 2 MB chunks)

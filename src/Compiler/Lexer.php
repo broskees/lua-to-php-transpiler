@@ -146,6 +146,29 @@ final class Lexer
     /** buffer for tokens (C 'Mbuffer') */
     private string $buffer = '';
 
+    /** input bytes read between two checks of the compile's memory (see $reserveMemory) */
+    private const MEMORY_CHECK_BYTES = 16384;
+
+    /**
+     * What compiling a byte of source takes at most: the parser's tables
+     * and the Protos (measured: 14 to 62 bytes, the most for many small
+     * functions)
+     */
+    public const COMPILE_BYTES_PER_SOURCE_BYTE = 64;
+
+    /**
+     * Called with the memory the next MEMORY_CHECK_BYTES of input (or the
+     * rest) may take to compile, each time that much was read (it raises
+     * the error of memory that does not fit, as C's allocator would), or
+     * null
+     *
+     * @var ?\Closure(int): void
+     */
+    public ?\Closure $reserveMemory = null;
+
+    /** the input position at which $reserveMemory is called next */
+    private int $nextMemoryCheck = 0;
+
     private string $input;
 
     private int $inputPosition = 0;
@@ -666,6 +689,11 @@ final class Lexer
     // llex.c: luaX_next
     public function luaX_next(): void
     {
+        if ($this->inputPosition >= $this->nextMemoryCheck && $this->reserveMemory !== null) {
+            $ahead = min(self::MEMORY_CHECK_BYTES, $this->inputLength - $this->inputPosition + 1);
+            ($this->reserveMemory)($ahead * self::COMPILE_BYTES_PER_SOURCE_BYTE);
+            $this->nextMemoryCheck = $this->inputPosition + self::MEMORY_CHECK_BYTES;
+        }
         $this->lastline = $this->linenumber;
         if ($this->lookahead->token !== self::TK_EOS) {  // is there a look-ahead token?
             $this->t->token = $this->lookahead->token;  // use this one

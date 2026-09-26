@@ -385,10 +385,34 @@ Lua string keys and integer keys distinct.
   Covered: string.rep/sub/upper/lower/reverse/format/gsub/pack, pattern
   captures, `..` (emitted code joins strings inline only up to 64 KB in
   all, else `Vm::concat`), table.concat, io reads ('a', lines, counts),
-  os.date, package.searchpath, load's reader. preg_match copies the match
+  os.date, package.searchpath, load's reader, string.unpack's strings,
+  output (print, io.write, warn: sinks copy it), messages that copy a
+  string (a position prefix: luaL_error, luaG_runerror, error,
+  coroutine.wrap; a `__name` in a type name or tostring; a module's name
+  from package.loaded in a traceback or argument error; require's
+  not-found message; tracebacks grow like a luaL_Buffer), and lists of
+  results whose count an argument sets (table.unpack, string.byte,
+  utf8.codepoint, string.unpack, select: `MemoryLimit::RESULT_BYTES`, 112
+  each, measured with the copy the next call makes). Compiling
+  (`ChunkLoader::load`) checks as it goes: the Lexer every 16 KB of
+  source (`Lexer::COMPILE_BYTES_PER_SOURCE_BYTE`, 64: measured 14 to 62),
+  `Emitter::emitChunk` before each function (`EMIT_BYTES_*`: its PHP
+  about 4 times over, plus the code emitted so far, which appending may
+  copy), and before PHP compiles emitted code
+  `ChunkLoader::PHP_COMPILE_BYTES_PER_BYTE` (20: measured 9.6 to 19.6,
+  eval or include, opcache on or off) times its length (factoryForSource;
+  `CacheDirectory::read` for an entry opcache does not hold yet): a chunk
+  too big for the memory left is "not enough memory" (load returns fail),
+  never PHP's fatal error. preg_match copies the match
   and every capture: a search whose copies might not fit runs on the port.
   Memory that grows a little at a time (tables, closures) is not checked
   and still ends in PHP's fatal error; frames are bounded as above.
+  '__call' chains (ldo.c tryfuncTM): each hop makes the called object the
+  first argument; "stack overflow" once the arguments reach the stack
+  limit; the objects are prepended once, after the hops (lua5.4 moves its
+  whole stack at each hop: a cycle takes it hours, us a fraction of a
+  second), and with a budget each hop charges 1 + its arguments in steps
+  (`Calls::checkStackForCallMetamethod`).
 - **Upvalues.** An open `UpVal->v` is a PHP reference to `$R[$reg]`; one UpVal
   per register (`Upvalues::find`), closed by `Upvalues::close`/`closeUpvalues`
   (OP_CLOSE, OP_RETURN/OP_TAILCALL with k, error unwinding). `v` is UpVal's
@@ -454,7 +478,8 @@ Lua string keys and integer keys distinct.
   lvm.c checkGC). Pacing is lgc.c's setpause with a pause of at least 400%
   and 1 MB (a full trace costs about twice the allocation it pays for).
   "count" = C-size estimate of what the last cycle reached + max(charged
-  bytes, PHP memory growth) since. PHP's cycle collector is paused while
+  bytes, PHP memory growth) since (an embedded state: charged bytes only,
+  see Embedding conventions, Isolation). PHP's cycle collector is paused while
   tracing (every touched object becomes a root candidate). lua_close is
   `Collector::closeState` (bin/lua and lua2php scripts after the main chunk,
   `os.exit(x, true)`): close the main thread's tbc variables, then finalize
@@ -595,7 +620,9 @@ counting existed, and a state without a budget charges nothing.
 - **Budget.** `GlobalState::setBudget(?Budget)` sets the limits (null:
   none) and starts a run; `Budget::start()` starts the next one. Limits:
   steps, memoryBytes, seconds, outputBytes, coroutines (alive at once),
-  callDepth. Reaching one throws `LimitReached` (`->limit`), an
+  callDepth, sourceBytes (a chunk `ChunkLoader::load` may compile: a
+  bigger one is LimitReached('source') before anything else; compiling's
+  memory is checked as it goes, see Limits). Reaching one throws `LimitReached` (`->limit`), an
   `\Exception` that is neither LuaError nor `\Error`: no pcall, message
   handler, resume, `__close` or `__gc` sees it, so no Lua code runs after
   it and the state is unusable (abandon it). The step counter is the
@@ -621,7 +648,10 @@ counting existed, and a state without a budget charges nothing.
   charges the function's instruction count (`$steps =
   &$L->globalState->stepsLeft` in a function with loops) and every backward
   jump (`FunctionEmitter::jump`, target <= source pc) charges the loop's
-  size before it jumps, so steps >= instructions run (an OP_MMBIN* counts).
+  size before it jumps, so steps >= instructions run (an OP_MMBIN* counts);
+  an OP_VARARG that copies all varargs charges a step per value (a loop of
+  `{...}` copies a million values per instruction; `Op::vararg` does the
+  same when `$G->countSteps`), and a '__call' hop 1 + its arguments.
   `GlobalState::$countSteps` makes load() compile so, and LoadCache keys
   include the flag. Libraries charge in proportion to their work, a step
   per element or per `Budget::BYTES_PER_STEP` (64) bytes: rep, upper,
@@ -664,9 +694,11 @@ counting existed, and a state without a budget charges nothing.
   never in a sandbox profile: os.setlocale (the PHP process's locale),
   CFile's open files (io.popen and os.execute flush every state's files,
   as C's fflush(NULL) does), os.exit (ends PHP), io.read/debug.debug
-  (the process's stdin). collectgarbage("count") and the collector's
-  pacing include PHP memory growth, so another state that runs meanwhile
-  (re-entry) moves them.
+  (the process's stdin). collectgarbage("count") of an embedded state is
+  its own charged bytes only (`GlobalState::$countsOnlyChargedBytes`:
+  never the process's memory growth, which other states move); bin/lua
+  and lua2php add PHP's memory growth (gc.lua needs the big strings it
+  counts). The collector's pacing is each state's own.
 - **Closing.** `Collector::abandonState($G)`: pending finalizers are
   dropped, never called, and the collector stops, so no `__gc` and no
   `__close` runs any more; PHP frees the rest (destructors never run Lua).
@@ -711,20 +743,32 @@ handles wrap them. Its internals are `LuaPhp\Embed\Internal`.
   the PHP function running now) or the main thread, as protected calls
   whose message handler takes the traceback. A Lua error is a
   `RuntimeError` (luaMessage: string, number or tostring; value converted;
-  traceback: luaL_traceback at level 1); the sandbox stays usable.
+  traceback: luaL_traceback at level 1); the sandbox stays usable. A
+  LimitReached anywhere in State (enter, chargeSteps,
+  reserveConversionMemory) becomes LimitExceeded at once and stops the
+  sandbox (`State::limitExceeded`), so a PHP function that catches it
+  cannot let Lua code go on. Reading or writing values from PHP outside
+  Lua code (getGlobal, setGlobal, a handle's toArray or set:
+  `State::enterFromPhp`) starts a run outside any, whose limits apply.
 - **PHP functions** (`Internal\HostFunction`): a Closure's signature is
   read once (a WeakMap by Closure) into luaL_check* rules per parameter;
   `bind` makes the NativeFunction of one sandbox. Its body runs through
-  `State::callHost`: ScriptError -> Lua error (message with luaL_error's
-  position, or a value); a RuntimeError of the same sandbox the PHP code
-  let through -> the Lua error it was (as lua_call); after the body, a
-  closed sandbox (it caught what stopped the run) rethrows, then
-  `Budget::checkLimits` (its time counts). Each call charges a step
+  `State::callHost`: whatever it returned or threw, first a closed sandbox
+  (it caught what stopped the run) rethrows what stopped it, then
+  `Budget::checkLimits` (its time counts), and only then ScriptError ->
+  Lua error (message with luaL_error's position, or a value) and a
+  RuntimeError of the same sandbox the PHP code let through -> the Lua
+  error it was (as lua_call); another sandbox's stops the run. Each call charges a step
   (`State::chargeSteps`, as `RunContext::chargeSteps`). A result or a
   ScriptError value that cannot convert is a host bug: it stops the run.
 - **Values** (`Internal\Convert`): see its class comment for the rules
   (lists 1..n <-> 0-based, raw contents, depth 100, paths). Paths use the
-  keys of the side the value comes from. A handle registers its value in
+  keys of the side the value comes from, made only for an error from the
+  keys on the way (long keys shortened). A conversion counts what it
+  builds (a table repeated in a value becomes copies: 20 levels of
+  `t = {t, t}` are a million arrays) and every 64 KB of it asks
+  `State::reserveConversionMemory` (the budget, or without one the
+  host's room): over it LimitExceeded('memory'). A handle registers its value in
   a table under `$G->libraryState['embed.handles']` (luaL_ref), so Lua's
   collector sees what PHP holds; its destructor only unsets that entry.
 - **Chunks** (`Internal\CompileCache`, the states' `ChunkCache`): scripts,
@@ -733,7 +777,8 @@ handles wrap them. Its internals are `LuaPhp\Embed\Internal`.
   memory per Environment, on disk in a `Runtime\CacheDirectory` (the same
   trust rules, entry format and bounds as load()'s LoadCache). Chunk names
   are "@" + the loader's name; `Sandbox::load` defaults to the code
-  itself (luaL_loadstring). `require`: host modules, then loader
+  itself (luaL_loadstring). Compiling counts against the run's memory
+  (a cold cache pays; `Environment::compile` runs without limits). `require`: host modules, then loader
   "a/b.lua", then "a/b/init.lua" (searchers returning [loader, data] or
   [null, message]; loader errors as loadlib.c's checkload).
 - **Loaders** never read outside their root: `FilesystemLoader` refuses
@@ -744,7 +789,9 @@ handles wrap them. Its internals are `LuaPhp\Embed\Internal`.
 - Tests: `tests/unit/EmbedRuntimeTest.php` (the runtime contract) and
   the other `tests/unit/Embed*Test.php` (the public layer), compared with
   lua5.4 where Lua decides (argument errors, tracebacks, syntax errors,
-  what a table holds).
+  what a table holds); `EmbedHostSafetyTest` runs each way around the
+  limits a review found in its own 128M process, which must end in
+  LimitExceeded, a result or a normal exception (never a fatal or a hang).
 
 ## Testing
 

@@ -28,6 +28,9 @@ namespace LuaPhp\Runtime;
  *   collected), checked when one is created.
  * - callDepth: Lua call levels of a thread (GlobalState::$callDepthLimit):
  *   beyond it a call is Lua's catchable "stack overflow".
+ * - sourceBytes: the size of a chunk load() may compile (ChunkLoader::load):
+ *   a bigger one is LimitReached('source') before anything else is done
+ *   with it (the compile's own memory checks come later: see ChunkLoader).
  *
  * @internal
  */
@@ -96,6 +99,7 @@ final class Budget
         public readonly ?int $outputBytes = null,
         public readonly ?int $coroutines = null,
         public readonly ?int $callDepth = null,
+        public readonly ?int $sourceBytes = null,
     ) {
         $this->start();
     }

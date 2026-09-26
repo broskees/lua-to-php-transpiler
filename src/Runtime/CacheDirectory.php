@@ -75,15 +75,30 @@ final class CacheDirectory
         $this->directory = $directory;
     }
 
-    /** @return ?array{?string, int, \Closure} the entry with $key: [Protos as a binary chunk, parser nesting, factory], or null */
-    public function read(string $key): ?array
+    /**
+     * The entry with $key: [Protos as a binary chunk, parser nesting,
+     * factory], or null. PHP compiles an entry opcache does not hold
+     * yet: that must fit in memory first (MemoryLimit::reserve with
+     * $budget, ChunkLoader::PHP_COMPILE_BYTES_PER_BYTE of its size).
+     *
+     * @return ?array{?string, int, \Closure}
+     */
+    public function read(string $key, ?Budget $budget = null): ?array
     {
         if (!$this->isUsable()) {
             return null;
         }
+        $file = $this->trustedDirectory . '/' . self::fileName($key);
+        $size = @filesize($file);
+        if ($size === false) {
+            return null;
+        }
+        if (!(\function_exists('opcache_is_script_cached') && @opcache_is_script_cached($file))) {
+            MemoryLimit::reserve(ChunkLoader::PHP_COMPILE_BYTES_PER_BYTE * $size, $budget);
+        }
         ob_start();  // a corrupt entry may print
         try {
-            $entry = @include $this->trustedDirectory . '/' . self::fileName($key);
+            $entry = @include $file;
         } catch (\Throwable) {
             return null;
         } finally {

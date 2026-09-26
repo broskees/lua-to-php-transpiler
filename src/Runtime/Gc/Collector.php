@@ -231,6 +231,9 @@ final class Collector
     public static function totalBytes(GlobalState $G): int
     {
         $charged = $G->gcTotalBytes + $G->gcDebt;  // lstate.h: gettotalbytes
+        if ($G->countsOnlyChargedBytes) {
+            return $charged;  // (a sandbox sees nothing of the process: other sandboxes' memory)
+        }
         // what libraries allocated beyond the charged instructions (big strings, ...)
         $measured = $G->gcEstimate + memory_get_usage() - $G->gcRealBase;
         return max($charged, $measured);

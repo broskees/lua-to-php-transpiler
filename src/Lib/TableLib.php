@@ -278,6 +278,9 @@ final class TableLib
         if ($table instanceof LuaTable && $table->metatable === null && \count($args) === 1) {
             $end = $table->length();
             if ($end < Lua::LUAI_MAXSTACK && $L->ci->top + $end <= $L->stackLimit) {  // Calls::checkStack($L, $end)
+                if ($end * MemoryLimit::RESULT_BYTES > MemoryLimit::CHECK_ABOVE) {
+                    MemoryLimit::reserve($end * MemoryLimit::RESULT_BYTES, $L->globalState->budget);
+                }
                 $L->globalState->budget?->chargeSteps($end);
                 $values = $table->arr;
                 $results = [];
@@ -296,6 +299,7 @@ final class TableLib
         if (Vm::unsignedLess(2147483646, $count) || !Calls::checkStack($L, $count + 1)) {
             Auxiliary::error($L, 'too many results to unpack');
         }
+        MemoryLimit::reserve(($count + 1) * MemoryLimit::RESULT_BYTES, $L->globalState->budget);
         $L->globalState->budget?->chargeSteps($count + 1);
         $results = [];
         if ($table instanceof LuaTable && $table->metatable === null) {

@@ -22,7 +22,15 @@ namespace LuaPhp\Embed;
  *   host's fiber.stack_size of address space: PHP's default 2 MB, so
  *   1000 coroutines reserve 2 GB of it, though only touched pages cost
  *   memory; Linux allows about 65530 mappings per process, 2 per fiber);
- * - callDepth: Lua call levels.
+ * - callDepth: Lua call levels;
+ * - sourceBytes: the size of a script, module or load() chunk (2 MB by
+ *   default): a bigger one is LimitExceeded('source') before it is
+ *   compiled. Compiling takes memory, which counts: up to about 64 bytes
+ *   per byte of source to compile the Lua, and 20 times the size of the
+ *   PHP it becomes (over 100 times the source for many small functions)
+ *   to compile that. A compile that would not fit is
+ *   LimitExceeded('memory'); compiled scripts are cached
+ *   (Environment::compile compiles them ahead of time, without limits).
  */
 final class Limits
 {
@@ -33,9 +41,10 @@ final class Limits
         public readonly ?int $outputBytes = null,
         public readonly ?int $coroutines = 1000,
         public readonly ?int $callDepth = 1000,
+        public readonly ?int $sourceBytes = 2 << 20,
     ) {
         // (NAN >= 0 can be true in PHP: is_nan first)
-        foreach (['steps' => $steps, 'memoryBytes' => $memoryBytes, 'seconds' => $seconds, 'outputBytes' => $outputBytes, 'coroutines' => $coroutines, 'callDepth' => $callDepth] as $name => $limit) {
+        foreach (['steps' => $steps, 'memoryBytes' => $memoryBytes, 'seconds' => $seconds, 'outputBytes' => $outputBytes, 'coroutines' => $coroutines, 'callDepth' => $callDepth, 'sourceBytes' => $sourceBytes] as $name => $limit) {
             if ($limit !== null && (is_nan((float) $limit) || $limit < 0)) {
                 throw new \InvalidArgumentException("Limits: $name must be null or at least 0");
             }
@@ -45,7 +54,7 @@ final class Limits
     /** no limits at all */
     public static function none(): self
     {
-        return new self(coroutines: null, callDepth: null);
+        return new self(coroutines: null, callDepth: null, sourceBytes: null);
     }
 
     /**

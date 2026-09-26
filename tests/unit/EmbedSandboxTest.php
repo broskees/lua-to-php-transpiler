@@ -301,6 +301,21 @@ function test_sandboxes_are_isolated(): void
     assertSame([0], $a->load('return #fresh()')->call());
 }
 
+function test_collectgarbage_count_sees_only_the_sandbox_s_own_memory(): void
+{
+    $environment = new Environment();
+    $a = $environment->newSandbox();
+    $b = $environment->newSandbox();
+    $count = 'return collectgarbage("count")';
+    [$before] = $a->load($count)->call();
+    $b->load('held = string.rep("x", 8000000)')->call();
+    [$after] = $a->load($count)->call();
+    assertTrue(abs($after - $before) < 1024, "A's count moved from $before to $after KB with B's 8 MB");
+    // its own tables count
+    [$own] = $a->load('local t = {} for i = 1, 100000 do t[i] = {} end kept = t return collectgarbage("count")')->call();
+    assertTrue($own - $after > 1024, "A's own tables: from $after to $own KB");
+}
+
 function test_handles_keep_their_sandbox_alive(): void
 {
     $environment = new Environment(loader: new ArrayLoader(['counter.lua' => 'local n = 0 return function () n = n + 1 return n end']));

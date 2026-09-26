@@ -6,6 +6,7 @@ namespace Tests\EmbedRuntimeTest;
 
 use LuaPhp\Compiler\Compiler;
 use LuaPhp\Emitter\Emitter;
+use LuaPhp\Emitter\FunctionEmitter;
 use LuaPhp\Lib\PackageLib;
 use LuaPhp\Lib\StandardLibraries;
 use LuaPhp\Runtime\Budget;
@@ -447,6 +448,29 @@ function test_steps_are_at_least_the_instructions_run(): void
     $steps = $L->globalState->budget->usage()['steps'];
     // the main function's size when it starts, the loop's 3 instructions (ADD, MMBIN, FORLOOP) at each of its 999 jumps back
     assertTrue($steps >= 3000 && $steps < 3100, "$steps steps");
+}
+
+function test_copying_all_varargs_costs_a_step_per_value_inline_and_compact(): void
+{
+    $stepsOf = static function (string $code): int {
+        $L = embeddedState(SAFE, new Budget());
+        addBuilders($L);
+        [$status, $results] = runIn($L, $code);
+        assertSame(Lua::LUA_OK, $status, (string) (\is_string($results) ? $results : ''));
+        return $L->globalState->budget->usage()['steps'];
+    };
+    foreach (['inline' => false, 'compact' => true] as $form => $compact) {
+        FunctionEmitter::$compactEverywhere = $compact;
+        try {
+            // (the comment keeps the two forms' chunks apart in the load cache)
+            $copying = $stepsOf("local values = list(20000, 1) local function f(...) return select('#', ...) end return f(table.unpack(values)) -- $form");
+            $notCopying = $stepsOf("local values = list(20000, 1) local function f(...) return 1 end return f(table.unpack(values)) -- $form");
+        } finally {
+            FunctionEmitter::$compactEverywhere = false;
+        }
+        $difference = $copying - $notCopying;
+        assertTrue($difference >= 20000 && $difference < 20100, "$form: '...' of 20000 values cost $difference steps");
+    }
 }
 
 function test_library_functions_charge_in_proportion_to_their_work(): void
