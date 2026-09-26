@@ -13,6 +13,8 @@ namespace LuaPhp\Runtime;
  * receives the argument list (0-based PHP list, Lua argument #n is
  * $arguments[n - 1]) and returns the list of results. $upvalues mirrors a
  * C closure's upvalues for debug.getupvalue/setupvalue (names are "").
+ *
+ * @internal
  */
 final class NativeFunction
 {

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace LuaPhp\Lib;
 
 use LuaPhp\Runtime\Auxiliary;
+use LuaPhp\Runtime\Budget;
 use LuaPhp\Runtime\Calls;
 use LuaPhp\Runtime\Coroutine;
 use LuaPhp\Runtime\Lua;
@@ -16,6 +17,8 @@ use LuaPhp\Runtime\Vm;
 
 /**
  * Port of ltablib.c: the table library.
+ *
+ * @internal
  */
 final class TableLib
 {
@@ -116,7 +119,9 @@ final class TableLib
                 $position = Auxiliary::checkInteger($L, $args, 2);  // 2nd argument is the position
                 // check whether 'pos' is in [1, e]
                 Auxiliary::argCheck($L, Vm::unsignedLess(Vm::subWrap($position, 1), $firstEmpty), 2, 'position out of bounds');
+                $budget = $L->globalState->budget;
                 for ($i = $firstEmpty; $i > $position; $i--) {  // move up elements
+                    $budget?->chargeSteps(1);
                     self::setIndex($L, $table, $i, self::getIndex($L, $table, $i - 1));  // t[i] = t[i - 1]
                 }
                 $value = $args[2];
@@ -149,7 +154,9 @@ final class TableLib
             Auxiliary::argCheck($L, Vm::unsignedLess($offset, $size) || $offset === $size, 2, 'position out of bounds');
         }
         $result = self::getIndex($L, $table, $position);  // result = t[pos]
+        $budget = $L->globalState->budget;
         for (; $position < $size; $position++) {
+            $budget?->chargeSteps(1);
             self::setIndex($L, $table, $position, self::getIndex($L, $table, $position + 1));  // t[pos] = t[pos + 1]
         }
         self::setIndex($L, $table, $position, null);  // remove entry t[pos]
@@ -171,12 +178,15 @@ final class TableLib
             Auxiliary::argCheck($L, $first > 0 || $end < PHP_INT_MAX + $first, 3, 'too many elements to move');
             $count = $end - $first + 1;  // number of elements to move
             Auxiliary::argCheck($L, $target <= PHP_INT_MAX - $count + 1, 4, 'destination wrap around');
+            $budget = $L->globalState->budget;
             if ($target > $end || $target <= $first || ($destinationArgument !== 1 && !Vm::equalObjects($L, $source, $destination))) {
                 for ($i = 0; $i < $count; $i++) {
+                    $budget?->chargeSteps(1);
                     self::setIndex($L, $destination, $target + $i, self::getIndex($L, $source, $first + $i));
                 }
             } else {
                 for ($i = $count - 1; $i >= 0; $i--) {
+                    $budget?->chargeSteps(1);
                     self::setIndex($L, $destination, $target + $i, self::getIndex($L, $source, $first + $i));
                 }
             }
@@ -222,7 +232,9 @@ final class TableLib
                 }
             }
             if ($pieces !== null) {
-                MemoryLimit::reserve($length + \strlen($separator) * max(0, $last - 1));
+                $bytes = $length + \strlen($separator) * max(0, $last - 1);
+                MemoryLimit::reserve($bytes, $L->globalState->budget);
+                $L->globalState->budget?->chargeSteps($last + intdiv($bytes, Budget::BYTES_PER_STEP));
                 return [implode($separator, $pieces)];
             }
         }
@@ -233,15 +245,19 @@ final class TableLib
         $table = $args[0];
         $pieces = [];
         $length = 0;
+        $budget = $L->globalState->budget;
         for (; $index < $last; $index++) {
+            $budget?->chargeSteps(1);
             $pieces[] = $piece = self::field($L, $table, $index);
             $length += \strlen($piece) + \strlen($separator);
         }
         if ($index === $last) {  // add last value (if interval was not empty)
+            $budget?->chargeSteps(1);
             $pieces[] = $piece = self::field($L, $table, $index);
             $length += \strlen($piece);
         }
-        MemoryLimit::reserve($length);
+        MemoryLimit::reserve($length, $budget);
+        $budget?->chargeSteps(intdiv($length, Budget::BYTES_PER_STEP));
         return [implode($separator, $pieces)];
     }
 
@@ -262,6 +278,7 @@ final class TableLib
         if ($table instanceof LuaTable && $table->metatable === null && \count($args) === 1) {
             $end = $table->length();
             if ($end < Lua::LUAI_MAXSTACK && $L->ci->top + $end <= $L->stackLimit) {  // Calls::checkStack($L, $end)
+                $L->globalState->budget?->chargeSteps($end);
                 $values = $table->arr;
                 $results = [];
                 for ($index = 1; $index <= $end; $index++) {
@@ -279,6 +296,7 @@ final class TableLib
         if (Vm::unsignedLess(2147483646, $count) || !Calls::checkStack($L, $count + 1)) {
             Auxiliary::error($L, 'too many results to unpack');
         }
+        $L->globalState->budget?->chargeSteps($count + 1);
         $results = [];
         if ($table instanceof LuaTable && $table->metatable === null) {
             $values = $table->arr;
@@ -390,6 +408,7 @@ final class TableLib
     private static function auxsort(Coroutine $L, mixed $table, mixed $comparator, int $lo, int $up, int $rnd): void
     {
         while ($lo < $up) {  // loop for tail recursion
+            $L->globalState->budget?->chargeSteps($up - $lo + 1);  // (about the comparisons this partition makes)
             // sort elements 'lo', 'p', and 'up'
             $valueLo = self::getIndex($L, $table, $lo);
             $valueUp = self::getIndex($L, $table, $up);

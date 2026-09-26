@@ -484,10 +484,12 @@ Lua string keys and integer keys distinct.
   'r': hooks do not nest, so they live on the Coroutine) and clears
   `allowhook` while the hook runs; `Calls::protectedRun` restores it.
 - **PHP hygiene.** `Standalone::configurePhp()`: PHP warnings become
-  exceptions (a crash, never output), exception traces drop arguments, stdout
-  is buffered (PHP's output buffer is C's stdout buffer: `print` echoes and
-  then flushes, like lua_writeline; `Standalone::flushStdout()` before
-  stderr/exit). It leaves memory_limit alone: lua2php output and any PHP
+  exceptions (a crash, never output; the handler is
+  `PhpErrors::throwAsException`), exception traces drop arguments, stdout
+  is buffered (PHP's output buffer is C's stdout buffer: `print` writes to
+  `StandardOutput` and then flushes, like lua_writeline;
+  `Standalone::flushStdout()` before stderr/exit). Embedded code gets none
+  of this process-wide (see Embedding conventions). It leaves memory_limit alone: lua2php output and any PHP
   that embeds the runtime keep the limit PHP was started with. bin/lua,
   bin/lua2php (a build tool; in directory mode a file that fails is
   reported and the others are still transpiled) and test harnesses that
@@ -523,7 +525,7 @@ Lua string keys and integer keys distinct.
   registry["FILE*"]) whose payload is `Lib\Io\LuaStream` (luaL_Stream) holding
   a `Lib\Io\CFile`, the emulated C `FILE *` with glibc's buffering rules
   (Lua can observe them through a second handle). Standard output writes go
-  through PHP's output buffer like `print`. C's `errno` is `Lib\Io\Errno`
+  to the state's output sink like `print` (see Embedding conventions). C's `errno` is `Lib\Io\Errno`
   (recovered from PHP's warning text); `Errno::fileResult/execResult` are
   luaL_fileresult/luaL_execresult. PHP's fopen and file_get_contents
   resolve paths themselves first and report any failure there as ENOENT
@@ -550,10 +552,120 @@ Lua string keys and integer keys distinct.
 
 ## Embedding conventions
 
-`LuaPhp\Embed` (src/Embed/) is the only public API: hosts run Lua inside
-a PHP app (a web request) through it. Everything else is `@internal`, and
-nothing public takes or returns a Coroutine, CallInfo, Proto or runtime
-LuaTable: handles wrap them.
+The runtime half of embedding Lua in PHP applications: the internal
+contract the public `LuaPhp\Embed` layer (src/Embed/) builds on. Only
+`LuaPhp\Embed` is public: every other class is marked `@internal`.
+Nothing here costs bin/lua or lua2php output anything:
+their emitted code is byte-identical to code compiled before step
+counting existed, and a state without a budget charges nothing.
+
+- **Output.** `OutputSink::write($bytes)`; `GlobalState::$output`
+  (stdout) and `$errorOutput` (stderr) default to `StandardOutput` (PHP's
+  output buffer, flushed like lua_writeline) and `StandardError`, which
+  is the command line's behavior. Every write the runtime does for Lua
+  (print, io.write, io.stdout, io.stderr, warn, debug.debug) goes through
+  `$G->writeOutput()` / `writeErrorOutput()`, which charge the budget
+  first (over the limit nothing is written), and flushes through
+  `$G->flushOutput()`, which flushes only `StandardOutput` (it ends every
+  PHP output buffer: command line only). io.stdout/io.stderr are CFiles
+  bound to their state; on another sink their seek fails with ESPIPE,
+  while io.stderr on `StandardError` still writes its own stream (write
+  errors are seen). Never echo or write to STDOUT/STDERR for Lua directly.
+- **PHP errors.** `PhpErrors::call($body)` installs the warning-to-
+  exception handler, runs `$body` and restores the previous handler in
+  `finally`; calls nest (a host function may run another state).
+  `configurePhp` installs the same handler for the whole process (CLI).
+- **Libraries.** `StandardLibraries::openSelected($L, $names, $sandboxed,
+  $allowLoad)`: `base package string table math utf8 coroutine io os
+  debug`, or `lib.func` for single functions (`base.print`); a library of
+  which only some functions are named keeps just those (same module
+  table, so the string metatable's `__index` follows); an unknown name is
+  an `\InvalidArgumentException`. `$sandboxed`: no dofile/loadfile/
+  string.dump; load only with `$allowLoad`, then with 'b' taken out of
+  every mode (binary chunks get mode "t"'s error) and compiled with step
+  counting; collectgarbage accepts only collect/count/step
+  (luaL_checkoption's "invalid option"); package is just package.loaded
+  and `require` comes from `PackageLib::openSandboxRequire($L,
+  $searchers)`: ll_require (package.loaded first, the loader called with
+  the name and its data, the result stored, both returned) with PHP
+  searchers `fn (Coroutine $L, string $name): array` returning `[loader,
+  data]` or `[null, message|null]`; not found is findloader's "module 'x'
+  not found:" plus "\n\t" and each message.
+- **Budget.** `GlobalState::setBudget(?Budget)` sets the limits (null:
+  none) and starts a run; `Budget::start()` starts the next one. Limits:
+  steps, memoryBytes, seconds, outputBytes, coroutines (alive at once),
+  callDepth. Reaching one throws `LimitReached` (`->limit`), an
+  `\Exception` that is neither LuaError nor `\Error`: no pcall, message
+  handler, resume, `__close` or `__gc` sees it, so no Lua code runs after
+  it and the state is unusable (abandon it). The step counter is the
+  state's (`GlobalState::$stepsLeft`, untyped: a typed reference costs a
+  check per decrement), bound by reference in emitted frames;
+  `Budget::$stepsLeft` refers to it, so budgets may be replaced between
+  runs even with coroutines suspended. Below 0 it calls
+  `Budget::stepsUsedUp` -> `refill()`: the steps limit, then time and
+  memory, every `STEPS_PER_CHECK` (10000) steps. Memory: growth of
+  memory_get_usage() since start (a lower mark when garbage from before is
+  freed) over memoryBytes, or the host's memory_limit less MemoryLimit's
+  reserve, after gc_collect_cycles (C's emergency collection: no
+  finalizers) -> 'memory'. `MemoryLimit::reserve/grow/fits($bytes,
+  $budget)`: over memoryBytes LimitReached('memory'), over the host's room
+  Lua's "not enough memory" as before. `checkLimits()` checks time and
+  memory now (host code, after a host function returns). `chargeSteps`,
+  `chargeOutput`, `usage()` (steps, peakMemoryBytes, milliseconds,
+  outputBytes).
+- **Step counting.** `Emitter::emitChunk($proto, true)`: the prologue
+  charges the function's instruction count (`$steps =
+  &$L->globalState->stepsLeft` in a function with loops) and every backward
+  jump (`FunctionEmitter::jump`, target <= source pc) charges the loop's
+  size before it jumps, so steps >= instructions run (an OP_MMBIN* counts).
+  `GlobalState::$countSteps` makes load() compile so, and LoadCache keys
+  include the flag. Libraries charge in proportion to their work, a step
+  per element or per `Budget::BYTES_PER_STEP` (64) bytes: rep, upper,
+  lower, reverse, byte, char, format, pack, find/match/gmatch/gsub
+  (MatchState: bytes scanned per search, the port's match() calls in
+  batches of 256), table concat, insert/remove shifts, move, unpack, sort
+  (per partition), utf8 char/codepoint/len/offset/codes, load (a step per
+  byte compiled). Loops over ranges an argument sets charge as they go;
+  others charge what they are about to do, after `MemoryLimit::reserve`
+  (so a huge result is 'memory', not 'steps'). A fast path charges what
+  its port charges. Every charge is `$L->globalState->budget?->...`: with
+  no budget it evaluates nothing.
+- **Call depth.** `CallInfo::$depth`: Lua levels, set by step-counting
+  code's prologue from the frame below (through native frames, which
+  store none: `Calls::luaDepth`, so native calls cost nothing more); over
+  `GlobalState::$callDepthLimit`
+  -> `Calls::callDepthOverflow`: Lua's "stack overflow", with
+  `Calls::ERROR_EXTRA_DEPTH` (50) more levels while it is handled, then
+  "error in error handling"; `shrinkStack` restores. Each thread counts
+  its own, as each C thread has its own stack.
+- **Coroutines.** `Coroutine::newThread` -> `Budget::countCoroutine` (a
+  WeakMap). At the limit, dead ones (`Coroutine::isDead`) stop counting,
+  then gc_collect_cycles frees unreachable suspended ones, then
+  LimitReached('coroutines'). One kept only by a weak table counts until a
+  Lua collection clears it.
+- **Isolation.** Per state: globals, registry, type metatables,
+  package.loaded, math's random state, the '%p' long-string table
+  (`GlobalState::$addressedLongStrings`), warnings, budget. Process-wide
+  and harmless: code caches (LoadCache, ChunkLoader's factories, pattern
+  tables and translations: pure functions of their keys), LightUserdata's
+  WeakMap and `DebugInfo::$hookedFrames` (keyed by one state's objects),
+  `Errno::$errno` (set and read within one library call, with no Lua or
+  host code in between), Teardown's queue. Process-wide and observable, so
+  never in a sandbox profile: os.setlocale (the PHP process's locale),
+  CFile's open files (io.popen and os.execute flush every state's files,
+  as C's fflush(NULL) does), os.exit (ends PHP), io.read/debug.debug
+  (the process's stdin). collectgarbage("count") and the collector's
+  pacing include PHP memory growth, so another state that runs meanwhile
+  (re-entry) moves them.
+- **Closing.** `Collector::abandonState($G)`: pending finalizers are
+  dropped, never called, and the collector stops, so no `__gc` and no
+  `__close` runs any more; PHP frees the rest (destructors never run Lua).
+  A sandbox that is thrown away skips its pending finalizers.
+
+**The public layer.** `LuaPhp\Embed` (src/Embed/) is the only public
+API: hosts run Lua inside a PHP app (a web request) through it. Nothing
+public takes or returns a Coroutine, CallInfo, Proto or runtime LuaTable:
+handles wrap them. Its internals are `LuaPhp\Embed\Internal`.
 
 - **Shape.** `Environment` (once per process: loader, compile cache,
   libraries, host modules and globals, limits) -> `Sandbox` (one Lua
@@ -598,9 +710,10 @@ LuaTable: handles wrap them.
   the root's real path.
 - **Closing** runs no Lua code: pending `__gc` finalizers are skipped
   (close(), a stopped run, a dropped sandbox).
-- Tests: `tests/unit/Embed*Test.php`, compared with lua5.4 where Lua
-  decides (argument errors, tracebacks, syntax errors, what a table
-  holds).
+- Tests: `tests/unit/EmbedRuntimeTest.php` (the runtime contract) and
+  the other `tests/unit/Embed*Test.php` (the public layer), compared with
+  lua5.4 where Lua decides (argument errors, tracebacks, syntax errors,
+  what a table holds).
 
 ## Testing
 

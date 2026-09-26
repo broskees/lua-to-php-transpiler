@@ -18,6 +18,8 @@ namespace LuaPhp\Runtime;
  * formatFloat() is the whole of glibc's printf for one double conversion
  * (a A e E f F g G with flags, field width and precision), as
  * string.format needs it.
+ *
+ * @internal
  */
 final class NumberFormat
 {

@@ -6,6 +6,8 @@ namespace LuaPhp\Compiler;
 
 /**
  * Control of blocks; mirrors C 'BlockCnt' in lparser.c.
+ *
+ * @internal
  */
 final class BlockCnt
 {

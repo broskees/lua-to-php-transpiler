@@ -12,6 +12,8 @@ namespace LuaPhp\Runtime;
  * helpers take Lua's 1-based argument number ('arg'), so
  * checkInteger($L, $args, 2) checks $args[1]. An argument beyond the end
  * of the list is "none" (C: LUA_TNONE); an existing null is nil.
+ *
+ * @internal
  */
 final class Auxiliary
 {

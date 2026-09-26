@@ -43,6 +43,8 @@ namespace LuaPhp\Runtime;
  * (Gc\Collector decides what Lua sees; it holds objects with finalizers
  * itself). They must never run Lua code or touch Lua-visible state (see
  * AGENTS.md, "Coroutines").
+ *
+ * @internal
  */
 final class Teardown
 {

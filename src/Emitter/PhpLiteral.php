@@ -7,6 +7,8 @@ namespace LuaPhp\Emitter;
 /**
  * PHP source literals for Lua constants (null|bool|int|float|string),
  * exact to the bit: floats round-trip, strings are binary-safe.
+ *
+ * @internal
  */
 final class PhpLiteral
 {

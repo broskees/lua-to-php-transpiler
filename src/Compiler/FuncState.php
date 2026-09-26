@@ -9,6 +9,8 @@ namespace LuaPhp\Compiler;
  * 'FuncState' in lparser.h. The Proto's arrays may hold stale entries past
  * the counts below (C keeps them in over-allocated vectors); close_func
  * trims them.
+ *
+ * @internal
  */
 final class FuncState
 {

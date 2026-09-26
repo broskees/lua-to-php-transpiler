@@ -21,6 +21,8 @@ namespace LuaPhp\Compiler;
  * code ports mechanically. The C getters' check_exp() mode assertions are
  * debug-only in C and are not ported. SET* functions return the new
  * instruction instead of modifying their argument.
+ *
+ * @internal
  */
 final class OpCodes
 {

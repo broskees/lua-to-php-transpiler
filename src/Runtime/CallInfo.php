@@ -15,6 +15,8 @@ namespace LuaPhp\Runtime;
  * is thrown nobody pops: the protected call that catches it still sees the
  * whole chain (for the message handler and tracebacks) and then resets
  * $L->ci itself (ldo.c: luaD_pcall).
+ *
+ * @internal
  */
 final class CallInfo
 {
@@ -64,6 +66,13 @@ final class CallInfo
      * Calls::MAX_FRAME_BYTES).
      */
     public int $frameBytes = 0;
+
+    /**
+     * Lua call levels at and below this frame, set by code compiled with
+     * step counting (GlobalState::$callDepthLimit); 0 in other frames (see
+     * Calls::luaDepth for a native frame's).
+     */
+    public int $depth = 0;
 
     /**
      * Push a new CallInfo for $func on thread $L, raising Lua's "stack

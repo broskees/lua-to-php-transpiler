@@ -11,6 +11,8 @@ namespace LuaPhp\Runtime;
  * here each CallInfo keeps the open upvalues of its own frame by register
  * ($ci->openupval) and its pending to-be-closed registers ($ci->tbclist).
  * Closing "everything at or above a level" of a frame is the same thing.
+ *
+ * @internal
  */
 final class Upvalues
 {

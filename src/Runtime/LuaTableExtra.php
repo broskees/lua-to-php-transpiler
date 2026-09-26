@@ -13,6 +13,8 @@ namespace LuaPhp\Runtime;
  *
  * It needs no destructor of its own (see Teardown): a table hands it to
  * Teardown::$pending whole, and its arrays lead straight to Lua values.
+ *
+ * @internal
  */
 final class LuaTableExtra
 {

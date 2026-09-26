@@ -12,6 +12,8 @@ use LuaPhp\Compiler\OpCodes as O;
  * its C name; C pointer arguments that the callee assigns ('int *l1',
  * 'int *pi') are PHP references, and C pointers to instructions are
  * indices into $fs->f->code.
+ *
+ * @internal
  */
 final class CodeGen
 {

@@ -11,6 +11,8 @@ namespace LuaPhp\Lib\Io;
  * PHP does not expose errno: failed PHP file functions report the C
  * library's strerror() text in their warning ("unlink(x): No such file or
  * directory"), so the number is recovered from that text.
+ *
+ * @internal
  */
 final class Errno
 {

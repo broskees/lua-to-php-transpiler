@@ -31,6 +31,8 @@ use LuaPhp\Runtime\Gc\Collector;
  * themselves (a long string as emitted code reads it from the Proto).
  * Jumps stay in the emitted code: a test returns its condition, and
  * OP_JMP's form only does its hook check.
+ *
+ * @internal
  */
 final class Op
 {

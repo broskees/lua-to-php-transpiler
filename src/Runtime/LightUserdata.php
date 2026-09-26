@@ -10,6 +10,8 @@ namespace LuaPhp\Runtime;
  * when they point to the same thing. The runtime creates at most one
  * LightUserdata per pointed-to object (see pointingTo), so PHP object
  * identity is pointer equality.
+ *
+ * @internal
  */
 final class LightUserdata
 {

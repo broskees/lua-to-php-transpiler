@@ -19,6 +19,8 @@ use LuaPhp\Compiler\Proto;
  * Here the caller says where it came from with a "slot": a register index
  * (>= 0), an upvalue (upvalueSlot($index)), or NO_SLOT (a constant, an
  * immediate, a value inside a metatable, or a call from PHP code).
+ *
+ * @internal
  */
 final class DebugInfo
 {

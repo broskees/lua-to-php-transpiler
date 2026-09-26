@@ -15,6 +15,8 @@ use LuaPhp\Runtime\NativeFunction;
 /**
  * Port of lcorolib.c: the coroutine library. The thread machinery
  * (lua_resume, lua_yield, lua_closethread) is in Coroutine.
+ *
+ * @internal
  */
 final class CoroutineLib
 {

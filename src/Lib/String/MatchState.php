@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace LuaPhp\Lib\String;
 
 use LuaPhp\Runtime\Auxiliary;
+use LuaPhp\Runtime\Budget;
 use LuaPhp\Runtime\Coroutine;
 use LuaPhp\Runtime\MemoryLimit;
 
@@ -23,6 +24,8 @@ use LuaPhp\Runtime\MemoryLimit;
  * Not in C: when PatternRegex can translate the pattern, the drivers'
  * question "where is the next match from here, and what are its captures"
  * (nextCandidate, matchAt) is answered by preg_match instead of match().
+ *
+ * @internal
  */
 final class MatchState
 {
@@ -110,6 +113,15 @@ final class MatchState
     /** memory_get_usage(true) plus preg_match's copies when MemoryLimit last allowed them */
     private int $regexCopiesAllowed = 0;
 
+    /** Not in C: the state's budget: searches charge the bytes they scan, the port its match() calls */
+    private readonly ?Budget $budget;
+
+    /** Not in C: match() calls before the port charges the budget for them (never without one) */
+    private int $matchesUntilCharge = PHP_INT_MAX;
+
+    /** Not in C: the match() calls the port charges at once */
+    private const MATCHES_PER_CHARGE = 256;
+
     // Not in C: regexSearch's result when PCRE gives up
     private const PCRE_FAILED = -2;
 
@@ -129,6 +141,10 @@ final class MatchState
         $isOptional = $second === '*' || $second === '?' || $second === '-';
         $this->firstLiteral = ($isPlain && !$isOptional) ? $first : null;
         $this->regex = self::$forcePort ? null : PatternRegex::forPattern($pattern, $this->srcEnd, $this);
+        $this->budget = $L->globalState->budget;
+        if ($this->budget !== null) {
+            $this->matchesUntilCharge = self::MATCHES_PER_CHARGE;
+        }
     }
 
     /**
@@ -143,6 +159,7 @@ final class MatchState
         if ($this->regex !== null) {
             $start = $this->regexSearch($this->regex->search, $s);
             if ($start !== self::PCRE_FAILED) {
+                $this->budget?->chargeSteps(1 + intdiv(($start === -1 ? $this->srcEnd : $this->regexEnd) - $s, Budget::BYTES_PER_STEP));
                 return $start;
             }
         }
@@ -150,6 +167,7 @@ final class MatchState
             return $s;
         }
         $candidate = strpos($this->src, $this->firstLiteral, $s);
+        $this->budget?->chargeSteps(1 + intdiv(($candidate === false ? $this->srcEnd : $candidate) - $s, Budget::BYTES_PER_STEP));
         return $candidate === false ? -1 : $candidate;
     }
 
@@ -165,6 +183,7 @@ final class MatchState
             }
             $start = $this->regexSearch($this->regex->anchored, $s);
             if ($start !== self::PCRE_FAILED) {
+                $this->budget?->chargeSteps(1 + intdiv($start === -1 ? 0 : $this->regexEnd - $s, Budget::BYTES_PER_STEP));
                 return $start === -1 ? -1 : $this->regexEnd;
             }
         }
@@ -185,7 +204,7 @@ final class MatchState
     {
         $copies = (\count($this->regex->isPositionCapture) + 1) * ($this->srcEnd - $s);
         if ($copies > MemoryLimit::CHECK_ABOVE && memory_get_usage(true) + $copies > $this->regexCopiesAllowed) {
-            if (!MemoryLimit::fits($copies)) {
+            if (!MemoryLimit::fits($copies) || !($this->L->globalState->budget?->memoryFits($copies) ?? true)) {
                 $this->regexStart = -1;
                 return self::PCRE_FAILED;
             }
@@ -558,6 +577,10 @@ final class MatchState
         if ($this->matchdepth-- === 0) {
             Auxiliary::error($this->L, 'pattern too complex');
         }
+        if (--$this->matchesUntilCharge === 0) {  // (backtracking can take long: charge as it goes)
+            $this->matchesUntilCharge = self::MATCHES_PER_CHARGE;
+            $this->budget->chargeSteps(self::MATCHES_PER_CHARGE);
+        }
         $pattern = $this->pattern;
         $patternEnd = $this->patternEnd;
         while ($p !== $patternEnd) {  // end of pattern? (loop: C's 'goto init')
@@ -700,7 +723,7 @@ final class MatchState
                 $bytes += max(0, $this->captureLen[$i]);
             }
             if ($bytes > MemoryLimit::CHECK_ABOVE) {
-                MemoryLimit::reserve($bytes);
+                MemoryLimit::reserve($bytes, $this->L->globalState->budget);
             }
         }
         $captures = [];

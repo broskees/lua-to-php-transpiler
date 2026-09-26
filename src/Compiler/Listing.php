@@ -13,6 +13,8 @@ use LuaPhp\Runtime\NumberFormat;
  * Output is identical to luac5.4's except the '%p' addresses: C prints the
  * Proto's memory address, this prints a stable per-object id in the same
  * "0x..." shape, so CLOSURE comments still match function headers.
+ *
+ * @internal
  */
 final class Listing
 {

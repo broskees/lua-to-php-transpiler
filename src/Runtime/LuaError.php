@@ -13,6 +13,8 @@ namespace LuaPhp\Runtime;
  * When a LuaError is thrown, the thread's CallInfo chain is left as it was
  * at the raise point; the catcher (a protected call) runs the message
  * handler on top of it, then unwinds (see Calls::protectedCall).
+ *
+ * @internal
  */
 final class LuaError extends \Exception
 {

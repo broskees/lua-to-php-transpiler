@@ -7,6 +7,8 @@ namespace LuaPhp\Compiler;
 /**
  * State of a table constructor being parsed; mirrors C 'ConsControl' in
  * lparser.c.
+ *
+ * @internal
  */
 final class ConsControl
 {

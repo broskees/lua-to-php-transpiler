@@ -9,6 +9,7 @@ use LuaPhp\Lib\String\MatchState;
 use LuaPhp\Lib\String\Pack;
 use LuaPhp\Lib\String\StringFormat;
 use LuaPhp\Runtime\Auxiliary;
+use LuaPhp\Runtime\Budget;
 use LuaPhp\Runtime\Calls;
 use LuaPhp\Runtime\Coroutine;
 use LuaPhp\Runtime\Lua;
@@ -28,6 +29,8 @@ use LuaPhp\Runtime\Vm;
  *
  * The pattern matcher is String\MatchState, string.format is
  * String\StringFormat, pack/unpack are String\Pack.
+ *
+ * @internal
  */
 final class StringLib
 {
@@ -132,7 +135,7 @@ final class StringLib
         if ($start > $end) {
             return [''];
         }
-        MemoryLimit::reserve($end - $start + 1);
+        MemoryLimit::reserve($end - $start + 1, $L->globalState->budget);
         return [substr($s, $start - 1, $end - $start + 1)];
     }
 
@@ -140,7 +143,8 @@ final class StringLib
     private static function reverse(Coroutine $L, array $args): array
     {
         $s = Auxiliary::checkString($L, $args, 1);
-        MemoryLimit::reserve(\strlen($s));
+        MemoryLimit::reserve(\strlen($s), $L->globalState->budget);
+        $L->globalState->budget?->chargeSteps(intdiv(\strlen($s), Budget::BYTES_PER_STEP));
         return [strrev($s)];
     }
 
@@ -148,7 +152,8 @@ final class StringLib
     private static function lower(Coroutine $L, array $args): array
     {
         $s = Auxiliary::checkString($L, $args, 1);
-        MemoryLimit::reserve(\strlen($s));
+        MemoryLimit::reserve(\strlen($s), $L->globalState->budget);
+        $L->globalState->budget?->chargeSteps(intdiv(\strlen($s), Budget::BYTES_PER_STEP));
         return [strtolower($s)];
     }
 
@@ -156,7 +161,8 @@ final class StringLib
     private static function upper(Coroutine $L, array $args): array
     {
         $s = Auxiliary::checkString($L, $args, 1);
-        MemoryLimit::reserve(\strlen($s));
+        MemoryLimit::reserve(\strlen($s), $L->globalState->budget);
+        $L->globalState->budget?->chargeSteps(intdiv(\strlen($s), Budget::BYTES_PER_STEP));
         return [strtoupper($s)];
     }
 
@@ -173,12 +179,14 @@ final class StringLib
             Auxiliary::error($L, 'resulting string too large');
         }
         if ($separator === '') {
-            MemoryLimit::reserve(\strlen($s) * $n);
+            MemoryLimit::reserve(\strlen($s) * $n, $L->globalState->budget);
+            $L->globalState->budget?->chargeSteps(1 + intdiv(\strlen($s) * $n, Budget::BYTES_PER_STEP));
             return [str_repeat($s, $n)];
         }
         // first n-1 copies followed by the separator, then the last copy
         // (appending it may copy the whole string)
-        MemoryLimit::reserve(2 * ((\strlen($s) + \strlen($separator)) * $n));
+        MemoryLimit::reserve(2 * ((\strlen($s) + \strlen($separator)) * $n), $L->globalState->budget);
+        $L->globalState->budget?->chargeSteps(1 + intdiv((\strlen($s) + \strlen($separator)) * $n, Budget::BYTES_PER_STEP));
         return [str_repeat($s . $separator, $n - 1) . $s];
     }
 
@@ -207,6 +215,9 @@ final class StringLib
         }
         $count = $end - $start + 1;
         Auxiliary::checkStack($L, $count, 'string slice too long');
+        if ($count > 1) {  // (one byte, as in the fast path above, is not charged)
+            $L->globalState->budget?->chargeSteps($count);
+        }
         return array_values(unpack('C*', substr($s, $start - 1, $count)));
     }
 
@@ -214,6 +225,8 @@ final class StringLib
     private static function char(Coroutine $L, array $args): array
     {
         $count = \count($args);
+        MemoryLimit::reserve($count, $L->globalState->budget);
+        $L->globalState->budget?->chargeSteps($count);
         $result = '';
         for ($i = 1; $i <= $count; $i++) {
             $code = Auxiliary::checkInteger($L, $args, $i);
@@ -262,6 +275,7 @@ final class StringLib
         if ($find && (($plain !== null && $plain !== false) || self::noSpecials($pattern))) {
             // do a plain search (lstrlib.c: lmemfind)
             $found = strpos($s, $pattern, $init);
+            $L->globalState->budget?->chargeSteps(1 + intdiv(($found === false ? $length : $found) - $init, Budget::BYTES_PER_STEP));
             if ($found !== false) {
                 return [$found + 1, $found + \strlen($pattern)];
             }
@@ -336,7 +350,7 @@ final class StringLib
         while (($escapePosition = strpos($replacement, '%', $position)) !== false) {
             // room for the text before the escape and for a capture (at most the whole match)
             if (\strlen($expanded) + $escapePosition - $position + $e - $s > $capacity) {
-                $capacity = MemoryLimit::grow(\strlen($expanded) + $escapePosition - $position + $e - $s);
+                $capacity = MemoryLimit::grow(\strlen($expanded) + $escapePosition - $position + $e - $s, $ms->L->globalState->budget);
             }
             $expanded .= substr($replacement, $position, $escapePosition - $position);
             $escaped = $replacement[$escapePosition + 1] ?? "\0";  // skip ESC (C reads the final '\0')
@@ -391,7 +405,7 @@ final class StringLib
                     break;  // no more matches: the rest of the subject is kept below
                 }
                 if (\strlen($result) + $candidate - $position > $capacity) {
-                    $capacity = MemoryLimit::grow(\strlen($result) + $candidate - $position);
+                    $capacity = MemoryLimit::grow(\strlen($result) + $candidate - $position, $L->globalState->budget);
                 }
                 $result .= substr($source, $position, $candidate - $position);
                 $position = $candidate;
@@ -419,13 +433,13 @@ final class StringLib
                     }
                 }
                 if (\strlen($result) + \strlen($piece) > $capacity) {
-                    $capacity = MemoryLimit::grow(\strlen($result) + \strlen($piece));
+                    $capacity = MemoryLimit::grow(\strlen($result) + \strlen($piece), $L->globalState->budget);
                 }
                 $result .= $piece;
                 $position = $lastMatch = $end;
             } elseif ($position < $sourceLength) {  // otherwise, skip one character
                 if (\strlen($result) >= $capacity) {
-                    $capacity = MemoryLimit::grow(\strlen($result) + 1);
+                    $capacity = MemoryLimit::grow(\strlen($result) + 1, $L->globalState->budget);
                 }
                 $result .= $source[$position++];
             } else {
@@ -440,7 +454,7 @@ final class StringLib
             return [$source, $count];
         }
         if (\strlen($result) + $sourceLength - $position > $capacity) {
-            MemoryLimit::grow(\strlen($result) + $sourceLength - $position);
+            MemoryLimit::grow(\strlen($result) + $sourceLength - $position, $L->globalState->budget);
         }
         $result .= substr($source, $position);
         return [$result, $count];  // new string and number of substitutions

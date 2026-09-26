@@ -20,12 +20,13 @@ use LuaPhp\Runtime\LuaObject;
 use LuaPhp\Runtime\LuaTable;
 use LuaPhp\Runtime\MetaMethods;
 use LuaPhp\Runtime\NativeFunction;
-use LuaPhp\Runtime\Standalone;
 use LuaPhp\Runtime\Userdata;
 
 /**
  * Port of ldblib.c (the debug library). The functions that take an
  * optional thread first work on that thread's CallInfo chain.
+ *
+ * @internal
  */
 final class DebugLib
 {
@@ -323,8 +324,8 @@ final class DebugLib
     private static function debug(Coroutine $L, array $args): array
     {
         while (true) {
-            Standalone::flushStdout();
-            fwrite(STDERR, 'lua_debug> ');  // lua_writestringerror
+            $L->globalState->flushOutput();
+            $L->globalState->writeErrorOutput('lua_debug> ');  // lua_writestringerror
             $line = @fgets(STDIN, 250);  // C: fgets(buffer, 250, stdin)
             if ($line === false || $line === "cont\n") {
                 return [];
@@ -339,8 +340,8 @@ final class DebugLib
             }
             if ($status !== Lua::LUA_OK) {
                 $message = DebugInfo::cString(Auxiliary::toLString($L, $value));
-                Standalone::flushStdout();
-                fwrite(STDERR, "$message\n");
+                $L->globalState->flushOutput();
+                $L->globalState->writeErrorOutput("$message\n");
             }
         }
     }

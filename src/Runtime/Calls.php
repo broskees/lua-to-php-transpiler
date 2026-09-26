@@ -14,6 +14,8 @@ namespace LuaPhp\Runtime;
  * another Lua function; whoever called it finishes that with
  * finishTailCall(), so tail calls do not grow the PHP stack. Native
  * functions are called through callNative(), which gives them a CallInfo.
+ *
+ * @internal
  */
 final class Calls
 {
@@ -70,6 +72,48 @@ final class Calls
         $L->stackLimit = Lua::ERRORSTACKSIZE;
         $L->frameBytesLimit = $L->globalState->frameBudget + self::errorExtraFrameBytes($L->globalState->frameBudget);
         DebugInfo::runError($L, 'stack overflow');
+    }
+
+    /**
+     * The Lua call levels a thread may add beyond GlobalState::$callDepthLimit
+     * while it handles a stack overflow (as C's stack grows by the 200
+     * slots of ERRORSTACKSIZE - LUAI_MAXSTACK)
+     */
+    public const ERROR_EXTRA_DEPTH = 50;
+
+    /**
+     * A call to a function compiled with step counting would make the
+     * thread $depth Lua levels deep, beyond GlobalState::$callDepthLimit:
+     * Lua's "stack overflow", as when the stack is full, with
+     * ERROR_EXTRA_DEPTH more levels while the thread handles it (then
+     * "error in error handling").
+     */
+    public static function callDepthOverflow(Coroutine $L, int $depth): void
+    {
+        if ($L->stackLimit > Lua::LUAI_MAXSTACK) {  // handling a stack overflow already
+            if ($depth <= $L->globalState->callDepthLimit + self::ERROR_EXTRA_DEPTH) {
+                return;
+            }
+            self::errorInErrorHandling();
+        }
+        self::stackOverflow($L);
+    }
+
+    /**
+     * The Lua call levels at and below $ci (CallInfo::$depth): its own for
+     * a frame of code compiled with step counting, those of the Lua frame
+     * below for a native one (a native frame counts no level and stores
+     * none: native calls stay as cheap as they were), 0 at a thread's base.
+     */
+    public static function luaDepth(CallInfo $ci): int
+    {
+        while (($ci->callstatus & Lua::CIST_C) !== 0) {
+            $ci = $ci->previous;
+            if ($ci === null) {
+                return 0;  // a thread's base
+            }
+        }
+        return $ci->depth;
     }
 
     /** ldo.c: luaD_errerr */
@@ -547,7 +591,8 @@ final class Calls
     public static function shrinkStack(Coroutine $L): void
     {
         $frameBudget = $L->globalState->frameBudget;
-        if ($L->stackLimit > Lua::LUAI_MAXSTACK && $L->ci->top <= Lua::LUAI_MAXSTACK && $L->ci->frameBytes <= $frameBudget) {
+        if ($L->stackLimit > Lua::LUAI_MAXSTACK && $L->ci->top <= Lua::LUAI_MAXSTACK && $L->ci->frameBytes <= $frameBudget
+            && self::luaDepth($L->ci) <= $L->globalState->callDepthLimit) {
             $L->stackLimit = Lua::LUAI_MAXSTACK;
             $L->frameBytesLimit = $frameBudget;
         }

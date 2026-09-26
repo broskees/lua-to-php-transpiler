@@ -14,6 +14,8 @@ namespace LuaPhp\Runtime;
  * reference. All closures that capture the same variable share one UpVal
  * object (lfunc.c: luaF_findupval), so object identity is the upvalue's
  * identity (debug.upvalueid).
+ *
+ * @internal
  */
 final class UpVal
 {

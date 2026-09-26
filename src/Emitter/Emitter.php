@@ -21,6 +21,8 @@ use LuaPhp\Compiler\Proto;
  *
  * See FunctionEmitter for the shape of one function and AGENTS.md
  * ("Runtime conventions") for the conventions the code follows.
+ *
+ * @internal
  */
 final class Emitter
 {
@@ -60,12 +62,18 @@ final class Emitter
      */
     public const INLINE_WEIGHT_MAXIMUM = 4096;
 
-    /** PHP source of the factory expression for the chunk whose main function is $main */
-    public static function emitChunk(Proto $main): string
+    /**
+     * PHP source of the factory expression for the chunk whose main
+     * function is $main. With $countSteps (code for an embedded state) the
+     * functions charge steps to the state's budget and count call levels
+     * (see FunctionEmitter::$countSteps); without it the code is the same
+     * as ever, and costs nothing more.
+     */
+    public static function emitChunk(Proto $main, bool $countSteps = false): string
     {
         $protoDeclarations = '';
         $emitters = [];
-        self::createEmitters($main, '0', $protoDeclarations, $emitters);
+        self::createEmitters($main, '0', $protoDeclarations, $emitters, $countSteps);
         $inlineWeight = 0;
         $weightsOutsideLoops = [];
         foreach ($emitters as $index => $emitter) {
@@ -99,15 +107,15 @@ final class Emitter
      *
      * @param list<FunctionEmitter> $emitters
      */
-    private static function createEmitters(Proto $proto, string $path, string &$protoDeclarations, array &$emitters): void
+    private static function createEmitters(Proto $proto, string $path, string &$protoDeclarations, array &$emitters, bool $countSteps): void
     {
         foreach ($proto->p as $childIndex => $child) {
             $childPath = $path . '_' . $childIndex;
             $protoDeclarations .= '    $proto_' . $childPath . ' = $proto_' . $path . '->p[' . $childIndex . "];\n";
         }
         foreach ($proto->p as $childIndex => $child) {
-            self::createEmitters($child, $path . '_' . $childIndex, $protoDeclarations, $emitters);
+            self::createEmitters($child, $path . '_' . $childIndex, $protoDeclarations, $emitters, $countSteps);
         }
-        $emitters[] = new FunctionEmitter($proto, $path);
+        $emitters[] = new FunctionEmitter($proto, $path, $countSteps);
     }
 }

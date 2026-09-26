@@ -39,6 +39,8 @@ namespace LuaPhp\Runtime;
  * OP_SETLIST set it like the array part of a constructor, and length()
  * updates it as a hint, so '#' matches lua5.4 for tables built by
  * constructors and is O(1) for the usual append/pop patterns.
+ *
+ * @internal
  */
 final class LuaTable
 {

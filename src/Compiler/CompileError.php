@@ -9,6 +9,8 @@ namespace LuaPhp\Compiler;
  * The message is exactly Lua's (e.g. `[string "x = +"]:1: unexpected symbol
  * near '+'` or `binary string: bad binary format (truncated chunk)`), ready
  * for load() to return as `nil, msg`.
+ *
+ * @internal
  */
 final class CompileError extends \RuntimeException
 {

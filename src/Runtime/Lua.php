@@ -7,6 +7,8 @@ namespace LuaPhp\Runtime;
 /**
  * Constants from lua.h, luaconf.h, llimits.h and lstate.h, under their C
  * names so C code ports mechanically.
+ *
+ * @internal
  */
 final class Lua
 {

@@ -7,6 +7,8 @@ namespace LuaPhp\Compiler;
 /**
  * Description of a pending goto or a label; mirrors C 'Labeldesc' in
  * lparser.h.
+ *
+ * @internal
  */
 final class Labeldesc
 {

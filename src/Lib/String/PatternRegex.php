@@ -52,6 +52,8 @@ namespace LuaPhp\Lib\String;
  * tests/fuzz/patterns.php checks all this against lua5.4 and against the
  * port (MatchState::$forcePort); tests/diff/string_pattern_corpus.lua
  * replays a fixed-seed corpus of its cases.
+ *
+ * @internal
  */
 final class PatternRegex
 {

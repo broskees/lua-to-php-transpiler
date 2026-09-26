@@ -7,6 +7,8 @@ namespace LuaPhp\Runtime;
 /**
  * Value helpers from lobject.c/lobject.h and lapi.c: type tags, type
  * names, number-to-string conversion and object "addresses".
+ *
+ * @internal
  */
 final class LuaObject
 {

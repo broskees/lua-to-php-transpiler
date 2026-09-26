@@ -7,6 +7,8 @@ namespace LuaPhp\Compiler;
 /**
  * One variable in the left-hand side of an assignment, chained to the
  * previous ones; mirrors C 'struct LHS_assign' in lparser.c.
+ *
+ * @internal
  */
 final class LhsAssign
 {

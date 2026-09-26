@@ -32,6 +32,8 @@ use LuaPhp\Lib\Io\Errno;
  * transpiled ahead of time: loadFile never reads a Lua file, it includes
  * the PHP bin/lua2php generated where the Lua file would be
  * (precompiledFileName), see loadPrecompiled.
+ *
+ * @internal
  */
 final class ChunkLoader
 {
@@ -72,13 +74,15 @@ final class ChunkLoader
         [$status, $result] = Calls::protectedRun($L, static function () use ($L, $chunk, $chunkname, $mode): LuaClosure {
             $isBinary = $chunk !== '' && $chunk[0] === Undump::LUA_SIGNATURE[0];
             self::checkMode($mode, $isBinary ? 'binary' : 'text');
-            $key = LoadCache::key($chunk, $chunkname);
+            $countSteps = $L->globalState->countSteps;
+            $key = LoadCache::key($chunk, $chunkname, $countSteps);
             $cached = LoadCache::find($key, $L->nCcalls);
             if ($cached !== null) {
                 [$protos, $factory] = $cached;
                 // fresh Protos, as a compile (one string per contents) or an undump makes
                 return self::instantiate(Undump::undump($protos ?? $chunk, $chunkname, !$isBinary), $factory);
             }
+            $L->globalState->budget?->chargeSteps(\strlen($chunk));  // (compiling costs more than a step per byte)
             $nesting = 0;
             try {
                 $proto = $isBinary
@@ -92,7 +96,7 @@ final class ChunkLoader
                 };
                 throw new LuaError($error->getMessage(), $status);
             }
-            $factorySource = Emitter::emitChunk($proto);
+            $factorySource = Emitter::emitChunk($proto, $countSteps);
             $factory = self::factoryForSource($factorySource);
             LoadCache::store($key, $isBinary ? null : Dump::dump($proto, false), $nesting, $factory, $factorySource);
             return self::instantiate($proto, $factory);

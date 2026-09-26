@@ -66,10 +66,16 @@ final class LoadCache
         self::$memory = [];
     }
 
-    /** the key of $chunk loaded with chunk name $chunkname */
-    public static function key(string $chunk, string $chunkname): string
+    /**
+     * the key of $chunk loaded with chunk name $chunkname, compiled with
+     * step counting or not (Emitter::emitChunk)
+     */
+    public static function key(string $chunk, string $chunkname, bool $countSteps = false): string
     {
         $context = hash_init('sha256');  // in pieces: load(s) names the chunk s, which may be big
+        if ($countSteps) {
+            hash_update($context, 'steps:');
+        }
         hash_update($context, \strlen($chunkname) . ':');
         hash_update($context, $chunkname);
         hash_update($context, $chunk);
