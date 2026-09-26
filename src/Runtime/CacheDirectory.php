@@ -8,8 +8,6 @@ use LuaPhp\Emitter\Emitter;
 use LuaPhp\Emitter\PhpLiteral;
 
 /**
- * @internal
- *
  * A directory of compiled chunks on disk, shared by load()'s byte cache
  * (LoadCache) and the embedding API's compile cache (Embed\Internal\
  * CompileCache): one generated PHP file per chunk, loaded with include,
@@ -42,6 +40,8 @@ use LuaPhp\Emitter\PhpLiteral;
  *   bytes written since the directory was last emptied. A write that would
  *   pass the entry or byte limit empties the directory first; an entry
  *   bigger than the byte limit is not written.
+ *
+ * @internal
  */
 final class CacheDirectory
 {

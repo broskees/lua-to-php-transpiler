@@ -284,6 +284,7 @@ final class Coroutine
      */
     private function start(array $arguments): mixed
     {
+        $this->globalState->budget?->reserveMemory(Budget::FIBER_BYTES);  // (between two step checks, many fibers may start)
         $body = $this->body;
         $this->body = null;
         // one PHP closure for all fibers: PHP makes a new closure object
@@ -298,9 +299,10 @@ final class Coroutine
             return Calls::callNonLua($L, $body, $arguments);
         });
         // read when a fiber starts; every fiber the runtime starts sets its own
-        // size. Hosts may disable ini_set: fibers then get the host's size
+        // size. Hosts may disable ini_set, and embedded states leave it alone
+        // (GlobalState::$setsFiberStackSize): fibers then get the host's size
         // (PHP's default is 2 MB: the same memory, but 2 MB of address space)
-        if (\function_exists('ini_set')) {
+        if ($this->globalState->setsFiberStackSize && \function_exists('ini_set')) {
             ini_set('fiber.stack_size', (string) self::FIBER_STACK_BYTES);
         }
         $triedAgain = false;

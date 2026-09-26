@@ -369,3 +369,29 @@ function test_run_context(): void
     assertSame('steps to charge must be at least 0', assertThrows(\InvalidArgumentException::class,
         static fn () => $environment->newSandbox()->load('require("negative").charge()')->call()));
 }
+
+function test_php_warnings_while_lua_runs_are_exceptions(): void
+{
+    $sandbox = (new Environment())->newSandbox();
+    $sandbox->setGlobal('warns', static fn (): int => \intdiv(1, 1) + (int) file_get_contents('/no/such/file'));
+    $hostHandlerCalls = 0;
+    set_error_handler(static function () use (&$hostHandlerCalls): bool {
+        $hostHandlerCalls++;
+        return true;
+    });
+    ob_start();
+    try {
+        $message = assertThrows(\ErrorException::class, static fn () => $sandbox->load('return pcall(warns)')->call());
+        $echoed = ob_get_contents();
+        // (outside a run the host's handler is back)
+        @trigger_error('host warning', E_USER_WARNING);
+        trigger_error('host warning', E_USER_WARNING);
+    } finally {
+        ob_end_clean();
+        restore_error_handler();
+    }
+    assertTrue(str_contains($message, 'Failed to open stream'), $message);
+    assertSame('', $echoed);
+    assertSame(2, $hostHandlerCalls, 'the host handler saw only its own warnings');
+    assertTrue($sandbox->isClosed(), 'it stopped the run');
+}

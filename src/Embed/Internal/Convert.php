@@ -14,8 +14,6 @@ use LuaPhp\Runtime\LuaTable as RuntimeTable;
 use LuaPhp\Runtime\NativeFunction;
 
 /**
- * @internal
- *
  * Values between PHP and Lua.
  *
  * PHP -> Lua (toLua): null, booleans, integers, floats and strings as they
@@ -34,6 +32,8 @@ use LuaPhp\Runtime\NativeFunction;
  * apart), that contains itself or is nested deeper than MAX_DEPTH is a
  * ConversionError. Functions become LuaFunction handles, threads and
  * userdata LuaValue handles. Paths use Lua keys: "result[1].tags[3]".
+ *
+ * @internal
  */
 final class Convert
 {

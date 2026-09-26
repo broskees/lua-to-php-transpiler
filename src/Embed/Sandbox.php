@@ -66,18 +66,18 @@ final class Sandbox
 
     /**
      * Runs script $name of the Environment's loader with $args (the
-     * script's "..."). Its return values come back in the Result.
+     * script's "..."), within the Limits. Its return values, what it
+     * printed (with the default sink) and what it used come back in the
+     * Result. (Calls through handles return only values: what they print
+     * goes to a host's sink, or is dropped by the default one.)
      *
      * @param list<mixed> $args
      */
     public function run(string $name, array $args = []): Result
     {
         $this->state->ensureOpen();
-        $function = $this->state->compile($this->state->source($name));
-        $start = hrtime(true);
-        $values = $this->state->callWithPhpValues($function, $args);
-        // TODO(runtime lane): output from the sink, usage from the Budget
-        return new Result($values, '', new Usage(0, 0, (hrtime(true) - $start) / 1e6, 0));
+        [$values, $output, $usage] = $this->state->run($this->state->source($name), $args);
+        return new Result($values, $output, $usage);
     }
 
     /** closes the sandbox: it and its handles cannot be used any more */

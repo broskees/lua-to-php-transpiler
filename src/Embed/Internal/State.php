@@ -5,45 +5,65 @@ declare(strict_types=1);
 namespace LuaPhp\Embed\Internal;
 
 use LuaPhp\Embed\ConversionError;
+use LuaPhp\Embed\LimitExceeded;
+use LuaPhp\Embed\Libraries;
+use LuaPhp\Embed\Limits;
 use LuaPhp\Embed\Loader\Loader;
 use LuaPhp\Embed\Loader\Source;
 use LuaPhp\Embed\RunContext;
 use LuaPhp\Embed\RuntimeError;
 use LuaPhp\Embed\SandboxClosed;
 use LuaPhp\Embed\ScriptError;
+use LuaPhp\Embed\Usage;
+use LuaPhp\Lib\PackageLib;
 use LuaPhp\Lib\StandardLibraries;
 use LuaPhp\Runtime\Auxiliary;
+use LuaPhp\Runtime\Budget;
 use LuaPhp\Runtime\Calls;
 use LuaPhp\Runtime\Coroutine;
+use LuaPhp\Runtime\Gc\Collector;
+use LuaPhp\Runtime\LimitReached;
 use LuaPhp\Runtime\Lua;
 use LuaPhp\Runtime\LuaClosure;
 use LuaPhp\Runtime\LuaError;
 use LuaPhp\Runtime\LuaObject;
 use LuaPhp\Runtime\LuaTable as RuntimeTable;
 use LuaPhp\Runtime\NativeFunction;
+use LuaPhp\Runtime\PhpErrors;
 
 /**
- * @internal
- *
  * One sandbox's Lua state (Sandbox is its public face; handles and PHP
  * functions hold this).
  *
- * Calls into Lua (call, compile) run on the thread that is running this
- * sandbox's Lua code when a PHP function called from it calls back
- * (runningThread), else on the main thread, as protected calls whose
- * message handler takes the traceback. A Lua error there is a
- * RuntimeError; any other exception stops the sandbox (it is closed, and
- * the exception goes on unchanged: no pcall, message handler or '__close'
- * sees it, as none catches it) and so does a LimitExceeded.
+ * The state: the Environment's libraries (openSelected; sandboxed unless
+ * Libraries::ALL), require from host modules and the loader, the
+ * Environment's CompileCache as its chunk cache, one Sink for standard
+ * output and error, code compiled with step counting when the limits need
+ * it, a Budget from the Limits (memoryBytes at most what memory_limit
+ * leaves when the sandbox is created), and no ini_set for fibers.
+ *
+ * Calls into Lua run through enter(): PHP's warnings are exceptions
+ * meanwhile (PhpErrors), a LimitReached becomes LimitExceeded, and any
+ * exception that is not a Lua error stops the sandbox: it is closed and
+ * abandoned (no more '__gc' or '__close'), and the exception goes on
+ * unchanged. A call from PHP outside any run of this sandbox starts a run
+ * (startRun: the budget, the output collected); a call from a PHP function
+ * the run called is part of that run. Lua code runs on the thread whose
+ * Lua code called the PHP function running now (runningThread), else on
+ * the main thread, as protected calls whose message handler takes the
+ * traceback; a Lua error there is a RuntimeError.
  *
  * PHP functions called from Lua run through callHost: a ScriptError is a
  * Lua error; a RuntimeError of this sandbox that a PHP function let
  * through goes on as the Lua error it was (as lua_call's would); anything
- * else stops the run.
+ * else stops the run; afterwards time and memory are checked (its time
+ * counts).
  *
  * Handles register their values in a table the collector marks
  * ($G->libraryState), as luaL_ref would, so a value PHP holds stays alive
  * for Lua too (weak tables, finalizers).
+ *
+ * @internal
  */
 final class State
 {
@@ -58,6 +78,16 @@ final class State
     public ?\Throwable $stoppedBy = null;
 
     public bool $closed = false;
+
+    private readonly ?Budget $budget;
+
+    private readonly Sink $sink;
+
+    /** calls into Lua running now (a PHP function a run called may call in again) */
+    private int $depth = 0;
+
+    /** hrtime(true) when the current run started */
+    private int $runStart = 0;
 
     /** handle number => value (see anchor) */
     private ?RuntimeTable $anchors;
@@ -74,6 +104,7 @@ final class State
      * @param array<string, array<mixed>|\Closure> $modules
      * @param array<string, mixed> $globals
      * @param list<string> $libraries
+     * @param ?\Closure(string): void $output the host's output sink, or null to collect
      * @param array<string, mixed> $context
      */
     public function __construct(
@@ -83,22 +114,47 @@ final class State
         array $globals,
         array $libraries,
         bool $allowLoad,
-        private readonly bool $countSteps,
+        Limits $limits,
+        bool $countSteps,
+        ?\Closure $output,
         array $context,
     ) {
         $this->raisedErrors = new \WeakMap();
         $this->hostFunctions = new \WeakMap();
         $this->context = new RunContext($context, $this);
+        $this->sink = new Sink($output);
         $L = Coroutine::newState();
         $this->L = $L;
-        // TODO(runtime lane): StandardLibraries::openSelected($L, $libraries, sandboxed: $libraries !== Libraries::ALL, allowLoad: $allowLoad)
-        StandardLibraries::openAll($L);
+        $G = $L->globalState;
+        $G->setsFiberStackSize = false;
+        $G->chunkCache = $cache;
+        $G->countSteps = $countSteps;
+        $G->output = $this->sink;
+        $G->errorOutput = $this->sink;
+        PhpErrors::call(static fn () => StandardLibraries::openSelected($L, $libraries, $libraries !== Libraries::ALL, $allowLoad));
         $this->anchors = new RuntimeTable();
-        $L->globalState->libraryState['embed.handles'] = $this->anchors;
-        $this->openRequire($L);
-        foreach ($globals as $name => $value) {
-            $L->globalState->globals->set($name, Convert::toLua($value, $name, $this));
+        $G->libraryState['embed.handles'] = $this->anchors;
+        if (\in_array('package', $libraries, true)) {
+            $this->openRequire($L, $libraries !== Libraries::ALL);
         }
+        foreach ($globals as $name => $value) {
+            $G->globals->set($name, Convert::toLua($value, $name, $this));
+        }
+        $this->budget = self::budgetFor($limits);
+        if ($this->budget !== null) {
+            $G->setBudget($this->budget);
+        }
+    }
+
+    /** the Budget of $limits (none: no limit at all); its memory never more than what memory_limit leaves */
+    private static function budgetFor(Limits $limits): ?Budget
+    {
+        if ($limits == Limits::none()) {
+            return null;
+        }
+        $budget = new Budget($limits->steps, $limits->memoryBytes, $limits->seconds, $limits->outputBytes, $limits->coroutines, $limits->callDepth);
+        $budget->hostMemoryIsLimit = true;
+        return $budget;
     }
 
     public function ensureOpen(): void
@@ -115,8 +171,10 @@ final class State
     /** closes the sandbox: no more Lua code runs in it (pending '__gc' finalizers are skipped) */
     public function close(): void
     {
+        if ($this->L !== null) {
+            Collector::abandonState($this->L->globalState);
+        }
         $this->closed = true;
-        // TODO(runtime lane): abandon the state without running Lua code
         $this->L = null;
         $this->anchors = null;
     }
@@ -124,7 +182,7 @@ final class State
     /** counts $steps against the run's step limit */
     public function chargeSteps(int $steps): void
     {
-        // TODO(runtime lane): $this->L->globalState->budget?->chargeSteps($steps)
+        $this->budget?->chargeSteps($steps);
     }
 
     /** the Source of script $name from the Environment's loader */
@@ -140,12 +198,31 @@ final class State
     public function compile(Source $source): LuaClosure
     {
         $this->ensureOpen();
-        $L = $this->runningThread ?? $this->L;
-        try {
-            return $this->enter(fn (): LuaClosure => $this->cache->load($L, $source, $this->countSteps));
-        } catch (LuaError $error) {
-            throw CompileCache::syntaxError($error, $source);
+        $this->startRun();
+        return $this->compileSource($source);
+    }
+
+    /**
+     * Runs $source with PHP values $arguments: [its results as PHP values,
+     * what it wrote to a collecting sink, what it used].
+     *
+     * @param array<mixed> $arguments
+     * @return array{list<mixed>, string, Usage}
+     */
+    public function run(Source $source, array $arguments): array
+    {
+        $this->ensureOpen();
+        $luaArguments = $this->argumentsToLua($arguments);
+        $this->startRun();
+        $outputStart = \strlen($this->sink->collected);
+        $results = $this->callLua($this->compileSource($source), $luaArguments);
+        $values = $this->resultsToPhp($results);
+        $output = substr($this->sink->collected, $outputStart);
+        $usage = $this->usage();
+        if ($this->depth === 0) {
+            $this->sink->collected = '';
         }
+        return [$values, $output, $usage];
     }
 
     /**
@@ -158,56 +235,13 @@ final class State
     public function callWithPhpValues(mixed $function, array $arguments): array
     {
         $this->ensureOpen();
-        if (!array_is_list($arguments)) {
-            throw new \InvalidArgumentException('Lua functions take a list of arguments (no names)');
-        }
-        $luaArguments = [];
-        foreach ($arguments as $index => $argument) {
-            $luaArguments[] = Convert::toLua($argument, "args[$index]", $this);
-        }
-        $values = [];
-        foreach ($this->call($function, $luaArguments) as $index => $result) {
-            $values[] = Convert::toPhp($result, 'result[' . ($index + 1) . ']', $this);
+        $luaArguments = $this->argumentsToLua($arguments);
+        $this->startRun();
+        $values = $this->resultsToPhp($this->callLua($function, $luaArguments));
+        if ($this->depth === 0) {
+            $this->sink->collected = '';  // (only runs return what they printed)
         }
         return $values;
-    }
-
-    /**
-     * Calls Lua value $function with Lua values $arguments in protected
-     * mode; returns its results, or throws the RuntimeError of the Lua
-     * error it raised.
-     *
-     * @param list<mixed> $arguments
-     * @return list<mixed>
-     */
-    public function call(mixed $function, array $arguments): array
-    {
-        $this->ensureOpen();
-        $L = $this->runningThread ?? $this->L;
-        $failure = null;  // [error value, message, traceback], from the message handler
-        $messageHandler = new NativeFunction('messageHandler', static function (Coroutine $L, array $args) use (&$failure): array {
-            $value = $args[0] ?? null;
-            $failure = [$value, self::errorMessage($L, $value), Auxiliary::traceback($L, $L, null, 1)];
-            return [$value];
-        });
-        [$status, $result] = $this->enter(static fn (): array => Calls::protectedCall($L, $function, $arguments, $messageHandler));
-        if ($status === Lua::LUA_OK) {
-            return $result;
-        }
-        if ($failure !== null && $failure[0] === $result) {
-            [, $message, $traceback] = $failure;
-        } else {  // no message handler ran (a memory error, an error in error handling)
-            $message = LuaObject::toStringCoerced($result) ?? '(error object is a ' . LuaObject::typeName($result) . ' value)';
-            $traceback = '';
-        }
-        try {
-            $value = Convert::toPhp($result, 'error', $this);
-        } catch (ConversionError) {
-            $value = Convert::toHandle($result, $this);
-        }
-        $error = new RuntimeError($message, $value, $traceback);
-        $this->raisedErrors[$error] = [$result, $status];
-        throw $error;
     }
 
     /**
@@ -237,6 +271,7 @@ final class State
         if ($this->closed) {  // it caught what stopped the run, or closed the sandbox: no more Lua code runs
             throw $this->stoppedBy ?? new SandboxClosed('the sandbox was closed while it ran');
         }
+        $this->budget?->checkLimits();  // (the time it took counts)
         return $result;
     }
 
@@ -264,22 +299,135 @@ final class State
         }
     }
 
+    /** a call from PHP outside any run of this sandbox starts one: the budget, the output collected */
+    private function startRun(): void
+    {
+        if ($this->depth > 0) {
+            return;  // (called back from a PHP function of the run: part of it)
+        }
+        $this->budget?->start();
+        $this->runStart = hrtime(true);
+        $this->sink->collected = '';
+        $this->sink->written = 0;
+    }
+
+    /** what the current run used (steps and memory are measured with limits only) */
+    private function usage(): Usage
+    {
+        if ($this->budget === null) {
+            return new Usage(0, 0, (hrtime(true) - $this->runStart) / 1e6, $this->sink->written);
+        }
+        $usage = $this->budget->usage();
+        return new Usage($usage['steps'], $usage['peakMemoryBytes'], $usage['milliseconds'], $usage['outputBytes']);
+    }
+
+    /** $source's main function (in the current run) */
+    private function compileSource(Source $source): LuaClosure
+    {
+        $L = $this->runningThread ?? $this->L;
+        try {
+            return $this->enter(static fn (): LuaClosure => CompileCache::load($L, $source));
+        } catch (LuaError $error) {
+            throw CompileCache::syntaxError($error, $source);
+        }
+    }
+
     /**
-     * Every call from PHP into this sandbox's Lua code: an exception that
-     * is not a Lua error stops the sandbox.
+     * @param array<mixed> $arguments
+     * @return list<mixed>
+     */
+    private function argumentsToLua(array $arguments): array
+    {
+        if (!array_is_list($arguments)) {
+            throw new \InvalidArgumentException('Lua functions take a list of arguments (no names)');
+        }
+        $luaArguments = [];
+        foreach ($arguments as $index => $argument) {
+            $luaArguments[] = Convert::toLua($argument, "args[$index]", $this);
+        }
+        return $luaArguments;
+    }
+
+    /**
+     * @param list<mixed> $results
+     * @return list<mixed>
+     */
+    private function resultsToPhp(array $results): array
+    {
+        $values = [];
+        foreach ($results as $index => $result) {
+            $values[] = Convert::toPhp($result, 'result[' . ($index + 1) . ']', $this);
+        }
+        return $values;
+    }
+
+    /**
+     * Calls Lua value $function with Lua values $arguments in protected
+     * mode; returns its results, or throws the RuntimeError of the Lua
+     * error it raised.
+     *
+     * @param list<mixed> $arguments
+     * @return list<mixed>
+     */
+    private function callLua(mixed $function, array $arguments): array
+    {
+        $L = $this->runningThread ?? $this->L;
+        $failure = null;  // [error value, message, traceback], from the message handler
+        $messageHandler = new NativeFunction('messageHandler', static function (Coroutine $L, array $args) use (&$failure): array {
+            $value = $args[0] ?? null;
+            $failure = [$value, self::errorMessage($L, $value), Auxiliary::traceback($L, $L, null, 1)];
+            return [$value];
+        });
+        [$status, $result] = $this->enter(static fn (): array => Calls::protectedCall($L, $function, $arguments, $messageHandler));
+        if ($status === Lua::LUA_OK) {
+            return $result;
+        }
+        if ($failure !== null && $failure[0] === $result) {
+            [, $message, $traceback] = $failure;
+        } else {  // no message handler ran (a memory error, an error in error handling)
+            $message = LuaObject::toStringCoerced($result) ?? '(error object is a ' . LuaObject::typeName($result) . ' value)';
+            $traceback = '';
+        }
+        try {
+            $value = Convert::toPhp($result, 'error', $this);
+        } catch (ConversionError) {
+            $value = Convert::toHandle($result, $this);
+        }
+        $error = new RuntimeError($message, $value, $traceback);
+        $this->raisedErrors[$error] = [$result, $status];
+        throw $error;
+    }
+
+    /**
+     * Every call from PHP into this sandbox's Lua code: see the class
+     * comment.
      */
     private function enter(\Closure $body): mixed
     {
-        // TODO(runtime lane): PhpErrors::call($body); the Budget starts at a call from outside Lua
+        $this->depth++;
         try {
-            return $body();
+            return PhpErrors::call($body);
         } catch (LuaError $error) {
             throw $error;
+        } catch (LimitReached $reached) {
+            $exceeded = new LimitExceeded($reached->limit, $this->usage());
+            $this->stop($exceeded);
+            throw $exceeded;
         } catch (\Throwable $thrown) {
-            // TODO(runtime lane): LimitReached -> LimitExceeded with the Budget's usage
-            $this->stoppedBy ??= $thrown;
-            $this->closed = true;
+            $this->stop($thrown);
             throw $thrown;
+        } finally {
+            $this->depth--;
+        }
+    }
+
+    /** a run was stopped by $thrown: the sandbox is closed and runs no more Lua code */
+    private function stop(\Throwable $thrown): void
+    {
+        $this->stoppedBy ??= $thrown;
+        $this->closed = true;
+        if ($this->L !== null) {
+            Collector::abandonState($this->L->globalState);
         }
     }
 
@@ -298,20 +446,30 @@ final class State
      * require: host modules (Environment::addModule), then the loader's
      * "a/b.lua" and "a/b/init.lua" for require("a.b"), as loadlib.c's
      * searchers: a searcher returns [loader, loader data] or [null, what
-     * it tried].
+     * it tried]. In a sandbox they are all of require; with
+     * Libraries::ALL they come before package.searchers' own.
      */
-    private function openRequire(Coroutine $L): void
+    private function openRequire(Coroutine $L, bool $sandboxed): void
     {
         $searchers = [$this->hostModuleSearcher(...), $this->fileSearcher('.lua'), $this->fileSearcher('/init.lua')];
-        // TODO(runtime lane): PackageLib::openSandboxRequire($L, $searchers); until then, package.searchers
-        $table = new RuntimeTable(\count($searchers));
-        foreach ($searchers as $index => $searcher) {
-            $table->arr[$index + 1] = new NativeFunction('searcher', static function (Coroutine $L, array $args) use ($searcher): array {
+        if ($sandboxed) {
+            PackageLib::openSandboxRequire($L, $searchers);
+            return;
+        }
+        $table = $L->globalState->globals->hash['package']->hash['searchers'];
+        $all = [];
+        foreach ($searchers as $searcher) {
+            $all[] = new NativeFunction('searcher', static function (Coroutine $L, array $args) use ($searcher): array {
                 [$loader, $data] = $searcher($L, Auxiliary::checkString($L, $args, 1));
                 return $loader === null ? [$data] : [$loader, $data];
             });
         }
-        $L->globalState->globals->hash['package']->hash['searchers'] = $table;
+        for ($i = 1; ($standard = $table->get($i)) !== null; $i++) {
+            $all[] = $standard;
+        }
+        foreach ($all as $index => $searcher) {
+            $table->set($index + 1, $searcher);
+        }
     }
 
     /** @return array{?NativeFunction, string} */
@@ -343,7 +501,7 @@ final class State
             }
             $source = $this->loader->getSource($file);
             try {
-                $loader = $this->cache->load($L, $source, $this->countSteps);
+                $loader = CompileCache::load($L, $source);
             } catch (LuaError $error) {
                 // loadlib.c: checkload (luaL_error from a searcher: no position)
                 LuaError::raise("error loading module '$name' from file '$file':\n\t" . (LuaObject::toStringCoerced($error->value) ?? ''));

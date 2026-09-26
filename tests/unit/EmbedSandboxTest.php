@@ -25,13 +25,13 @@ use LuaPhp\Embed\SyntaxError;
  * changing the host PHP process.
  */
 
-/** the brief's discount script (its print is a comment until output sinks exist: same lines) */
+/** the brief's discount script */
 const LOYALTY = <<<'LUA'
     local orders = require("shop.orders")
     local cart = ...
 
     local recent = orders.recent(10)
-    -- print("checked " .. #recent .. " orders")
+    print("checked " .. #recent .. " orders")
 
     if #recent >= 5 then
       return { discount = cart.total * 0.10, reason = "loyal customer (" .. #recent .. " orders)" }
@@ -90,7 +90,10 @@ function test_the_brief_example(): void
     $orders = new OrderRepository();
     $result = runLoyalty(shop(), $orders);
     assertSame([['discount' => 18.0, 'reason' => 'loyal customer (5 orders)']], $result->values);
-    assertTrue($result->usage->milliseconds >= 0.0);
+    assertSame("checked 5 orders\n", $result->output);
+    assertSame(17, $result->usage->outputBytes);
+    assertTrue($result->usage->steps > 10 && $result->usage->steps < 1000, "steps: {$result->usage->steps}");
+    assertTrue($result->usage->milliseconds > 0.0 && $result->usage->peakMemoryBytes >= 0);
 
     $failures = [
         [[4 => 'local recent = orders.recent(500)'], 'discounts/loyalty.lua:4: orders.recent: limit must be 100 or less'],
@@ -370,15 +373,18 @@ function test_closing_a_sandbox(): void
 }
 
 /**
- * Creating an Environment or a Sandbox, loading and running code
- * (successes and failures) leave the host's output buffers, error and
- * exception handlers, settings and working directory as they were, and
- * echo nothing. (Printing and coroutines join once output sinks and
- * fiber settings are per sandbox.)
+ * The brief's test: the host opens two output buffers, installs its own
+ * error handler and sets memory_limit=128M; after several runs (printing,
+ * coroutines, and ones that fail: Lua errors, syntax errors, limits, a
+ * PHP exception), all three are unchanged and nothing was echoed. Nor did
+ * the exception handler, the other settings (fiber.stack_size included:
+ * coroutines use the host's) or the working directory change.
  */
 function test_runs_do_not_change_the_host_process(): void
 {
-    $settings = ['memory_limit', 'serialize_precision', 'zend.exception_ignore_args', 'error_reporting', 'display_errors', 'fiber.stack_size', 'precision'];
+    $settings = ['memory_limit', 'serialize_precision', 'zend.exception_ignore_args', 'error_reporting', 'display_errors', 'fiber.stack_size', 'precision', 'opcache.jit'];
+    $memoryLimit = ini_get('memory_limit');
+    assertTrue(ini_set('memory_limit', '128M') !== false);
     $before = array_map('ini_get', array_combine($settings, $settings));
     $hostErrorHandler = static fn (): bool => false;
     $hostExceptionHandler = static function (\Throwable $thrown): void {
@@ -387,47 +393,71 @@ function test_runs_do_not_change_the_host_process(): void
     set_exception_handler($hostExceptionHandler);
     $levels = ob_get_level();
     $workingDirectory = getcwd();
+    $outcomes = [];
     ob_start();
     ob_start();
     try {
         $environment = shop();
         $orders = new OrderRepository();
-        runLoyalty($environment, $orders);
         foreach ([
-            static fn () => runLoyalty(shop([4 => 'local recent = orders.recent(500)']), $orders),
-            static fn () => $environment->newSandbox()->load('x = = 1'),
-            static fn () => $environment->newSandbox()->load('local t = setmetatable({}, {__index = function (t, k) return k .. 1 end}) return t.x, #t, t[{}]')->call(),
-            static fn () => Lua::run('return string.format("%5.2f", 1/3), os.time{year = 2020, month = 1, day = 1}'),
-            static fn () => $environment->newSandbox()->load('return require("nope")')->call(),
-        ] as $run) {
+            'ok' => static fn () => runLoyalty($environment, $orders)->output,
+            'script error' => static fn () => runLoyalty(shop([4 => 'local recent = orders.recent(500)']), $orders),
+            'syntax' => static fn () => $environment->newSandbox()->load('x = = 1'),
+            'coroutines' => static fn () => $environment->newSandbox()->load(<<<'LUA'
+                local co = coroutine.wrap(function (...) print("in", ...) local x = coroutine.yield(1) print("got", x) return 3 end)
+                print(co("a"), co("b"))
+                local t = {} for i = 1, 50 do t[i] = coroutine.create(function () coroutine.yield() end) coroutine.resume(t[i]) end
+                warn("@on") warn("careful")
+                return select("#", t)
+                LUA)->call(),
+            'steps' => static fn () => $environment->newSandbox()->load('while true do end')->call(),
+            'output' => static fn () => $environment->newSandbox()->load('print(("x"):rep(2e6))')->call(),
+            'memory' => static fn () => $environment->newSandbox()->load('local s = ("x"):rep(1e9)')->call(),
+            'coroutine limit' => static fn () => $environment->newSandbox()->load('local t = {} for i = 1, 100000 do t[i] = coroutine.create(function() coroutine.yield() end) coroutine.resume(t[i]) end')->call(),
+            'print' => static fn () => Lua::run('print("from Lua::run") return string.format("%5.2f", 1/3), math.type(os.time{year = 2020, month = 1, day = 1})'),
+            'missing module' => static fn () => $environment->newSandbox()->load('return require("nope")')->call(),
+        ] as $label => $run) {
             try {
-                $run();
-            } catch (\Throwable) {
+                $outcomes[$label] = $run();
+            } catch (\Throwable $thrown) {
+                $outcomes[$label] = $thrown instanceof \LuaPhp\Embed\LimitExceeded ? 'limit ' . $thrown->limit : $thrown::class;
             }
         }
         $orders->failure = new \RuntimeException('host failure');
         try {
             runLoyalty($environment, $orders);
-        } catch (\RuntimeException) {
+        } catch (\RuntimeException $thrown) {
+            $outcomes['php exception'] = $thrown->getMessage();
         }
         $echoed = ob_get_contents();
         ob_end_clean();
         $echoedOuter = ob_get_contents();
         ob_end_clean();
     } finally {
+        while (ob_get_level() > $levels) {
+            ob_end_clean();
+        }
         $errorHandler = set_error_handler(null);
         restore_error_handler();
         restore_error_handler();
         $exceptionHandler = set_exception_handler(null);
         restore_exception_handler();
         restore_exception_handler();
+        $after = array_map('ini_get', array_combine($settings, $settings));
+        ini_set('memory_limit', $memoryLimit);
     }
-    assertSame('', $echoed);
+    assertSame([
+        'ok' => "checked 5 orders\n", 'script error' => RuntimeError::class, 'syntax' => SyntaxError::class, 'coroutines' => [1],
+        'steps' => 'limit steps', 'output' => 'limit output', 'memory' => 'limit memory', 'coroutine limit' => 'limit coroutines',
+        'print' => [' 0.33', 'integer'], 'missing module' => RuntimeError::class, 'php exception' => 'host failure',
+    ], $outcomes);
+    assertSame('', $echoed, 'nothing was echoed');
     assertSame('', $echoedOuter);
     assertSame($levels, ob_get_level());
     assertTrue($errorHandler === $hostErrorHandler, 'the host error handler is still installed');
     assertTrue($exceptionHandler === $hostExceptionHandler, 'the host exception handler is still installed');
-    assertSame($before, array_map('ini_get', array_combine($settings, $settings)));
+    assertSame($before, $after);
+    assertSame('128M', $after['memory_limit']);
     assertSame($workingDirectory, getcwd());
 }
 

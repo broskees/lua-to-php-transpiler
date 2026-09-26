@@ -5,8 +5,6 @@ declare(strict_types=1);
 namespace LuaPhp\Runtime;
 
 /**
- * @internal
- *
  * The byte cache of load() (ChunkLoader::load): compiled chunks by their
  * exact bytes and chunk name, so loading a chunk again compiles and emits
  * nothing. Two levels:
@@ -27,6 +25,8 @@ namespace LuaPhp\Runtime;
  * strings apart). A hit is used only if compiling at the current C-call
  * depth would succeed (ChunkLoader::nestingError); failed compiles are
  * never cached. The mode check ('t'/'b') is the caller's.
+ *
+ * @internal
  */
 final class LoadCache
 {

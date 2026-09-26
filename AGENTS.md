@@ -120,7 +120,8 @@ Lua string keys and integer keys distinct.
   frames of a suspended coroutine undo their own increments when they
   return, so a resume shifts nCcalls by the change of `nCcallsBase` and saved
   counts (protectedRun, closeProtected) are relative to it. Each fiber gets a
-  C stack of `Coroutine::FIBER_STACK_BYTES` = 256 KB of address space (only
+  C stack of `Coroutine::FIBER_STACK_BYTES` = 256 KB of address space
+  (embedded states keep the host's fiber.stack_size: Embedding conventions) (only
   touched pages cost memory: a suspended coroutine costs about 10 KB RSS,
   8.4 KB of it PHP's Fiber itself: C stack pages and the first page of its
   16 KB VM stack; all fibers share one PHP closure, `wrap` closures one
@@ -507,9 +508,9 @@ Lua string keys and integer keys distinct.
   (PHP's default 2 MB of address space instead of 256 KB: under all.lua's
   1.5 GB ulimit -v, gc.lua's 1000 live coroutines then end in "not enough
   memory").
-  `DisabledFunctionsTest` runs bin/lua, bin/lua2php and its output, and
-  the whole diff corpus (Lua2PhpTest too), under a typical shared host's
-  list.
+  `DisabledFunctionsTest` runs bin/lua, bin/lua2php and its output, the
+  whole diff corpus (Lua2PhpTest too) and a host of the embedding API,
+  under a typical shared host's list.
 - **Reference build.** lua5.4 is built with LUA_COMPAT_5_3: `__le` falls back
   to `not __lt(b, a)`, and math has pow, ldexp, frexp, cosh, sinh, tanh, log10,
   atan2. Its package.path/cpath defaults include the distribution's `/usr/`
@@ -609,7 +610,10 @@ counting existed, and a state without a budget charges nothing.
   reserve, after gc_collect_cycles (C's emergency collection: no
   finalizers) -> 'memory'. `MemoryLimit::reserve/grow/fits($bytes,
   $budget)`: over memoryBytes LimitReached('memory'), over the host's room
-  Lua's "not enough memory" as before. `checkLimits()` checks time and
+  Lua's "not enough memory" as before, unless `Budget::$hostMemoryIsLimit`
+  (embedded sandboxes): then the host's room is part of the memory limit,
+  checked as it is (so it follows the room as garbage is freed), and over
+  it is LimitReached('memory') too. `checkLimits()` checks time and
   memory now (host code, after a host function returns). `chargeSteps`,
   `chargeOutput`, `usage()` (steps, peakMemoryBytes, milliseconds,
   outputBytes).
@@ -642,7 +646,13 @@ counting existed, and a state without a budget charges nothing.
   WeakMap). At the limit, dead ones (`Coroutine::isDead`) stop counting,
   then gc_collect_cycles frees unreachable suspended ones, then
   LimitReached('coroutines'). One kept only by a weak table counts until a
-  Lua collection clears it.
+  Lua collection clears it. A first resume reserves `Budget::FIBER_BYTES`
+  (`reserveMemory`): a fiber's VM stack comes from PHP's heap, and a loop
+  can start a thousand fibers between two step checks. Embedded states set
+  `GlobalState::$setsFiberStackSize` false: no ini_set of fiber.stack_size
+  (it would change the host's own later fibers), so their fibers get the
+  host's size (PHP's default 2 MB of address space each: the coroutines
+  limit bounds it, 2 GB at 1000; touched pages are what cost memory).
 - **Isolation.** Per state: globals, registry, type metatables,
   package.loaded, math's random state, the '%p' long-string table
   (`GlobalState::$addressedLongStrings`), warnings, budget. Process-wide
@@ -661,6 +671,9 @@ counting existed, and a state without a budget charges nothing.
   dropped, never called, and the collector stops, so no `__gc` and no
   `__close` runs any more; PHP frees the rest (destructors never run Lua).
   A sandbox that is thrown away skips its pending finalizers.
+- **Chunk cache.** `GlobalState::$chunkCache` (a `ChunkCache`: find/store
+  with LoadCache's keys and entries): load() of an embedded state compiles
+  into its Environment's cache instead of LoadCache.
 
 **The public layer.** `LuaPhp\Embed` (src/Embed/) is the only public
 API: hosts run Lua inside a PHP app (a web request) through it. Nothing
@@ -668,37 +681,55 @@ public takes or returns a Coroutine, CallInfo, Proto or runtime LuaTable:
 handles wrap them. Its internals are `LuaPhp\Embed\Internal`.
 
 - **Shape.** `Environment` (once per process: loader, compile cache,
-  libraries, host modules and globals, limits) -> `Sandbox` (one Lua
-  state per run; `Embed\Internal\State` is its inside) -> `Result`
+  libraries, host modules and globals, limits, output) -> `Sandbox` (one
+  Lua state per run; `Embed\Internal\State` is its inside) -> `Result`
   (values, output, usage). `Environment::run` makes a sandbox and drops
   it (handles in the result keep it alive); `Lua::run` uses a default
   SAFE environment. Never call `Standalone::configurePhp` on this path:
   no ini_set, no handler or output buffer left behind, no echo.
-- **Calls into Lua** (`State::call`, `compile`) go through `State::enter`
-  and run on `State::$runningThread` (the thread whose Lua code called
+- **The state** (`State::__construct`): `openSelected` with the
+  Environment's `Libraries` (sandboxed unless exactly `Libraries::ALL`),
+  `openSandboxRequire` with the three searchers (with ALL: in front of
+  package.searchers), `$G->chunkCache` = the Environment's CompileCache,
+  `$G->countSteps` when `Limits::needStepCounting()` (steps, memory,
+  seconds or call depth set), `setsFiberStackSize` false, one `Sink` as
+  both `$output` and `$errorOutput` (collects per run for
+  `Result::$output`, or the host's callable/`StdoutSink`), and a Budget
+  from the Limits with `hostMemoryIsLimit` (none for `Limits::none()`:
+  nothing charged, Usage then has only time and output).
+- **Calls into Lua** (`State::compileSource`, `callLua`) go through
+  `State::enter`: `PhpErrors::call`, a `LimitReached` becomes
+  `LimitExceeded` with the Budget's usage, and any other exception but a
+  LuaError stops the sandbox (`stop`: closed, `abandonState`, `stoppedBy`)
+  and goes on unchanged: protectedRun and resume catch only LuaError and
+  PHP's C-stack \Error, and no emitted `finally` runs Lua, so no pcall,
+  handler or `__close` sees it. Later uses are `SandboxClosed` (previous:
+  that exception). A call from PHP outside any run (`State::$depth` 0)
+  starts one (`startRun`: `Budget::start`, the output collected so far
+  dropped); calls from a PHP function the run called are part of it. Lua
+  code runs on `State::$runningThread` (the thread whose Lua code called
   the PHP function running now) or the main thread, as protected calls
   whose message handler takes the traceback. A Lua error is a
   `RuntimeError` (luaMessage: string, number or tostring; value converted;
-  traceback: luaL_traceback at level 1); the sandbox stays usable. Any
-  other exception closes the sandbox (`stoppedBy`) and goes on unchanged:
-  protectedRun and resume catch only LuaError and PHP's C-stack \Error,
-  and no emitted `finally` runs Lua, so no pcall, handler or `__close`
-  sees it. Later uses are `SandboxClosed` (previous: that exception).
+  traceback: luaL_traceback at level 1); the sandbox stays usable.
 - **PHP functions** (`Internal\HostFunction`): a Closure's signature is
   read once (a WeakMap by Closure) into luaL_check* rules per parameter;
   `bind` makes the NativeFunction of one sandbox. Its body runs through
   `State::callHost`: ScriptError -> Lua error (message with luaL_error's
   position, or a value); a RuntimeError of the same sandbox the PHP code
   let through -> the Lua error it was (as lua_call); after the body, a
-  closed sandbox (it caught what stopped the run) rethrows. A result or
-  a ScriptError value that cannot convert is a host bug: it stops the run.
+  closed sandbox (it caught what stopped the run) rethrows, then
+  `Budget::checkLimits` (its time counts). Each call charges a step
+  (`State::chargeSteps`, as `RunContext::chargeSteps`). A result or a
+  ScriptError value that cannot convert is a host bug: it stops the run.
 - **Values** (`Internal\Convert`): see its class comment for the rules
   (lists 1..n <-> 0-based, raw contents, depth 100, paths). Paths use the
   keys of the side the value comes from. A handle registers its value in
   a table under `$G->libraryState['embed.handles']` (luaL_ref), so Lua's
   collector sees what PHP holds; its destructor only unsets that entry.
-- **Chunks** (`Internal\CompileCache`): text only (mode "t"), key =
-  chunk name + sha256 of the bytes + whether the code counts steps; in
+- **Chunks** (`Internal\CompileCache`, the states' `ChunkCache`): scripts,
+  modules and load() all go through `ChunkLoader::load` (mode "t"), keyed
+  by LoadCache::key (chunk name, bytes, whether the code counts steps); in
   memory per Environment, on disk in a `Runtime\CacheDirectory` (the same
   trust rules, entry format and bounds as load()'s LoadCache). Chunk names
   are "@" + the loader's name; `Sandbox::load` defaults to the code

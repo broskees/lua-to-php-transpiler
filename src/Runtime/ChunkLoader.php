@@ -15,15 +15,13 @@ use LuaPhp\Lib\Io\CFile;
 use LuaPhp\Lib\Io\Errno;
 
 /**
- * @internal
- *
  * Chunks -> Lua functions (lapi.c: lua_load, ldo.c: f_parser/checkmode,
  * lauxlib.c: luaL_loadfilex).
  *
  * load(): source text goes through Compiler::compile, binary chunks
  * through Undump::undump; the Proto is emitted as PHP and eval'd. A chunk
  * loaded before comes from LoadCache instead (by its bytes and chunk
- * name, in memory or on disk). PHP never frees eval'd code's runtime
+ * name, in memory or on disk), or from the state's own ChunkCache. PHP never frees eval'd code's runtime
  * caches, so factories are also cached by their PHP source: loading the
  * same code again reuses the compiled code.
  *
@@ -76,7 +74,8 @@ final class ChunkLoader
             self::checkMode($mode, $isBinary ? 'binary' : 'text');
             $countSteps = $L->globalState->countSteps;
             $key = LoadCache::key($chunk, $chunkname, $countSteps);
-            $cached = LoadCache::find($key, $L->nCcalls);
+            $cache = $L->globalState->chunkCache;  // (an embedded state's own, else LoadCache)
+            $cached = $cache === null ? LoadCache::find($key, $L->nCcalls) : $cache->find($key, $L->nCcalls);
             if ($cached !== null) {
                 [$protos, $factory] = $cached;
                 // fresh Protos, as a compile (one string per contents) or an undump makes
@@ -98,7 +97,12 @@ final class ChunkLoader
             }
             $factorySource = Emitter::emitChunk($proto, $countSteps);
             $factory = self::factoryForSource($factorySource);
-            LoadCache::store($key, $isBinary ? null : Dump::dump($proto, false), $nesting, $factory, $factorySource);
+            $protos = $isBinary ? null : Dump::dump($proto, false);
+            if ($cache === null) {
+                LoadCache::store($key, $protos, $nesting, $factory, $factorySource);
+            } else {
+                $cache->store($key, $protos, $nesting, $factory, $factorySource);
+            }
             return self::instantiate($proto, $factory);
         }, $L->errfunc);
         if ($status !== Lua::LUA_OK) {

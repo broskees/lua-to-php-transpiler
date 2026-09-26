@@ -76,6 +76,19 @@ final class Budget
     /** @var \WeakMap<Coroutine, true>|null the coroutines counted, while they exist */
     private ?\WeakMap $liveCoroutines = null;
 
+    /**
+     * The host's memory_limit is a limit too (an embedded sandbox: its
+     * memory is never more than what memory_limit leaves): memory that
+     * would not fit below it, less MemoryLimit's reserve, is
+     * LimitReached('memory') after a collection, not Lua's "not enough
+     * memory". Checked when memory is, so it follows the host's room as
+     * it changes (garbage of other states freed meanwhile included).
+     */
+    public bool $hostMemoryIsLimit = false;
+
+    /** what a coroutine's first resume allocates (its Fiber and the Fiber's VM stack), with room to spare */
+    public const FIBER_BYTES = 64 * 1024;
+
     public function __construct(
         public readonly ?int $steps = null,
         public readonly ?int $memoryBytes = null,
@@ -172,8 +185,10 @@ final class Budget
 
     /**
      * MemoryLimit::reserve with this budget: $bytes more may be allocated
-     * without passing memoryBytes, if need be after an emergency collection,
-     * else LimitReached('memory').
+     * without passing memoryBytes (or the host's room, see
+     * $hostMemoryIsLimit), if need be after an emergency collection, else
+     * LimitReached('memory'). Also before a coroutine's fiber is created
+     * (FIBER_BYTES): many of them can come between two step checks.
      */
     public function reserveMemory(int $bytes): void
     {
@@ -197,7 +212,8 @@ final class Budget
         if ($growth > $this->peakGrowth) {
             $this->peakGrowth = $growth;
         }
-        return $this->memoryBytes === null || $growth + $bytes <= $this->memoryBytes;
+        return ($this->memoryBytes === null || $growth + $bytes <= $this->memoryBytes)
+            && (!$this->hostMemoryIsLimit || MemoryLimit::fits($bytes));
     }
 
     /**

@@ -15,8 +15,6 @@ use LuaPhp\Runtime\LuaTable as RuntimeTable;
 use LuaPhp\Runtime\NativeFunction;
 
 /**
- * @internal
- *
  * A PHP Closure as a Lua function. Its signature is read once, the first
  * time the Closure is passed to Lua (registered), and kept as long as the
  * Closure lives. Each parameter takes its argument as lauxlib.c's
@@ -38,6 +36,8 @@ use LuaPhp\Runtime\NativeFunction;
  *
  * Results: a declared void (or never) returns no values, Lua::multiple()
  * several, anything else one value (null is nil, an array one table).
+ *
+ * @internal
  */
 final class HostFunction
 {

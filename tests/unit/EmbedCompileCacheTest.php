@@ -22,7 +22,8 @@ const DRIVER = <<<'PHP'
     declare(strict_types=1);
     require $argv[1] . '/src/autoload.php';
     [, , $root, $cacheDirectory, $mode] = $argv;
-    $environment = new LuaPhp\Embed\Environment(loader: new LuaPhp\Embed\Loader\FilesystemLoader($root), cacheDir: $cacheDirectory);
+    $limits = $mode === 'unlimited' ? LuaPhp\Embed\Limits::none() : new LuaPhp\Embed\Limits();
+    $environment = new LuaPhp\Embed\Environment(loader: new LuaPhp\Embed\Loader\FilesystemLoader($root), cacheDir: $cacheDirectory, limits: $limits);
     $environment->addGlobal('record', static function (string $what) use ($root): void {
         file_put_contents("$root/ran.txt", "$what\n", FILE_APPEND);
     });
@@ -87,6 +88,12 @@ function test_later_processes_include_what_was_compiled(): void
     [$status, $output] = drive($directory, $cache, guarded: true);
     assertSame([0, str_replace('42', '43', OUTPUT)], [$status, $output]);
     assertSame(5, \count(entries($cache)));
+    // code that counts steps (limits) and code that does not (Limits::none()) are cached apart
+    assertSame(97, drive($directory, $cache, guarded: true, mode: 'unlimited')[0]);
+    assertSame([0, str_replace('42', '43', OUTPUT)], \array_slice(drive($directory, $cache, mode: 'unlimited'), 0, 2));
+    assertSame(9, \count(entries($cache)));
+    assertSame(0, drive($directory, $cache, guarded: true, mode: 'unlimited')[0]);
+    assertSame(0, drive($directory, $cache, guarded: true)[0]);
 }
 
 function test_compiling_ahead_of_time(): void

@@ -11,7 +11,8 @@ use LuaPhp\Lib\Io\Errno;
  * ini_set, the process functions (proc_open and its family) and every
  * function of the posix and pcntl extensions. A disabled function is
  * undefined, so calling it would be a PHP fatal error no pcall sees.
- * bin/lua, bin/lua2php and lua2php output must run without them:
+ * bin/lua, bin/lua2php, lua2php output and hosts of the embedding API must
+ * run without them:
  * - without posix and pcntl (fallbacks), and without ini_set (PHP's own
  *   settings stay), programs behave as under lua5.4;
  * - without the process functions, os.execute and io.popen fail as C's
@@ -361,5 +362,39 @@ function test_the_strerror_table_is_glibcs(): void
 {
     for ($errno = 1; $errno <= 300; $errno++) {
         assertSame(posix_strerror($errno), Errno::glibcStrerror($errno), "errno $errno");
+    }
+}
+
+/** a host using the embedding API: files, a cache directory, limits, a module, coroutines, output, a stopped run */
+const EMBEDDING_HOST = <<<'PHP'
+    <?php
+    declare(strict_types=1);
+    require $argv[1] . '/src/autoload.php';
+    $root = $argv[2];
+    file_put_contents("$root/main.lua", 'local m = require("lib") local co = coroutine.wrap(function (x) coroutine.yield(x * 2) end) print(m.twice(co(21)), os.date("!%Y", 0)) return #m.list');
+    file_put_contents("$root/lib.lua", 'return {twice = function (x) return host.twice(x) end, list = host.list()}');
+    $environment = new LuaPhp\Embed\Environment(loader: new LuaPhp\Embed\Loader\FilesystemLoader($root), cacheDir: "$root/cache",
+        limits: new LuaPhp\Embed\Limits(steps: 100000, memoryBytes: 16 << 20, seconds: 5.0, outputBytes: 4096));
+    $environment->addGlobal('host', ['twice' => static fn (int $x): int => 2 * $x, 'list' => static fn (): array => [1, 2, 3]]);
+    foreach ([1, 2] as $pass) {  // cold, then from the cache
+        $result = $environment->run('main.lua');
+        echo json_encode([$result->values, $result->output]), "\n";
+    }
+    try {
+        $environment->newSandbox()->load('while true do end')->call();
+    } catch (LuaPhp\Embed\LimitExceeded $exceeded) {
+        echo $exceeded->limit, "\n";
+    }
+    PHP;
+
+function test_the_embedding_api_runs_on_a_shared_host(): void
+{
+    $expected = "[[3],\"84\\t1970\\n\"]\n[[3],\"84\\t1970\\n\"]\nsteps\n";
+    foreach (['plain' => [], 'shared host' => disabling(sharedHostDisabledFunctions()), 'no ini_set' => withoutIniSet()] as $label => $options) {
+        $directory = scratchDirectory() . '/embedding-host-' . str_replace(' ', '-', $label);
+        mkdir($directory);
+        file_put_contents("$directory/host.php", EMBEDDING_HOST);
+        assertSame([0, $expected, ''], runCommand(['php', ...$options, "$directory/host.php", REPO_ROOT, $directory]), $label);
+        assertTrue(glob("$directory/cache/*.php") !== [], "$label: the cache directory was used");
     }
 }

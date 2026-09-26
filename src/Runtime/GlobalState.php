@@ -118,6 +118,16 @@ final class GlobalState
     /** load() and the like compile with step counting (a state for embedded code) */
     public bool $countSteps = false;
 
+    /** where load() keeps compiled chunks (an embedding Environment's cache); null: LoadCache */
+    public ?ChunkCache $chunkCache = null;
+
+    /**
+     * Coroutine::start sets fiber.stack_size to Coroutine::FIBER_STACK_BYTES
+     * for each fiber; off in an embedded state, whose fibers get the host's
+     * setting (no ini_set: it would also change the host's own later fibers)
+     */
+    public bool $setsFiberStackSize = true;
+
     public function __construct()
     {
         $this->registry = new LuaTable();
