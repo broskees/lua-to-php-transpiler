@@ -15,12 +15,22 @@ namespace LuaPhp\Lib\Io;
 final class Errno
 {
     // errno.h (Linux)
-    public const EBADF = 9;
     public const ENOENT = 2;
+    public const EBADF = 9;
     public const ECHILD = 10;
+    public const EACCES = 13;
+    public const EXDEV = 18;
+    public const ENOTDIR = 20;
+    public const EISDIR = 21;
     public const EINVAL = 22;
     public const ESPIPE = 29;
-    public const EISDIR = 21;
+    public const ENAMETOOLONG = 36;
+    public const ELOOP = 40;
+
+    // Linux: limits.h PATH_MAX and NAME_MAX, fs/namei.c MAXSYMLINKS
+    private const PATH_MAX = 4096;
+    private const NAME_MAX = 255;
+    private const MAXSYMLINKS = 40;
 
     /** the last error, like C's global 'errno' (0: none) */
     public static int $errno = 0;
@@ -219,6 +229,74 @@ final class Errno
             }
         }
         return $found;
+    }
+
+    /**
+     * Why the kernel's lookup of $path for open(2) fails (Linux fs/namei.c:
+     * getname, link_path_walk, open_last_lookups; $create: O_CREAT), or
+     * null if the lookup succeeds. PHP resolves a path itself before its
+     * fopen or file_get_contents call open(2), and reports a failure there
+     * as ENOENT, or EINVAL for 4095 bytes or more (main/fopen_wrappers.c:
+     * expand_filepath); its caller walks the path's components here as the
+     * kernel does, to tell what C's fopen sets errno to.
+     */
+    public static function lookupError(string $path, bool $create): ?int
+    {
+        if (\strlen($path) >= self::PATH_MAX) {
+            return self::ENAMETOOLONG;
+        }
+        clearstatcache();  // (PHP remembers the last stat)
+        $directory = str_starts_with($path, '/') ? '/' : '.';
+        $mustBeDirectory = str_ends_with($path, '/');  // trailing slashes
+        $components = self::pathComponents($path);
+        $links = 0;
+        while ($components !== []) {
+            $name = array_shift($components);
+            $last = $components === [];
+            if (@stat("$directory/.") === false) {  // may_lookup: no search permission
+                return self::EACCES;
+            }
+            if ($last && $create && ($mustBeDirectory || $name === '.' || $name === '..')) {
+                return self::EISDIR;
+            }
+            if (\strlen($name) > self::NAME_MAX) {
+                return self::ENAMETOOLONG;
+            }
+            $entry = "$directory/$name";
+            $status = @lstat($entry);
+            if ($status === false) {
+                return ($last && $create) ? null : self::ENOENT;  // (O_CREAT creates it)
+            }
+            $type = $status['mode'] & 0170000;
+            if ($type === 0120000) {  // a symbolic link: follow it
+                if (++$links > self::MAXSYMLINKS) {
+                    return self::ELOOP;
+                }
+                $target = (string) @readlink($entry);
+                if ($target === '') {
+                    return self::ENOENT;
+                }
+                if (str_starts_with($target, '/')) {
+                    $directory = '/';
+                }
+                if ($last && str_ends_with($target, '/')) {
+                    $mustBeDirectory = true;
+                }
+                $components = [...self::pathComponents($target), ...$components];
+                continue;
+            }
+            if ($type !== 0040000 && (!$last || $mustBeDirectory)) {
+                return self::ENOTDIR;
+            }
+            $directory = $entry;
+        }
+        return null;
+    }
+
+    /** @return list<string> the names in $path between slashes */
+    private static function pathComponents(string $path): array
+    {
+        return array_values(array_filter(explode('/', $path), static fn (string $name): bool => $name !== ''));
     }
 
     /**

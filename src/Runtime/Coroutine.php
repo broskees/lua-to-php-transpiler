@@ -87,7 +87,7 @@ final class Coroutine
     public int $status = Lua::LUA_OK;
 
     // ldebug.c / ldo.c hook state (see Hooks; set with Hooks::setHook)
-    /** C: lua_Hook, a closure (Coroutine $L, int $event, int $line, CallInfo $ci): void */
+    /** C: lua_Hook, a closure (Coroutine $L, int $event, int $line, CallInfo $ci, int $top): void */
     public ?\Closure $hook = null;
     public int $hookmask = 0;
     public int $basehookcount = 0;

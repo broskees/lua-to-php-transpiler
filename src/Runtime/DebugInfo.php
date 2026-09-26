@@ -651,67 +651,142 @@ final class DebugInfo
             if ($name !== null) {
                 return $name;
             }
-            $limit = self::frameLimit($L, $ci);
-            return ($n > 0 && $n <= $limit) ? '(temporary)' : null;
         }
-        $limit = self::frameLimit($L, $ci);
-        return ($n > 0 && $n <= $limit) ? '(C temporary)' : null;
+        [$ownSlots, $above] = self::frameSlots($L, $ci);
+        if ($n > 0 && $n <= $ownSlots + \count($above)) {  // is 'n' inside 'ci' stack?
+            return $ci->func instanceof LuaClosure ? '(temporary)' : '(C temporary)';
+        }
+        return null;
     }
 
     /**
      * lapi.c: lua_getlocal's value (after findLocal found local $n): a
-     * register, a vararg (negative $n) or a native function's argument.
+     * register, a vararg (negative $n), a native function's argument, or a
+     * slot above the frame (see frameSlots).
      */
-    public static function localValue(CallInfo $ci, int $n): mixed
+    public static function localValue(Coroutine $L, CallInfo $ci, int $n): mixed
     {
         if ($n < 0) {
             return $ci->varargs[-$n - 1] ?? null;
+        }
+        [$ownSlots, $above] = self::frameSlots($L, $ci);
+        if ($n > $ownSlots) {
+            return $above[$n - $ownSlots - 1] ?? null;
         }
         return $ci->R[$n - 1] ?? null;
     }
 
     /**
      * lapi.c: lua_setlocal's store (after findLocal found local $n). Writes
-     * through $ci->R and $ci->varargs, which the running function uses.
+     * through $ci->R and $ci->varargs, which the running function uses, and
+     * to what the slots above the frame hold: the hook table's slot, a
+     * vararg callee's extra arguments (its fixed parameters and function
+     * there are dead copies in C: a store to them is dropped).
      */
-    public static function setLocalValue(CallInfo $ci, int $n, mixed $value): void
+    public static function setLocalValue(Coroutine $L, CallInfo $ci, int $n, mixed $value): void
     {
         if ($n < 0) {
             $ci->varargs[-$n - 1] = $value;
-        } else {
+            return;
+        }
+        [$ownSlots, $above, $next] = self::frameSlots($L, $ci);
+        if ($n <= $ownSlots || $above === []) {
             $ci->R[$n - 1] = $value;
+            return;
+        }
+        $slot = $n - $ownSlots - 1;  // in $above
+        $hookedFrames = self::hookedFrames();
+        if (isset($hookedFrames[$ci])) {
+            if ($slot === 0) {  // the hook table's slot
+                $hookedFrames[$ci] = [$hookedFrames[$ci][0], $value];
+                return;
+            }
+            $slot--;
+        }
+        $extra = $slot - 1 - $next->func->proto->numparams;  // after the function and its fixed parameters
+        if ($extra >= 0) {
+            $next->varargs[$extra] = $value;
         }
     }
 
     /**
-     * Number of valid stack slots of the frame in $ci (C: limit - base in
-     * luaG_findlocal): up to the called function for a suspended Lua frame,
-     * all registers for the running one or one running a hook (plus the
-     * results being returned, for a return hook).
+     * Frames a hook function runs on (see DebugLib::hookf): the frame's
+     * stack top when the hook was called (C: L->top - base, see
+     * Hooks::hook) and the hook table ldblib.c's hookf pushed above it.
+     *
+     * @var \WeakMap<CallInfo, array{int, mixed}>|null
      */
-    private static function frameLimit(Coroutine $L, CallInfo $ci): int
+    private static ?\WeakMap $hookedFrames = null;
+
+    /** @return \WeakMap<CallInfo, array{int, mixed}> */
+    public static function hookedFrames(): \WeakMap
     {
-        if ($ci->func instanceof LuaClosure) {
-            if ($ci->callstatus & Lua::CIST_HOOKED) {
-                $limit = $ci->func->proto->maxstacksize;
-                if ($ci->callstatus & Lua::CIST_TRAN) {
-                    $limit = max($limit, $L->ftransfer + $L->ntransfer - 1);
-                }
-                return $limit;
-            }
-            if ($ci !== $L->ci) {
-                $instruction = $ci->func->proto->code[$ci->savedpc];
-                $opcode = OpCodes::GET_OPCODE($instruction);
-                if ($opcode === OpCodes::OP_CALL || $opcode === OpCodes::OP_TAILCALL) {
-                    return OpCodes::GETARG_A($instruction);
-                }
-                if ($opcode === OpCodes::OP_TFORCALL) {
-                    return OpCodes::GETARG_A($instruction) + 4;
-                }
-            }
-            return $ci->func->proto->maxstacksize;
+        return self::$hookedFrames ??= new \WeakMap();
+    }
+
+    /**
+     * ldebug.c: luaG_findlocal's limit: the slots of $ci's frame
+     * debug.getlocal reaches (C: limit - base), as [$ownSlots, $above,
+     * $next]: slots 1 .. $ownSlots are the frame's own ($ci->R), the values
+     * in $above come after them, and $next is the frame running above (C:
+     * ci->next), if any. C's limit is L->top for the running frame, else
+     * the next frame's function, with what C's stack holds below it:
+     * - a Lua frame calls at A (OP_CALL, OP_TAILCALL), A + 4 (OP_TFORCALL),
+     *   runs a finalizer from the collection step after an allocation at
+     *   A + 1 (lvm.c: checkGC(L, ra + 1)), and a metamethod at its top
+     *   (Protect: L->top = ci->top);
+     * - a hook function runs above the hooked frame's stack top, with the
+     *   hook table below it (see hookedFrames);
+     * - a vararg Lua function moves its frame above its arguments (ltm.c:
+     *   luaT_adjustvarargs): the frame below then ends with the function,
+     *   its fixed parameters (erased) and its extra arguments.
+     * A native's frame is its argument list (and its results in a return
+     * hook); where it calls a function in C depends on how that native
+     * uses its stack.
+     *
+     * @return array{int, list<mixed>, ?CallInfo}
+     */
+    private static function frameSlots(Coroutine $L, CallInfo $ci): array
+    {
+        $next = null;
+        $frame = $L->ci;
+        while ($frame !== $ci && $frame !== null) {
+            $next = $frame;
+            $frame = $frame->previous;
         }
-        return \count($ci->R);
+        $function = $ci->func;
+        if ($next === null || $frame === null) {  // the running frame: up to L->top
+            return [$function instanceof LuaClosure ? $function->proto->maxstacksize : \count($ci->R), [], null];
+        }
+        $above = [];
+        $calleeSlotKnown = true;
+        $hookedFrames = self::hookedFrames();
+        if (isset($hookedFrames[$ci])) {
+            [$ownSlots, $above[]] = $hookedFrames[$ci];
+        } elseif ($function instanceof LuaClosure) {
+            $instruction = $function->proto->code[$ci->savedpc];
+            $a = OpCodes::GETARG_A($instruction);
+            $ownSlots = match (OpCodes::GET_OPCODE($instruction)) {
+                OpCodes::OP_CALL, OpCodes::OP_TAILCALL => $a,
+                OpCodes::OP_TFORCALL => $a + 4,
+                OpCodes::OP_NEWTABLE, OpCodes::OP_CONCAT, OpCodes::OP_CLOSURE => ($ci->callstatus & Lua::CIST_FIN) ? $a + 1 : $function->proto->maxstacksize,
+                default => $function->proto->maxstacksize,
+            };
+        } else {
+            $ownSlots = \count($ci->R);
+            $calleeSlotKnown = false;
+        }
+        $callee = $next->func;
+        if ($calleeSlotKnown && $callee instanceof LuaClosure && $callee->proto->is_vararg) {
+            $above[] = $callee;
+            for ($i = 0; $i < $callee->proto->numparams; $i++) {
+                $above[] = null;  // erased original parameter
+            }
+            foreach ($next->varargs as $value) {
+                $above[] = $value;
+            }
+        }
+        return [$ownSlots, $above, $next];
     }
 
     /* }====================================================== */

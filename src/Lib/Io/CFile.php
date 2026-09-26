@@ -126,6 +126,9 @@ final class CFile
         $stream = @fopen(self::plainPath($filename), $mode);
         if ($stream === false) {
             Errno::setFromPhpError(Errno::ENOENT);
+            if (Errno::$errno === Errno::ENOENT || Errno::$errno === Errno::EINVAL) {  // maybe PHP's own path lookup failed
+                Errno::$errno = Errno::lookupError($filename, $mode[0] !== 'r') ?? Errno::$errno;
+            }
             return null;
         }
         $update = str_contains($mode, '+');

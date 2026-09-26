@@ -182,7 +182,7 @@ final class DebugLib
         if ($name === null) {
             return [null];  // no name (nor value)
         }
-        return [$name, DebugInfo::localValue($ci, $n)];
+        return [$name, DebugInfo::localValue($L1, $ci, $n)];
     }
 
     /** ldblib.c: db_setlocal (lapi.c: lua_setlocal): the local's name, or nil */
@@ -199,7 +199,7 @@ final class DebugLib
         self::checkStack($L, $L1, 1);
         $name = DebugInfo::findLocal($L1, $ci, $n);
         if ($name !== null) {
-            DebugInfo::setLocalValue($ci, $n, $args[$arg + 2]);
+            DebugInfo::setLocalValue($L1, $ci, $n, $args[$arg + 2]);
         }
         return [$name];
     }
@@ -208,13 +208,20 @@ final class DebugLib
      * ldblib.c: hookf: the hook debug.sethook installs: call the Lua hook
      * function registered for the thread with the event name and the line
      * (nil for events other than "line", or without line information).
+     * C pushes the hook table, then the hook function, above the hooked
+     * frame's $top: while the function runs, debug.getlocal sees the table
+     * as that frame's last slot (DebugInfo::hookedFrames). An error leaves
+     * it there, as on C's stack.
      */
-    private static function hookf(Coroutine $L, int $event, int $line, CallInfo $ci): void
+    private static function hookf(Coroutine $L, int $event, int $line, CallInfo $ci, int $top): void
     {
         $hookTable = $L->globalState->registry->hash[self::HOOKKEY] ?? null;
         $hook = $hookTable instanceof LuaTable ? $hookTable->get($L) : null;
         if (self::isFunction($hook)) {  // is there a hook function?
+            $hookedFrames = DebugInfo::hookedFrames();
+            $hookedFrames[$ci] = [$top, $hookTable];
             Calls::callNoYield($L, $hook, [self::HOOK_NAMES[$event], $line >= 0 ? $line : null]);  // call hook function
+            unset($hookedFrames[$ci]);
         }
     }
 

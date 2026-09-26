@@ -284,6 +284,12 @@ Lua string keys and integer keys distinct.
   use `$ci->R[$reg]`; natives get their argument list), `varargs`,
   `openupval` (register => UpVal), `tbclist` (registers of pending `<close>`
   variables), `top`/`frameBytes` (stack limits). Return pops: `$L->ci = $ci->previous`.
+  debug.getlocal's "(temporary)" slots reach C's stack top
+  (`DebugInfo::frameSlots`, luaG_findlocal's limit: the next frame's
+  function, a vararg callee's moved frame, a finalizer's A + 1, the hook
+  table above a hooked frame). What C's shared stack holds beyond what a
+  frame wrote (earlier callees' leftovers, how a native uses its stack:
+  pcall's pushed `true`, select's results) would need an emulated stack.
 - **Errors.** `LuaError($value, $status)`. Raise with `DebugInfo::runError($L,
   $msg)` (luaG_runerror: adds "chunk:line:" of the running Lua function) or
   `Auxiliary::error($L, $msg)` (luaL_error: position of level 1). Natives
@@ -407,12 +413,15 @@ Lua string keys and integer keys distinct.
   `os.exit(x, true)`): close the main thread's tbc variables, then finalize
   everything still marked; objects marked while closing are not.
 - **Hooks.** Per thread, on `Coroutine`: `hook` (C's lua_Hook: a closure
-  `($L, $event, $line, $ci)`; debug.sethook installs `DebugLib::hookf`,
-  which calls registry `_HOOKKEY[thread]`), `hookmask`, `basehookcount`,
+  `($L, $event, $line, $ci, $top)`, `$top` = C's L->top - base of the
+  hooked frame; debug.sethook installs `DebugLib::hookf`, which calls
+  registry `_HOOKKEY[thread]` and, as C pushes the hook table at `$top`,
+  lists it in `DebugInfo::hookedFrames` for getlocal), `hookmask`, `basehookcount`,
   `hookcount`, `allowhook`, `oldpc`, and `trap` (true while a line or count
   hook is set). Change them only with `Hooks::setHook` (lua_sethook). Every
   emitted function binds `$trap = &$L->trap` in its prologue and emits
-  `if ($trap) { Hooks::traceExec($L, $ci, pc); }` (luaG_traceexec) before
+  `if ($trap) { Hooks::traceExec($L, $ci, pc); }` (luaG_traceexec; `$top`
+  as a fourth argument before an instruction using the previous one's top) before
   exactly the instructions C's vmfetch fetches: not OP_VARARGPREP or
   OP_TFORLOOP, not an OP_EXTRAARG, the OP_MMBIN* only on the metamethod
   path, not the OP_JMP after a test (the test jumps to its target
@@ -455,7 +464,13 @@ Lua string keys and integer keys distinct.
   (Lua can observe them through a second handle). Standard output writes go
   through PHP's output buffer like `print`. C's `errno` is `Lib\Io\Errno`
   (recovered from PHP's warning text); `Errno::fileResult/execResult` are
-  luaL_fileresult/luaL_execresult. Hosts may disable posix and pcntl
+  luaL_fileresult/luaL_execresult. PHP's fopen and file_get_contents
+  resolve paths themselves first and report any failure there as ENOENT
+  (EINVAL from 4095 bytes): `CFile::open` then asks `Errno::lookupError`,
+  which walks the components as the kernel does (ENOTDIR, ELOOP,
+  ENAMETOOLONG, EACCES, EISDIR); loadfile opens with `CFile` too. PHP's
+  rename copies across file systems: os.rename checks EXDEV first.
+  Hosts may disable posix and pcntl
   (disable_functions: a disabled function is undefined, a fatal no pcall
   sees), so use them only behind `function_exists` with a fallback:
   `Errno::strerror` falls back to glibc's texts, `CFile::waitForProcess`
