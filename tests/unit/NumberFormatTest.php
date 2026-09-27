@@ -100,7 +100,8 @@ function test_formats_match_lua_string_format_on_many_values(): void
     $values = sampleValues();
 
     $valuesFile = scratchDirectory() . '/number-format-values.txt';
-    file_put_contents($valuesFile, implode("\n", array_map(fn (float $value) => bin2hex(pack('e', $value)), $values)) . "\n");
+    $hexValues = array_map(fn (float $value) => bin2hex(pack('e', $value)), $values);
+    file_put_contents($valuesFile, implode("\n", $hexValues) . "\n");
     $oracleScript = <<<'LUA'
         local formats = {...}
         for line in io.lines(table.remove(formats, 1)) do
@@ -121,8 +122,16 @@ function test_formats_match_lua_string_format_on_many_values(): void
     foreach ($values as $index => $value) {
         $expectedResults = explode("\t", $oracleLines[$index]);
         foreach ($formats as $formatIndex => $format) {
-            assertSame($expectedResults[$formatIndex], formatWithNumberFormat($format, $value), "$format of " . bin2hex(pack('E', $value)));
+            assertSame(
+                $expectedResults[$formatIndex],
+                formatWithNumberFormat($format, $value),
+                "$format of " . bin2hex(pack('E', $value)),
+            );
         }
-        assertSame($expectedResults[count($formats)], NumberFormat::luaNumberToString($value), 'tostring of ' . bin2hex(pack('E', $value)));
+        assertSame(
+            $expectedResults[count($formats)],
+            NumberFormat::luaNumberToString($value),
+            'tostring of ' . bin2hex(pack('E', $value)),
+        );
     }
 }

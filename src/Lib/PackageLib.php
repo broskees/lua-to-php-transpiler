@@ -170,8 +170,13 @@ final class PackageLib
     }
 
     // loadlib.c: setpath
-    private static function setPath(Coroutine $L, LuaTable $package, string $fieldName, string $envName, string $default): void
-    {
+    private static function setPath(
+        Coroutine $L,
+        LuaTable $package,
+        string $fieldName,
+        string $envName,
+        string $default,
+    ): void {
         $path = getenv($envName . self::LUA_VERSUFFIX);  // try versioned name
         if ($path === false) {  // no versioned environment variable?
             $path = getenv($envName);  // try unversioned name
@@ -251,9 +256,8 @@ final class PackageLib
 
     /**
      * loadlib.c: pusherrornotfound: for ";blabla.so;blublu.so" the string
-     *
-     *     no file 'blabla.so'
-     *     	no file 'blublu.so'
+     * "no file 'blabla.so'\n\tno file 'blublu.so'" (a tab before each
+     * further file).
      */
     private static function errorNotFound(string $path, ?Budget $budget): string
     {
@@ -272,15 +276,22 @@ final class PackageLib
      *
      * @return array{?string, ?string}
      */
-    private static function searchPath(string $name, string $path, string $separator, string $directorySeparator, bool $precompiledFiles, ?Budget $budget): array
-    {
+    private static function searchPath(
+        string $name,
+        string $path,
+        string $separator,
+        string $directorySeparator,
+        bool $precompiledFiles,
+        ?Budget $budget,
+    ): array {
         $name = DebugInfo::cString($name);
         $path = DebugInfo::cString($path);
         $separator = DebugInfo::cString($separator);
         $directorySeparator = DebugInfo::cString($directorySeparator);
         // separator is non-empty and appears in 'name'?
         if ($separator !== '' && str_contains($name, $separator[0])) {
-            MemoryLimit::reserve(\strlen($name) + substr_count($name, $separator) * max(0, \strlen($directorySeparator) - \strlen($separator)), $budget);
+            $growthPerSeparator = max(0, \strlen($directorySeparator) - \strlen($separator));
+            MemoryLimit::reserve(\strlen($name) + substr_count($name, $separator) * $growthPerSeparator, $budget);
             $name = str_replace($separator, $directorySeparator, $name);  // replace it by 'dirsep'
         }
         // add path to the buffer, replacing marks ('?') with the file name
@@ -294,7 +305,8 @@ final class PackageLib
                 $separatorPosition = $end;  // name goes until the end
             }
             $filename = substr($pathName, $start, $separatorPosition - $start);
-            if (($precompiledFiles && ChunkLoader::hasPrecompiledFile($filename)) || self::readable($filename)) {  // does file exist and is readable?
+            if (($precompiledFiles && ChunkLoader::hasPrecompiledFile($filename)) || self::readable($filename)) {
+                // does file exist and is readable?
                 return [$filename, null];  // return that name
             }
         }
@@ -309,7 +321,14 @@ final class PackageLib
         $separator = Auxiliary::optString($L, $args, 3, '.');
         $path = Auxiliary::checkString($L, $args, 2);
         $name = Auxiliary::checkString($L, $args, 1);
-        [$filename, $error] = self::searchPath($name, $path, $separator, $directorySeparator, $L->globalState->filesArePrecompiled, $L->globalState->budget);
+        [$filename, $error] = self::searchPath(
+            $name,
+            $path,
+            $separator,
+            $directorySeparator,
+            $L->globalState->filesArePrecompiled,
+            $L->globalState->budget,
+        );
         if ($filename !== null) {
             return [$filename];
         }
@@ -317,18 +336,35 @@ final class PackageLib
     }
 
     /** loadlib.c: findfile: search package[$pathFieldName] for $name */
-    private static function findFile(Coroutine $L, string $name, string $pathFieldName, string $directorySeparator): array
-    {
+    private static function findFile(
+        Coroutine $L,
+        string $name,
+        string $pathFieldName,
+        string $directorySeparator,
+    ): array {
         $path = LuaObject::toStringCoerced(Vm::getTable($L, self::packageUpvalue($L), $pathFieldName));
         if ($path === null) {
             Auxiliary::error($L, "'package.$pathFieldName' must be a string");
         }
-        return self::searchPath($name, $path, '.', $directorySeparator, $L->globalState->filesArePrecompiled, $L->globalState->budget);
+        return self::searchPath(
+            $name,
+            $path,
+            '.',
+            $directorySeparator,
+            $L->globalState->filesArePrecompiled,
+            $L->globalState->budget,
+        );
     }
 
     /** loadlib.c: checkload: the open function and file name, or the error */
-    private static function checkLoad(Coroutine $L, array $args, mixed $loader, bool $loaded, string $filename, mixed $error): array
-    {
+    private static function checkLoad(
+        Coroutine $L,
+        array $args,
+        mixed $loader,
+        bool $loaded,
+        string $filename,
+        mixed $error,
+    ): array {
         if ($loaded) {  // module loaded successfully?
             return [$loader, $filename];  // return open function and file name (2nd argument to module)
         }
@@ -434,7 +470,7 @@ final class PackageLib
         }
         $message = '';  // to build error message
         // iterate over available searchers to find a loader
-        for ($i = 1; ; $i++) {
+        for ($i = 1;; $i++) {
             $searcher = $searchers->get($i);
             if ($searcher === null) {  // no more searchers?
                 MemoryLimit::reserve(2 * (\strlen($name) + \strlen($message)), $L->globalState->budget);

@@ -34,7 +34,10 @@ function bytesPerObject(string $statement, int $count = 4000): float
 function bytesPerObjectOnce(string $statement, int $count): float
 {
     $L = Standalone::newStateWithLibraries();
-    $L->globalState->globals->hash['memory'] = new NativeFunction('memory', static fn (Coroutine $L, array $args): array => [memory_get_usage()]);
+    $L->globalState->globals->hash['memory'] = new NativeFunction(
+        'memory',
+        static fn (Coroutine $L, array $args): array => [memory_get_usage()],
+    );
     $source = <<<LUA
     local N = ...
     local mt = {}
@@ -99,7 +102,10 @@ function test_a_closure_holds_its_upvalues_without_an_array(): void
     $closedUpvalue = 56;  // UpVal: one property
     assertAtMost(96 + $closedUpvalue, 'do local a = i; keep[i] = function () return a end end');
     assertAtMost(112 + 2 * $closedUpvalue, 'do local a, b = i, i; keep[i] = function () return a + b end end');
-    assertAtMost(128 + 3 * $closedUpvalue, 'do local a, b, c = i, i, i; keep[i] = function () return a + b + c end end');
+    assertAtMost(
+        128 + 3 * $closedUpvalue,
+        'do local a, b, c = i, i, i; keep[i] = function () return a + b + c end end',
+    );
     assertAtMost(96, 'keep[i] = function () return mt end');  // a shared upvalue
 }
 
@@ -127,8 +133,14 @@ function test_a_suspended_coroutine_costs_its_fiber_plus_a_few_objects(): void
     // CallInfo by a 32-byte reference): 1368
     $budget = 448 + 3 * 224 + 216 + 32 + 64;
     $coroutine = bytesPerObject('local co = coroutine.create(f); coroutine.resume(co); keep[i] = co', 1000);
-    assertTrue($coroutine - $fiber < $budget, "a suspended coroutine costs $fiber bytes of fiber + " . ($coroutine - $fiber));
+    assertTrue(
+        $coroutine - $fiber < $budget,
+        "a suspended coroutine costs $fiber bytes of fiber + " . ($coroutine - $fiber),
+    );
     // ... plus the C closure of wrap: NativeFunction (112) and its upvalue list (216)
     $wrapped = bytesPerObject('local co = coroutine.wrap(f); co(); keep[i] = co', 1000);
-    assertTrue($wrapped - $fiber < $budget + 112 + 216, "a suspended wrapped coroutine costs $fiber bytes of fiber + " . ($wrapped - $fiber));
+    assertTrue(
+        $wrapped - $fiber < $budget + 112 + 216,
+        "a suspended wrapped coroutine costs $fiber bytes of fiber + " . ($wrapped - $fiber),
+    );
 }

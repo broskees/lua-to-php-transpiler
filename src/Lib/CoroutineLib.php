@@ -127,7 +127,8 @@ final class CoroutineLib
         Auxiliary::checkType($L, $args, 1, Lua::LUA_TFUNCTION);
         $co = Coroutine::newThread($L, $args[0]);
         self::$auxwrapFunction ??= self::auxwrap(...);
-        return [new NativeFunction('auxwrap', self::$auxwrapFunction, [$co])];  // C closure with the coroutine as upvalue
+        // C closure with the coroutine as upvalue
+        return [new NativeFunction('auxwrap', self::$auxwrapFunction, [$co])];
     }
 
     // lcorolib.c: luaB_yield

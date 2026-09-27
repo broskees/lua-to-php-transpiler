@@ -247,7 +247,8 @@ final class Calls
      */
     public static function callNonLua(Coroutine $L, mixed $function, array $arguments): array
     {
-        if ($function instanceof NativeFunction) {  // callNative($L, $function, $arguments, 0), inline: a PHP call less per native call
+        if ($function instanceof NativeFunction) {
+            // callNative($L, $function, $arguments, 0), inline: a PHP call less per native call
             $ci = new CallInfo();
             $ci->func = $function;
             $ci->callstatus = Lua::CIST_C;
@@ -367,8 +368,13 @@ final class Calls
      * @param list<mixed> $arguments
      * @return list<mixed>|null
      */
-    public static function tailCall(Coroutine $L, CallInfo $ci, mixed $function, array $arguments, int $functionRegister = 0): ?array
-    {
+    public static function tailCall(
+        Coroutine $L,
+        CallInfo $ci,
+        mixed $function,
+        array $arguments,
+        int $functionRegister = 0,
+    ): ?array {
         $calledObjects = [];  // (in the order they were called)
         while (!($function instanceof LuaClosure || $function instanceof NativeFunction)) {
             self::checkStackForCallMetamethod($L, \count($arguments) + \count($calledObjects));  // (ldo.c: tryfuncTM)
@@ -447,8 +453,12 @@ final class Calls
      * @param list<mixed> $arguments
      * @return array{int, mixed}
      */
-    public static function protectedCall(Coroutine $L, mixed $function, array $arguments, mixed $messageHandler = null): array
-    {
+    public static function protectedCall(
+        Coroutine $L,
+        mixed $function,
+        array $arguments,
+        mixed $messageHandler = null,
+    ): array {
         return self::protectedRun($L, static fn (): array => self::call($L, $function, $arguments), $messageHandler);
     }
 
@@ -459,10 +469,19 @@ final class Calls
      * @param list<mixed> $arguments
      * @return array{int, mixed}
      */
-    public static function protectedCallk(Coroutine $L, mixed $function, array $arguments, mixed $messageHandler = null): array
-    {
+    public static function protectedCallk(
+        Coroutine $L,
+        mixed $function,
+        array $arguments,
+        mixed $messageHandler = null,
+    ): array {
         $yieldable = $L->nny === 0;  // lapi.c: k != NULL && yieldable(L)
-        return self::protectedRun($L, static fn (): array => self::callk($L, $function, $arguments), $messageHandler, $yieldable);
+        return self::protectedRun(
+            $L,
+            static fn (): array => self::callk($L, $function, $arguments),
+            $messageHandler,
+            $yieldable,
+        );
     }
 
     /**
@@ -482,10 +501,15 @@ final class Calls
      *
      * @return array{int, mixed}
      */
-    public static function protectedRun(Coroutine $L, \Closure $body, mixed $messageHandler = null, bool $yieldable = false): array
-    {
+    public static function protectedRun(
+        Coroutine $L,
+        \Closure $body,
+        mixed $messageHandler = null,
+        bool $yieldable = false,
+    ): array {
         $oldCi = $L->ci;
-        $oldnCcalls = $L->nCcalls - $L->nCcallsBase;  // relative: a coroutine may yield and be resumed from elsewhere in between
+        // relative: a coroutine may yield and be resumed from elsewhere in between
+        $oldnCcalls = $L->nCcalls - $L->nCcallsBase;
         $oldnny = $L->nny;
         $oldAllowhook = $L->allowhook;
         $oldErrfunc = $L->errfunc;
@@ -494,7 +518,7 @@ final class Calls
             $result = $body();
             $L->errfunc = $oldErrfunc;
             return [Lua::LUA_OK, $result];
-        } catch (LuaError|\Error $error) {
+        } catch (LuaError | \Error $error) {
             if ($error instanceof \Error) {
                 $error = self::cStackOverflowError($L, $error);
             }
@@ -509,7 +533,15 @@ final class Calls
             $L->nny = $oldnny;
             $L->ci = $oldCi;
             $L->allowhook = $oldAllowhook;
-            [$status, $value] = self::closeProtected($L, $errorCi, $oldCi, $status, $value, $messageHandler, $yieldable);
+            [$status, $value] = self::closeProtected(
+                $L,
+                $errorCi,
+                $oldCi,
+                $status,
+                $value,
+                $messageHandler,
+                $yieldable,
+            );
             self::unlinkAbandonedFrames($errorCi, $oldCi);
             self::shrinkStack($L);  // restore stack size in case of overflow
             $L->errfunc = $oldErrfunc;
@@ -531,7 +563,7 @@ final class Calls
             try {
                 $results = self::callNoYield($L, $handler, [$value]);
                 return [Lua::LUA_ERRRUN, $results[0] ?? null];
-            } catch (LuaError|\Error $error) {
+            } catch (LuaError | \Error $error) {
                 if ($error instanceof \Error) {
                     $error = self::cStackOverflowError($L, $error);
                 }
@@ -556,8 +588,15 @@ final class Calls
      *
      * @return array{int, mixed}
      */
-    public static function closeProtected(Coroutine $L, CallInfo $fromCi, CallInfo $downTo, int $status, mixed $value, mixed $messageHandler = null, bool $yieldable = false): array
-    {
+    public static function closeProtected(
+        Coroutine $L,
+        CallInfo $fromCi,
+        CallInfo $downTo,
+        int $status,
+        mixed $value,
+        mixed $messageHandler = null,
+        bool $yieldable = false,
+    ): array {
         $oldCi = $L->ci;
         if ($yieldable) {  // a '__close' may yield: closeThread must find these frames
             $L->pendingCloses[] = [$fromCi, $oldCi];
@@ -575,7 +614,7 @@ final class Calls
                 $oldAllowhook = $L->allowhook;
                 try {
                     Upvalues::callCloseMethod($L, $ci->R[$register], $value, $yieldable);
-                } catch (LuaError|\Error $error) {  // an error occurred; restore saved state and repeat
+                } catch (LuaError | \Error $error) {  // an error occurred; restore saved state and repeat
                     if ($error instanceof \Error) {
                         $error = self::cStackOverflowError($L, $error);
                     }
@@ -589,7 +628,15 @@ final class Calls
                     $L->nCcalls = $L->nCcallsBase + $oldnCcalls;
                     $L->nny = $oldnny;
                     $L->allowhook = $oldAllowhook;
-                    [$status, $value] = self::closeProtected($L, $errorCi, $oldCi, $status, $value, $messageHandler, $yieldable);
+                    [$status, $value] = self::closeProtected(
+                        $L,
+                        $errorCi,
+                        $oldCi,
+                        $status,
+                        $value,
+                        $messageHandler,
+                        $yieldable,
+                    );
                     self::unlinkAbandonedFrames($errorCi, $oldCi);
                 }
             }
@@ -619,8 +666,11 @@ final class Calls
     public static function shrinkStack(Coroutine $L): void
     {
         $frameBudget = $L->globalState->frameBudget;
-        if ($L->stackLimit > Lua::LUAI_MAXSTACK && $L->ci->top <= Lua::LUAI_MAXSTACK && $L->ci->frameBytes <= $frameBudget
-            && self::luaDepth($L->ci) <= $L->globalState->callDepthLimit) {
+        if (
+            $L->stackLimit > Lua::LUAI_MAXSTACK && $L->ci->top <= Lua::LUAI_MAXSTACK
+            && $L->ci->frameBytes <= $frameBudget
+            && self::luaDepth($L->ci) <= $L->globalState->callDepthLimit
+        ) {
             $L->stackLimit = Lua::LUAI_MAXSTACK;
             $L->frameBytesLimit = $frameBudget;
         }

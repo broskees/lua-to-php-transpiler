@@ -47,8 +47,13 @@ final class Compiler
      * compile may take as it reads the source (Lexer::$reserveMemory), and
      * raises what C's allocator would when it does not fit.
      */
-    public static function compile(string $source, string $chunkname, int $nCcalls = self::MAIN_CHUNK_C_CALLS, ?int &$nesting = null, ?\Closure $reserveMemory = null): Proto
-    {
-        return Parser::luaY_parser($source, $chunkname, $nCcalls, $nesting, $reserveMemory);
+    public static function compile(
+        string $source,
+        string $chunkname,
+        int $nCcalls = self::MAIN_CHUNK_C_CALLS,
+        ?int &$nesting = null,
+        ?\Closure $reserveMemory = null,
+    ): Proto {
+        return Parser::parse($source, $chunkname, $nCcalls, $nesting, $reserveMemory);
     }
 }

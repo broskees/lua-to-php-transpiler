@@ -37,7 +37,8 @@ function officialCases(): array
         // constructs.lua
         'local x <XXX> = 10', 'local xxx <const> = 20; xxx = 10',
         "    local xx;\n    local xxx <const> = 20;\n    local yyy;\n    local function foo ()\n"
-            . "      local abc = xx + yyy + xxx;\n      return function () return function () xxx = yyy end end\n    end\n  ",
+            . "      local abc = xx + yyy + xxx;\n      return function () return function () xxx = yyy end end\n"
+            . "    end\n  ",
         "    local x <close> = nil\n    x = io.open()\n  ", 'for x do', 'x:call',
         // goto.lua
         ' goto l1; do ::l1:: end ', ' do ::l1:: end goto l1; ', ' ::l1:: ::l1:: ', ' ::l1:: do ::l1:: end',
@@ -112,7 +113,8 @@ function ownCases(): array
         // unexpected tokens and expected tokens
         'x = +', 'x = = 1', 'x', 'x.y', 'f() = 1', '(a) = 1', 'a.b:c = 1', 'return 1 2', 'return return',
         'if x then', "if x then\n  y = 1\n", 'if x y = 1 end', 'if x then else elseif y then end', 'while x y() end',
-        'for i = 1 do end', 'for i do end', 'for 1 = 1, 2 do end', 'for i, j = 1, 2 do end', 'for i = 1, 2, 3, 4 do end',
+        'for i = 1 do end', 'for i do end', 'for 1 = 1, 2 do end', 'for i, j = 1, 2 do end',
+        'for i = 1, 2, 3, 4 do end',
         "do\n\n x = 1", "function f(\n\n", 'function f(a,) end', 'function f(a b) end', 'function f(...,a) end',
         'function f.a:b.c() end', 'function (x) end', 'local function f.x() end', 'local 1 = 2', 'local x <const',
         'local x <const> y', 'local x <close>, y <close> = 1, 2', 'local x <close> = 1, 2', 'local function () end',
@@ -131,7 +133,8 @@ function ownCases(): array
         'local x <close> = nil; local function f() x = 1 end', 'local _ENV <const> = {}; x = 1',
         'function f() return x.y.z end f() = 1', 'x, y() = 1, 2', 'x, (y) = 1, 2', 'a.b.c:d()  = 1',
         '1 = 2', '"x" = 1', 'nil = 1', 'x = 1 = 2', 'x = not', 'x = #', 'x = 1 + + 1', 'x = 1 ..',
-        'x = a and', 'x = [==[ unfinished', 'x = [[ unfinished', '--[[ unfinished comment', "--[==[ unfinished\n\ncomment ]]",
+        'x = a and', 'x = [==[ unfinished', 'x = [[ unfinished', '--[[ unfinished comment',
+        "--[==[ unfinished\n\ncomment ]]",
         "x = 'unfinished\nstring'", 'x = "unfinished', "x = 'a\\", "x = 'a\\\n", "x = 'a\\z", 'x = [=a', 'x = [==',
         'x = [=', 'x = "\q"', 'x = "\x"', 'x = "\xg"', 'x = "\x1g"', 'x = "\u"', 'x = "\u{"', 'x = "\u{}"',
         'x = "\u{g}"', 'x = "\u{1"', 'x = "\u{80000000}"', 'x = "\u{7FFFFFFF}"', 'x = "\u{0000000000000041}"',
@@ -163,17 +166,21 @@ function ownCases(): array
         'a' . str_repeat(', a', 198) . ' = 1', 'a' . str_repeat(', a', 197) . ' = 1',
         'f(' . implode(', ', array_fill(0, 252, 'x')) . ')', 'f(' . implode(', ', array_fill(0, 253, 'x')) . ')',
         'local t = {' . implode(', ', array_fill(0, 253, 'f()')) . '}',
-        'local ' . implode(', ', array_map(fn ($i) => "v$i", range(1, 200))) . '; f(' . implode(', ', array_fill(0, 60, 'x')) . ')',
+        'local ' . implode(', ', array_map(fn ($i) => "v$i", range(1, 200)))
+            . '; f(' . implode(', ', array_fill(0, 60, 'x')) . ')',
         'x = ' . implode(' + ', array_map(fn ($i) => "f($i)", range(1, 100))),
         'x = ' . str_repeat('f(1) + (', 150) . '1' . str_repeat(')', 150),
     ];
     // too many upvalues: 256 locals of an enclosing function (in two functions, as MAXVARS is 200)
     $outerLocals = implode(', ', array_map(fn ($i) => "u$i", range(1, 130)));
     $innerLocals = implode(', ', array_map(fn ($i) => "w$i", range(1, 130)));
-    $uses = implode(' + ', [...array_map(fn ($i) => "u$i", range(1, 130)), ...array_map(fn ($i) => "w$i", range(1, 130))]);
-    $cases[] = "local $outerLocals\nlocal function g()\n  local $innerLocals\n  return function()\n    return $uses\n  end\nend";
-    $uses255 = implode(' + ', [...array_map(fn ($i) => "u$i", range(1, 130)), ...array_map(fn ($i) => "w$i", range(1, 125))]);
-    $cases[] = "local $outerLocals\nlocal function g()\n  local $innerLocals\n  return function()\n    return $uses255\n  end\nend";
+    $outerUses = array_map(fn ($i) => "u$i", range(1, 130));
+    $uses = implode(' + ', [...$outerUses, ...array_map(fn ($i) => "w$i", range(1, 130))]);
+    $cases[] = "local $outerLocals\nlocal function g()\n  local $innerLocals\n"
+        . "  return function()\n    return $uses\n  end\nend";
+    $uses255 = implode(' + ', [...$outerUses, ...array_map(fn ($i) => "w$i", range(1, 125))]);
+    $cases[] = "local $outerLocals\nlocal function g()\n  local $innerLocals\n"
+        . "  return function()\n    return $uses255\n  end\nend";
     return $cases;
 }
 
@@ -187,8 +194,11 @@ function corpus(): array
         }
     }
     // chunk names: embedded '\0' ends them (C strings); long ones are truncated by luaO_chunkid
-    foreach (["=na\0me", "@fi\0le.lua", "sou\0rce", '=' . str_repeat('n', 100), '@' . str_repeat('d/', 50) . 'f.lua',
-        str_repeat('s', 100), "first line\nsecond line", "\0", '='] as $chunkname) {
+    $chunknames = [
+        "=na\0me", "@fi\0le.lua", "sou\0rce", '=' . str_repeat('n', 100), '@' . str_repeat('d/', 50) . 'f.lua',
+        str_repeat('s', 100), "first line\nsecond line", "\0", '=',
+    ];
+    foreach ($chunknames as $chunkname) {
         $pairs[] = ['x = = 1', $chunkname];
         $pairs[] = ["x = 1\n\ny = 'a\0b", $chunkname];
     }
@@ -233,7 +243,10 @@ function test_compile_errors_match_lua_load(): void
             if ($error->getCode() === LUA_ERRRUN && $expected !== null) {
                 // lua.c's message handler added a traceback to this runtime error
                 $tracebackPosition = strpos($expected, "\nstack traceback:\n");
-                assertTrue($tracebackPosition !== false, 'runtime error without traceback: ' . var_export($expected, true));
+                assertTrue(
+                    $tracebackPosition !== false,
+                    'runtime error without traceback: ' . var_export($expected, true),
+                );
                 $expected = substr($expected, 0, $tracebackPosition);
             }
         }

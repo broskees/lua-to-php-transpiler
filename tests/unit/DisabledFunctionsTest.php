@@ -23,7 +23,7 @@ use LuaPhp\Lib\Io\Errno;
  *   the typical shared-host list (the lua2php half is in Lua2PhpTest).
  */
 
-/** failing file operations (errno and its strerror text), then commands and pipes */
+// failing file operations (errno and its strerror text), then commands and pipes
 const IO_AND_OS_SCRIPT = <<<'LUA'
     local function show(...)
       local t = table.pack(...)
@@ -256,8 +256,13 @@ function writeAndTranspile(string $directory, string $name, string $script, arra
  * @param array<string, list<string>> $configurations
  * @param list<string> $prefix command prefix (e.g. env options)
  */
-function assertSameAsReference(string $directory, string $name, string $script, array $configurations, array $prefix = []): void
-{
+function assertSameAsReference(
+    string $directory,
+    string $name,
+    string $script,
+    array $configurations,
+    array $prefix = [],
+): void {
     $transpiled = writeAndTranspile($directory, $name, $script);
     $normalize = static fn (array $result, string $programName): array =>
         [$result[0], $result[1], normalizeDifferentialOutput($result[2], $programName)];
@@ -265,8 +270,16 @@ function assertSameAsReference(string $directory, string $name, string $script, 
     $ourProgram = realpath(REPO_ROOT . '/bin/lua');
     foreach ($configurations as $configuration => $phpOptions) {
         foreach ([[$ourProgram, $name], [$transpiled]] as $arguments) {
-            $actual = runCommand([...$prefix, 'php', ...OPCACHE_ON_NEW_FILES, ...$phpOptions, ...$arguments], '', $directory);
-            assertSame($expected, $normalize($actual, $arguments[0]), "$name, " . basename($arguments[0]) . ", $configuration");
+            $actual = runCommand(
+                [...$prefix, 'php', ...OPCACHE_ON_NEW_FILES, ...$phpOptions, ...$arguments],
+                '',
+                $directory,
+            );
+            assertSame(
+                $expected,
+                $normalize($actual, $arguments[0]),
+                "$name, " . basename($arguments[0]) . ", $configuration",
+            );
         }
     }
 }
@@ -277,7 +290,13 @@ function test_io_and_os_behave_the_same_without_posix_and_pcntl(): void
     @mkdir($directory);
     $configurations = ['all functions' => [], 'no posix or pcntl' => disabling(posixAndPcntlFunctions())];
     assertSameAsReference($directory, 'io_and_os.lua', IO_AND_OS_SCRIPT, $configurations);
-    assertSameAsReference($directory, 'children.lua', CHILDREN_SCRIPT, $configurations, ['env', '--ignore-signal=CHLD']);
+    assertSameAsReference(
+        $directory,
+        'children.lua',
+        CHILDREN_SCRIPT,
+        $configurations,
+        ['env', '--ignore-signal=CHLD'],
+    );
 }
 
 function test_everything_runs_the_same_without_ini_set(): void
@@ -297,7 +316,11 @@ function test_os_execute_and_io_popen_fail_without_the_process_functions(): void
     $transpiled = writeAndTranspile($directory, 'processes.lua', PROCESSES_SCRIPT, $sharedHost);
     // the reference model of a C library that cannot start processes gives exactly these results
     $expected = [0, PROCESSES_EXPECTED_OUTPUT, ''];
-    assertSame($expected, runCommand(['env', 'LUA_INIT_5_4=' . PROCESSES_FAIL_INIT, 'lua5.4', 'processes.lua'], '', $directory), 'lua5.4 with PROCESSES_FAIL_INIT');
+    assertSame(
+        $expected,
+        runCommand(['env', 'LUA_INIT_5_4=' . PROCESSES_FAIL_INIT, 'lua5.4', 'processes.lua'], '', $directory),
+        'lua5.4 with PROCESSES_FAIL_INIT',
+    );
     $configurations = [
         'no proc_open' => disabling(['proc_open']),
         'no proc_get_status' => disabling(['proc_get_status']),
@@ -337,12 +360,18 @@ function test_the_differential_corpus_runs_on_a_shared_host(): void
             $running[$name] = [
                 startProcess(['lua5.4', $name], $diffDirectory),
                 startProcess(['env', 'LUA_INIT_5_4=' . PROCESSES_FAIL_INIT, 'lua5.4', $name], $diffDirectory),
-                startProcess(['php', ...disabling(sharedHostDisabledFunctions()), '-d', 'memory_limit=4G', $ourProgram, $name], $diffDirectory),
+                startProcess(
+                    ['php', ...disabling(sharedHostDisabledFunctions()), '-d', 'memory_limit=4G', $ourProgram, $name],
+                    $diffDirectory,
+                ),
             ];
         }
         foreach ($running as $name => [$plainProcess, $referenceProcess, $ourProcess]) {
-            $normalize = static fn (array $result, string $programName): array =>
-                [$result[0], normalizeDifferentialOutput($result[1], 'lua5.4'), normalizeDifferentialOutput($result[2], $programName)];
+            $normalize = static fn (array $result, string $programName): array => [
+                $result[0],
+                normalizeDifferentialOutput($result[1], 'lua5.4'),
+                normalizeDifferentialOutput($result[2], $programName),
+            ];
             $plain = $normalize(finishProcess($plainProcess), 'lua5.4');
             $reference = $normalize(finishProcess($referenceProcess), 'lua5.4');
             $ours = $normalize(finishProcess($ourProcess), $ourProgram);
@@ -371,11 +400,19 @@ const EMBEDDING_HOST = <<<'PHP'
     declare(strict_types=1);
     require $argv[1] . '/src/autoload.php';
     $root = $argv[2];
-    file_put_contents("$root/main.lua", 'local m = require("lib") local co = coroutine.wrap(function (x) coroutine.yield(x * 2) end) print(m.twice(co(21)), os.date("!%Y", 0)) return #m.list');
+    file_put_contents("$root/main.lua", 'local m = require("lib")'
+        . ' local co = coroutine.wrap(function (x) coroutine.yield(x * 2) end)'
+        . ' print(m.twice(co(21)), os.date("!%Y", 0)) return #m.list');
     file_put_contents("$root/lib.lua", 'return {twice = function (x) return host.twice(x) end, list = host.list()}');
-    $environment = new LuaPhp\Embed\Environment(loader: new LuaPhp\Embed\Loader\FilesystemLoader($root), cacheDir: "$root/cache",
-        limits: new LuaPhp\Embed\Limits(steps: 100000, memoryBytes: 16 << 20, seconds: 5.0, outputBytes: 4096));
-    $environment->addGlobal('host', ['twice' => static fn (int $x): int => 2 * $x, 'list' => static fn (): array => [1, 2, 3]]);
+    $environment = new LuaPhp\Embed\Environment(
+        loader: new LuaPhp\Embed\Loader\FilesystemLoader($root),
+        cacheDir: "$root/cache",
+        limits: new LuaPhp\Embed\Limits(steps: 100000, memoryBytes: 16 << 20, seconds: 5.0, outputBytes: 4096),
+    );
+    $environment->addGlobal('host', [
+        'twice' => static fn (int $x): int => 2 * $x,
+        'list' => static fn (): array => [1, 2, 3],
+    ]);
     foreach ([1, 2] as $pass) {  // cold, then from the cache
         $result = $environment->run('main.lua');
         echo json_encode([$result->values, $result->output]), "\n";
@@ -390,11 +427,20 @@ const EMBEDDING_HOST = <<<'PHP'
 function test_the_embedding_api_runs_on_a_shared_host(): void
 {
     $expected = "[[3],\"84\\t1970\\n\"]\n[[3],\"84\\t1970\\n\"]\nsteps\n";
-    foreach (['plain' => [], 'shared host' => disabling(sharedHostDisabledFunctions()), 'no ini_set' => withoutIniSet()] as $label => $options) {
+    $hosts = [
+        'plain' => [],
+        'shared host' => disabling(sharedHostDisabledFunctions()),
+        'no ini_set' => withoutIniSet(),
+    ];
+    foreach ($hosts as $label => $options) {
         $directory = scratchDirectory() . '/embedding-host-' . str_replace(' ', '-', $label);
         mkdir($directory);
         file_put_contents("$directory/host.php", EMBEDDING_HOST);
-        assertSame([0, $expected, ''], runCommand(['php', ...$options, "$directory/host.php", REPO_ROOT, $directory]), $label);
+        assertSame(
+            [0, $expected, ''],
+            runCommand(['php', ...$options, "$directory/host.php", REPO_ROOT, $directory]),
+            $label,
+        );
         assertTrue(glob("$directory/cache/*.php") !== [], "$label: the cache directory was used");
     }
 }

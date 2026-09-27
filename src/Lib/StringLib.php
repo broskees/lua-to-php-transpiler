@@ -123,8 +123,10 @@ final class StringLib
             $length = \strlen($s);
             $start = $args[1] ?? null;
             $end = $args[2] ?? $length;
-            if (\is_int($start) && \is_int($end) && $start >= 1 && $start <= $end && $end <= $length
-                && $end - $start < MemoryLimit::CHECK_ABOVE) {
+            if (
+                \is_int($start) && \is_int($end) && $start >= 1 && $start <= $end && $end <= $length
+                && $end - $start < MemoryLimit::CHECK_ABOVE
+            ) {
                 return [substr($s, $start - 1, $end - $start + 1)];
             }
         }
@@ -186,7 +188,9 @@ final class StringLib
         // first n-1 copies followed by the separator, then the last copy
         // (appending it may copy the whole string)
         MemoryLimit::reserve(2 * ((\strlen($s) + \strlen($separator)) * $n), $L->globalState->budget);
-        $L->globalState->budget?->chargeSteps(1 + intdiv((\strlen($s) + \strlen($separator)) * $n, Budget::BYTES_PER_STEP));
+        $L->globalState->budget?->chargeSteps(
+            1 + intdiv((\strlen($s) + \strlen($separator)) * $n, Budget::BYTES_PER_STEP)
+        );
         return [str_repeat($s . $separator, $n - 1) . $s];
     }
 
@@ -198,8 +202,10 @@ final class StringLib
         // Fast path for string.byte(s[, i]) with an integer 1 <= i <= #s:
         // the interval is [i, i], one byte, when luaL_checkstack for it
         // passes (Calls::checkStack($L, 1)).
-        if (\is_string($s) && \count($args) <= 2 && \is_int($position) && $position >= 1 && $position <= \strlen($s)
-            && $L->ci->top < $L->stackLimit) {
+        if (
+            \is_string($s) && \count($args) <= 2 && \is_int($position) && $position >= 1 && $position <= \strlen($s)
+            && $L->ci->top < $L->stackLimit
+        ) {
             return [\ord($s[$position - 1])];
         }
         $s = Auxiliary::checkString($L, $args, 1);
@@ -231,7 +237,8 @@ final class StringLib
         $result = '';
         for ($i = 1; $i <= $count; $i++) {
             $code = Auxiliary::checkInteger($L, $args, $i);
-            Auxiliary::argCheck($L, $code >= 0 && $code <= 255, $i, 'value out of range');  // (lua_Unsigned)c <= UCHAR_MAX
+            // (lua_Unsigned)c <= UCHAR_MAX
+            Auxiliary::argCheck($L, $code >= 0 && $code <= 255, $i, 'value out of range');
             $result .= \chr($code);
         }
         return [$result];
@@ -276,7 +283,9 @@ final class StringLib
         if ($find && (($plain !== null && $plain !== false) || self::noSpecials($pattern))) {
             // do a plain search (lstrlib.c: lmemfind)
             $found = strpos($s, $pattern, $init);
-            $L->globalState->budget?->chargeSteps(1 + intdiv(($found === false ? $length : $found) - $init, Budget::BYTES_PER_STEP));
+            $L->globalState->budget?->chargeSteps(
+                1 + intdiv(($found === false ? $length : $found) - $init, Budget::BYTES_PER_STEP)
+            );
             if ($found !== false) {
                 return [$found + 1, $found + \strlen($pattern)];
             }
@@ -351,7 +360,10 @@ final class StringLib
         while (($escapePosition = strpos($replacement, '%', $position)) !== false) {
             // room for the text before the escape and for a capture (at most the whole match)
             if (\strlen($expanded) + $escapePosition - $position + $e - $s > $capacity) {
-                $capacity = MemoryLimit::grow(\strlen($expanded) + $escapePosition - $position + $e - $s, $ms->L->globalState->budget);
+                $capacity = MemoryLimit::grow(
+                    \strlen($expanded) + $escapePosition - $position + $e - $s,
+                    $ms->L->globalState->budget,
+                );
             }
             $expanded .= substr($replacement, $position, $escapePosition - $position);
             $escaped = $replacement[$escapePosition + 1] ?? "\0";  // skip ESC (C reads the final '\0')

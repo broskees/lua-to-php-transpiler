@@ -28,7 +28,9 @@ function referenceDump(string $source, string $chunkname, bool $strip): string
         local f, message = load(source, arg[2])
         io.write(f and string.dump(f, arg[3] == 'strip') or message)
         LUA);
-    [$exitCode, $output, $errorOutput] = runCommand(['lua5.4', $scriptFile, $sourceFile, $chunkname, $strip ? 'strip' : 'keep']);
+    [$exitCode, $output, $errorOutput] = runCommand(
+        ['lua5.4', $scriptFile, $sourceFile, $chunkname, $strip ? 'strip' : 'keep']
+    );
     assertSame(0, $exitCode, $errorOutput);
     return $output;
 }
@@ -38,10 +40,13 @@ function test_more_than_MAXARG_Bx_constants_use_LOADKX_and_EXTRAARG(): void
     $values = array_map(fn (int $i) => (string) (1000000 + $i), range(0, 131100));
     $source = "local t = {\n" . implode(",\n", $values) . "}\nlocal last = 'the last constant'\nreturn t, last";
     $proto = Compiler::compile($source, '=big');
-    $opcodes = array_map([OpCodes::class, 'GET_OPCODE'], $proto->code);
+    $opcodes = array_map([OpCodes::class, 'getOpcode'], $proto->code);
     assertTrue(in_array(OpCodes::OP_LOADKX, $opcodes, true), 'LOADKX is used');
     foreach ([false, true] as $strip) {
-        assertTrue(referenceDump($source, '=big', $strip) === Dump::dump($proto, $strip), 'dump differs, strip: ' . var_export($strip, true));
+        assertTrue(
+            referenceDump($source, '=big', $strip) === Dump::dump($proto, $strip),
+            'dump differs, strip: ' . var_export($strip, true),
+        );
     }
 }
 
@@ -49,7 +54,10 @@ function test_vector_limits_are_runtime_errors(): void
 {
     // lparser.c registerlocalvar: at most SHRT_MAX debug entries per function
     $source = str_repeat("do local a end\n", 32767);
-    assertTrue(referenceDump($source, '=x', false) === Dump::dump(Compiler::compile($source, '=x'), false), '32767 locals compile');
+    assertTrue(
+        referenceDump($source, '=x', false) === Dump::dump(Compiler::compile($source, '=x'), false),
+        '32767 locals compile',
+    );
     $source .= "do local a end\n";
     $error = null;
     try {
@@ -60,7 +68,10 @@ function test_vector_limits_are_runtime_errors(): void
     assertTrue($error !== null, 'the 32768th local fails');
     assertSame(2, $error->getCode(), 'LUA_ERRRUN');
     assertSame('too many local variables (limit is 32767)', $error->getMessage());
-    assertTrue(str_starts_with(referenceDump($source, '=x', false), "too many local variables (limit is 32767)\nstack traceback:"));
+    assertTrue(str_starts_with(
+        referenceDump($source, '=x', false),
+        "too many local variables (limit is 32767)\nstack traceback:",
+    ));
 }
 
 function test_nesting_limit_counts_from_the_callers_C_call_depth(): void
@@ -71,7 +82,10 @@ function test_nesting_limit_counts_from_the_callers_C_call_depth(): void
     Compiler::compile($nested(195), '=x');
     assertSame('C stack overflow', assertThrows(CompileError::class, fn () => Compiler::compile($nested(196), '=x')));
     Compiler::compile($nested(194), '=x', 3);
-    assertSame('C stack overflow', assertThrows(CompileError::class, fn () => Compiler::compile($nested(195), '=x', 3)));
+    assertSame(
+        'C stack overflow',
+        assertThrows(CompileError::class, fn () => Compiler::compile($nested(195), '=x', 3)),
+    );
 
     [$exitCode, $output] = runCommand(['lua5.4', '-e', 'for n = 190, 200 do if not select(2, pcall(load, '
         . '"return " .. string.rep("(", n) .. "1" .. string.rep(")", n))) then print(n) break end end']);
@@ -122,5 +136,8 @@ function test_chunk_name_is_a_C_string(): void
     $proto = Compiler::compile("return function() end", "=name\0ignored");
     assertSame('=name', $proto->source);
     assertSame('=name', $proto->p[0]->source);
-    assertSame('name:1: unexpected symbol near <eof>', assertThrows(CompileError::class, fn () => Compiler::compile('x =', "=name\0ignored")));
+    assertSame(
+        'name:1: unexpected symbol near <eof>',
+        assertThrows(CompileError::class, fn () => Compiler::compile('x =', "=name\0ignored")),
+    );
 }

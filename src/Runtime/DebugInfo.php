@@ -120,16 +120,16 @@ final class DebugInfo
     {
         $setreg = -1;  // keep last instruction that changed 'reg'
         $jumpTarget = 0;  // any code before this address is conditional
-        if (OpCodes::testMMMode(OpCodes::GET_OPCODE($p->code[$lastpc]))) {
+        if (OpCodes::testMMMode(OpCodes::getOpcode($p->code[$lastpc]))) {
             $lastpc--;  // previous instruction was not actually executed
         }
         for ($pc = 0; $pc < $lastpc; $pc++) {
             $instruction = $p->code[$pc];
-            $opcode = OpCodes::GET_OPCODE($instruction);
-            $a = OpCodes::GETARG_A($instruction);
+            $opcode = OpCodes::getOpcode($instruction);
+            $a = OpCodes::getArgA($instruction);
             switch ($opcode) {
                 case OpCodes::OP_LOADNIL:  // set registers from 'a' to 'a+b'
-                    $b = OpCodes::GETARG_B($instruction);
+                    $b = OpCodes::getArgB($instruction);
                     $change = $a <= $reg && $reg <= $a + $b;
                     break;
                 case OpCodes::OP_TFORCALL:  // affect all regs above its base
@@ -140,7 +140,7 @@ final class DebugInfo
                     $change = $reg >= $a;
                     break;
                 case OpCodes::OP_JMP:  // doesn't change registers, but changes 'jmptarget'
-                    $destination = $pc + 1 + OpCodes::GETARG_sJ($instruction);
+                    $destination = $pc + 1 + OpCodes::getArgSJ($instruction);
                     // jump does not skip 'lastpc' and is larger than current one?
                     if ($destination <= $lastpc && $destination > $jumpTarget) {
                         $jumpTarget = $destination;  // update 'jmptarget'
@@ -189,19 +189,19 @@ final class DebugInfo
         $pc = self::findSetReg($p, $pc, $reg);
         if ($pc !== -1) {  // could find instruction?
             $instruction = $p->code[$pc];
-            switch (OpCodes::GET_OPCODE($instruction)) {
+            switch (OpCodes::getOpcode($instruction)) {
                 case OpCodes::OP_MOVE:
-                    $b = OpCodes::GETARG_B($instruction);  // move from 'b' to 'a'
-                    if ($b < OpCodes::GETARG_A($instruction)) {
+                    $b = OpCodes::getArgB($instruction);  // move from 'b' to 'a'
+                    if ($b < OpCodes::getArgA($instruction)) {
                         return self::basicGetObjName($p, $pc, $b);  // get name for 'b'
                     }
                     break;
                 case OpCodes::OP_GETUPVAL:
-                    return ['upvalue', self::upvalueName($p, OpCodes::GETARG_B($instruction))];
+                    return ['upvalue', self::upvalueName($p, OpCodes::getArgB($instruction))];
                 case OpCodes::OP_LOADK:
-                    return self::constantName($p, OpCodes::GETARG_Bx($instruction));
+                    return self::constantName($p, OpCodes::getArgBx($instruction));
                 case OpCodes::OP_LOADKX:
-                    return self::constantName($p, OpCodes::GETARG_Ax($p->code[$pc + 1]));
+                    return self::constantName($p, OpCodes::getArgAx($p->code[$pc + 1]));
             }
         }
         return [null, null];  // could not find reasonable name
@@ -217,8 +217,8 @@ final class DebugInfo
     // ldebug.c: rkname
     private static function rkName(Proto $p, int $pc, int $instruction): string
     {
-        $c = OpCodes::GETARG_C($instruction);  // key index
-        if (OpCodes::GETARG_k($instruction)) {  // is 'c' a constant?
+        $c = OpCodes::getArgC($instruction);  // key index
+        if (OpCodes::getArgK($instruction)) {  // is 'c' a constant?
             return self::constantName($p, $c)[1];
         }
         return self::registerName($p, $pc, $c);  // 'c' is a register
@@ -227,7 +227,7 @@ final class DebugInfo
     // ldebug.c: isEnv
     private static function isEnvironment(Proto $p, int $pc, int $instruction, bool $isUpvalue): string
     {
-        $t = OpCodes::GETARG_B($instruction);  // table index
+        $t = OpCodes::getArgB($instruction);  // table index
         if ($isUpvalue) {  // is 't' an upvalue?
             $name = self::upvalueName($p, $t);
         } else {  // 't' is a register
@@ -253,17 +253,17 @@ final class DebugInfo
         }
         if ($lastpc !== -1) {  // could find instruction?
             $instruction = $p->code[$lastpc];
-            switch (OpCodes::GET_OPCODE($instruction)) {
+            switch (OpCodes::getOpcode($instruction)) {
                 case OpCodes::OP_GETTABUP:
-                    $name = self::constantName($p, OpCodes::GETARG_C($instruction))[1];
+                    $name = self::constantName($p, OpCodes::getArgC($instruction))[1];
                     return [self::isEnvironment($p, $lastpc, $instruction, true), $name];
                 case OpCodes::OP_GETTABLE:
-                    $name = self::registerName($p, $lastpc, OpCodes::GETARG_C($instruction));
+                    $name = self::registerName($p, $lastpc, OpCodes::getArgC($instruction));
                     return [self::isEnvironment($p, $lastpc, $instruction, false), $name];
                 case OpCodes::OP_GETI:
                     return ['field', 'integer index'];
                 case OpCodes::OP_GETFIELD:
-                    $name = self::constantName($p, OpCodes::GETARG_C($instruction))[1];
+                    $name = self::constantName($p, OpCodes::getArgC($instruction))[1];
                     return [self::isEnvironment($p, $lastpc, $instruction, false), $name];
                 case OpCodes::OP_SELF:
                     return ['method', self::rkName($p, $lastpc, $instruction)];
@@ -281,10 +281,10 @@ final class DebugInfo
     private static function funcNameFromCode(Proto $p, int $pc): ?array
     {
         $instruction = $p->code[$pc];  // calling instruction
-        switch (OpCodes::GET_OPCODE($instruction)) {
+        switch (OpCodes::getOpcode($instruction)) {
             case OpCodes::OP_CALL:
             case OpCodes::OP_TAILCALL:
-                [$kind, $name] = self::getObjName($p, $pc, OpCodes::GETARG_A($instruction));  // get function name
+                [$kind, $name] = self::getObjName($p, $pc, OpCodes::getArgA($instruction));  // get function name
                 return $kind === null ? null : [$kind, $name];
             case OpCodes::OP_TFORCALL:  // for iterator
                 return ['for iterator', 'for iterator'];
@@ -305,7 +305,7 @@ final class DebugInfo
             case OpCodes::OP_MMBIN:
             case OpCodes::OP_MMBINI:
             case OpCodes::OP_MMBINK:
-                $tm = OpCodes::GETARG_C($instruction);
+                $tm = OpCodes::getArgC($instruction);
                 break;
             case OpCodes::OP_UNM:
                 $tm = MetaMethods::TM_UNM;
@@ -444,8 +444,14 @@ final class DebugInfo
     }
 
     /** ldebug.c: luaG_opinterror */
-    public static function opIntError(Coroutine $L, mixed $p1, mixed $p2, string $message, int $slot1, int $slot2): never
-    {
+    public static function opIntError(
+        Coroutine $L,
+        mixed $p1,
+        mixed $p2,
+        string $message,
+        int $slot1,
+        int $slot2,
+    ): never {
         if (!(\is_int($p1) || \is_float($p1))) {  // first operand is wrong?
             $p2 = $p1;  // now second is wrong
             $slot2 = $slot1;
@@ -565,7 +571,9 @@ final class DebugInfo
                     $info['short_src'] = ChunkId::of($info['source']);
                     break;
                 case 'l':
-                    $info['currentline'] = ($ci !== null && $ci->func instanceof LuaClosure) ? self::currentLine($ci) : -1;
+                    $info['currentline'] = ($ci !== null && $ci->func instanceof LuaClosure)
+                        ? self::currentLine($ci)
+                        : -1;
                     break;
                 case 'u':
                     if ($closure === null) {
@@ -768,11 +776,13 @@ final class DebugInfo
             [$ownSlots, $above[]] = $hookedFrames[$ci];
         } elseif ($function instanceof LuaClosure) {
             $instruction = $function->proto->code[$ci->savedpc];
-            $a = OpCodes::GETARG_A($instruction);
-            $ownSlots = match (OpCodes::GET_OPCODE($instruction)) {
+            $a = OpCodes::getArgA($instruction);
+            $ownSlots = match (OpCodes::getOpcode($instruction)) {
                 OpCodes::OP_CALL, OpCodes::OP_TAILCALL => $a,
                 OpCodes::OP_TFORCALL => $a + 4,
-                OpCodes::OP_NEWTABLE, OpCodes::OP_CONCAT, OpCodes::OP_CLOSURE => ($ci->callstatus & Lua::CIST_FIN) ? $a + 1 : $function->proto->maxstacksize,
+                OpCodes::OP_NEWTABLE, OpCodes::OP_CONCAT, OpCodes::OP_CLOSURE => ($ci->callstatus & Lua::CIST_FIN)
+                    ? $a + 1
+                    : $function->proto->maxstacksize,
                 default => $function->proto->maxstacksize,
             };
         } else {

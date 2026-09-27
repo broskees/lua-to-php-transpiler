@@ -124,8 +124,14 @@ final class CacheDirectory
      * $byteLimit bytes (see the class comment). Any failure just leaves
      * the entry out.
      */
-    public function write(string $key, ?string $protos, int $nesting, string $factorySource, int $entryLimit, int $byteLimit): void
-    {
+    public function write(
+        string $key,
+        ?string $protos,
+        int $nesting,
+        string $factorySource,
+        int $entryLimit,
+        int $byteLimit,
+    ): void {
         if (!$this->isUsable()) {
             return;
         }
@@ -157,7 +163,10 @@ final class CacheDirectory
                 [$entries, $bytes] = [0, 0];
             }
             $temporaryFile = "$directory/." . bin2hex(random_bytes(8)) . '.tmp';
-            if (@file_put_contents($temporaryFile, $contents) !== $size || !@rename($temporaryFile, "$directory/" . self::fileName($key))) {
+            if (
+                @file_put_contents($temporaryFile, $contents) !== $size
+                || !@rename($temporaryFile, "$directory/" . self::fileName($key))
+            ) {
                 @unlink($temporaryFile);
                 return;
             }
@@ -256,7 +265,10 @@ final class CacheDirectory
         }
         $realDirectory = realpath($directory);  // resolves symbolic links above it
         $status = $realDirectory === false ? false : @lstat($realDirectory);
-        if ($status === false || ($status['mode'] & 0170000) !== 0040000 || $status['uid'] !== $uid || ($status['mode'] & 0077) !== 0) {
+        if (
+            $status === false || ($status['mode'] & 0170000) !== 0040000
+            || $status['uid'] !== $uid || ($status['mode'] & 0077) !== 0
+        ) {
             return null;
         }
         $ancestor = $realDirectory;
@@ -266,7 +278,8 @@ final class CacheDirectory
             if (
                 $status === false
                 || ($status['uid'] !== 0 && $status['uid'] !== $uid)
-                || (($status['mode'] & 0022) !== 0 && ($status['mode'] & 01000) === 0)  // writable by others, not sticky
+                // writable by others, not sticky
+                || (($status['mode'] & 0022) !== 0 && ($status['mode'] & 01000) === 0)
             ) {
                 return null;
             }
@@ -286,7 +299,9 @@ final class CacheDirectory
         }
         $sourceDirectory = \dirname(__DIR__);
         $files = [];
-        $iterator = new \RecursiveIteratorIterator(new \RecursiveDirectoryIterator($sourceDirectory, \FilesystemIterator::SKIP_DOTS));
+        $iterator = new \RecursiveIteratorIterator(
+            new \RecursiveDirectoryIterator($sourceDirectory, \FilesystemIterator::SKIP_DOTS)
+        );
         foreach ($iterator as $file) {
             if (str_ends_with($file->getFilename(), '.php')) {
                 $files[] = $file->getPathname();

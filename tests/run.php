@@ -1,7 +1,5 @@
 <?php
 
-declare(strict_types=1);
-
 /**
  * Test runner:  php tests/run.php [substring-filter]
  *
@@ -15,7 +13,8 @@ declare(strict_types=1);
  * - Give each file its own namespace (Tests\<FileName>) so test names may
  *   repeat across files.
  * - A test passes when it returns and fails when it throws. Use the assert*
- *   helpers below; unqualified calls resolve to them from any namespace.
+ *   helpers of tests/harness.php; unqualified calls resolve to them from any
+ *   namespace.
  * - Tests that consult the reference interpreter call lua5.4 / luac5.4
  *   directly; scratch files go in scratchDirectory(), removed at exit.
  *
@@ -29,110 +28,24 @@ declare(strict_types=1);
  * (exit 139) at 8 MB and passes at 16 MB.
  */
 
+declare(strict_types=1);
+
 const TEST_STACK_BYTES = 8 * 1024 * 1024;
 $limits = @file_get_contents('/proc/self/limits');
-if ($limits !== false && preg_match('/^Max stack size +(\S+)/m', $limits, $match) && $match[1] !== (string) TEST_STACK_BYTES) {
+if (
+    $limits !== false && preg_match('/^Max stack size +(\S+)/m', $limits, $match)
+    && $match[1] !== (string) TEST_STACK_BYTES
+) {
     // the same command line (with php's own -d options) under the usual stack
     $commandLine = explode("\0", rtrim(file_get_contents('/proc/self/cmdline'), "\0"));
-    passthru('ulimit -s ' . (TEST_STACK_BYTES >> 10) . ' && exec ' . implode(' ', array_map('escapeshellarg', $commandLine)), $status);
+    $quotedCommandLine = implode(' ', array_map('escapeshellarg', $commandLine));
+    passthru('ulimit -s ' . (TEST_STACK_BYTES >> 10) . ' && exec ' . $quotedCommandLine, $status);
     exit($status);
 }
 
 require __DIR__ . '/../src/autoload.php';
-
-const REPO_ROOT = __DIR__ . '/..';
-const OFFICIAL_TESTS_DIRECTORY = REPO_ROOT . '/reference/lua-5.4.9-tests';
-
-/**
- * php options for a process that runs files a test has just generated or
- * cached: opcache compiles and optimizes them, where by default it skips
- * files younger than opcache.file_update_protection (2 seconds).
- */
-const OPCACHE_ON_NEW_FILES = ['-d', 'opcache.enable_cli=1', '-d', 'opcache.file_update_protection=0'];
-
-final class AssertionFailed extends \RuntimeException
-{
-}
-
-function assertSame(mixed $expected, mixed $actual, string $message = ''): void
-{
-    if ($expected === $actual) {
-        return;
-    }
-    $details = 'expected ' . var_export($expected, true) . ', got ' . var_export($actual, true);
-    throw new AssertionFailed($message === '' ? $details : "$message: $details");
-}
-
-function assertTrue(bool $condition, string $message = 'expected true'): void
-{
-    if (!$condition) {
-        throw new AssertionFailed($message);
-    }
-}
-
-/**
- * Run $callback and return the message of the $exceptionClass it throws;
- * fail if it throws nothing.
- */
-function assertThrows(string $exceptionClass, callable $callback): string
-{
-    try {
-        $callback();
-    } catch (\Throwable $thrown) {
-        if ($thrown instanceof $exceptionClass) {
-            return $thrown->getMessage();
-        }
-        throw $thrown;
-    }
-    throw new AssertionFailed("expected $exceptionClass to be thrown");
-}
-
-/**
- * Run a command (argument list, no shell); returns [exit code, stdout, stderr].
- *
- * @param list<string> $command
- * @return array{int, string, string}
- */
-function runCommand(array $command, string $standardInput = '', ?string $workingDirectory = null): array
-{
-    $process = proc_open(
-        $command,
-        [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
-        $pipes,
-        $workingDirectory,
-    );
-    if ($process === false) {
-        throw new \RuntimeException('cannot run ' . implode(' ', $command));
-    }
-    fwrite($pipes[0], $standardInput);
-    fclose($pipes[0]);
-    $standardOutput = stream_get_contents($pipes[1]);
-    $standardError = stream_get_contents($pipes[2]);
-    fclose($pipes[1]);
-    fclose($pipes[2]);
-    return [proc_close($process), $standardOutput, $standardError];
-}
-
-function scratchDirectory(): string
-{
-    static $directory = null;
-    if ($directory === null) {
-        $directory = sys_get_temp_dir() . '/luaphp-tests-' . getmypid() . '-' . bin2hex(random_bytes(4));
-        mkdir($directory);
-        register_shutdown_function(static function () use ($directory): void {
-            exec('rm -rf ' . escapeshellarg($directory));
-        });
-    }
-    return $directory;
-}
-
-/** @return list<string> absolute paths of the top-level official test files */
-function officialTestFiles(): array
-{
-    $files = glob(OFFICIAL_TESTS_DIRECTORY . '/*.lua');
-    sort($files);
-    return $files;
-}
+require __DIR__ . '/AssertionFailed.php';
+require __DIR__ . '/harness.php';
 
 $filter = $argv[1] ?? '';
 $testFiles = glob(__DIR__ . '/unit/*Test.php');
@@ -183,53 +96,14 @@ foreach ($testFiles as $testFile) {
  * Cases run in parallel; output goes through temporary files.
  */
 
-/**
- * Start $command with stdin from /dev/null and stdout/stderr into files.
- *
- * @param list<string> $command
- * @return array{resource, string, string}
- */
-function startProcess(array $command, string $workingDirectory): array
-{
-    $stdoutFile = tempnam(scratchDirectory(), 'out');
-    $stderrFile = tempnam(scratchDirectory(), 'err');
-    $process = proc_open(
-        $command,
-        [0 => ['file', '/dev/null', 'r'], 1 => ['file', $stdoutFile, 'w'], 2 => ['file', $stderrFile, 'w']],
-        $pipes,
-        $workingDirectory,
-    );
-    if ($process === false) {
-        throw new \RuntimeException('cannot run ' . implode(' ', $command));
-    }
-    return [$process, $stdoutFile, $stderrFile];
-}
-
-/**
- * @param array{resource, string, string} $started
- * @return array{int, string, string} [exit status, stdout, stderr]
- */
-function finishProcess(array $started): array
-{
-    [$process, $stdoutFile, $stderrFile] = $started;
-    $exitStatus = proc_close($process);
-    $result = [$exitStatus, file_get_contents($stdoutFile), file_get_contents($stderrFile)];
-    unlink($stdoutFile);
-    unlink($stderrFile);
-    return $result;
-}
-
-function normalizeDifferentialOutput(string $text, string $programName): string
-{
-    $text = preg_replace('/0x[0-9a-f]+/', '0x?', $text);
-    return preg_replace('/^' . preg_quote($programName, '/') . ':/m', 'lua:', $text);
-}
-
 $diffDirectory = __DIR__ . '/diff';
 $diffFiles = glob($diffDirectory . '/*.lua');
 sort($diffFiles);
 if ($filter !== '') {
-    $diffFiles = array_values(array_filter($diffFiles, static fn (string $file): bool => str_contains('diff/' . basename($file), $filter)));
+    $diffFiles = array_values(array_filter(
+        $diffFiles,
+        static fn (string $file): bool => str_contains('diff/' . basename($file), $filter),
+    ));
 }
 $ourProgram = realpath(REPO_ROOT . '/bin/lua');
 $parallelCases = 8;
@@ -251,17 +125,15 @@ foreach (array_chunk($diffFiles, $parallelCases) as $batch) {
         if ($referenceStatus !== $ourStatus) {
             $problems[] = "exit status: expected $referenceStatus, got $ourStatus";
         }
-        if (normalizeDifferentialOutput($referenceStdout, 'lua5.4') !== normalizeDifferentialOutput($ourStdout, 'lua5.4')) {
-            $problems[] = 'stdout differs' . firstDifference(
-                normalizeDifferentialOutput($referenceStdout, 'lua5.4'),
-                normalizeDifferentialOutput($ourStdout, 'lua5.4'),
-            );
+        $expectedStdout = normalizeDifferentialOutput($referenceStdout, 'lua5.4');
+        $actualStdout = normalizeDifferentialOutput($ourStdout, 'lua5.4');
+        if ($expectedStdout !== $actualStdout) {
+            $problems[] = 'stdout differs' . firstDifference($expectedStdout, $actualStdout);
         }
-        if (normalizeDifferentialOutput($referenceStderr, 'lua5.4') !== normalizeDifferentialOutput($ourStderr, $ourProgram)) {
-            $problems[] = 'stderr differs' . firstDifference(
-                normalizeDifferentialOutput($referenceStderr, 'lua5.4'),
-                normalizeDifferentialOutput($ourStderr, $ourProgram),
-            );
+        $expectedStderr = normalizeDifferentialOutput($referenceStderr, 'lua5.4');
+        $actualStderr = normalizeDifferentialOutput($ourStderr, $ourProgram);
+        if ($expectedStderr !== $actualStderr) {
+            $problems[] = 'stderr differs' . firstDifference($expectedStderr, $actualStderr);
         }
         if ($problems === []) {
             $passedCount++;
@@ -271,22 +143,6 @@ foreach (array_chunk($diffFiles, $parallelCases) as $batch) {
             printf("FAIL %s\n     %s\n", $label, implode("\n     ", $problems));
         }
     }
-}
-
-/** ": line N: expected '...', got '...'" for the first differing line */
-function firstDifference(string $expected, string $actual): string
-{
-    $expectedLines = explode("\n", $expected);
-    $actualLines = explode("\n", $actual);
-    $count = max(count($expectedLines), count($actualLines));
-    for ($i = 0; $i < $count; $i++) {
-        $expectedLine = $expectedLines[$i] ?? '<missing>';
-        $actualLine = $actualLines[$i] ?? '<missing>';
-        if ($expectedLine !== $actualLine) {
-            return sprintf(" at line %d:\n       expected: %s\n       got:      %s", $i + 1, substr($expectedLine, 0, 300), substr($actualLine, 0, 300));
-        }
-    }
-    return '';
 }
 
 printf("\n%d passed, %d failed\n", $passedCount, count($failedTests));

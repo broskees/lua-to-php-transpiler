@@ -55,7 +55,7 @@ final class TableConstructor
                     $t = $R[$a];
                     $key = $k[($instruction >> OpCodes::POS_B) & OpCodes::MAXARG_B];
                     $c = $instruction >> OpCodes::POS_C;
-                    $v = ($instruction & (1 << OpCodes::POS_k)) !== 0 ? $k[$c] : $R[$c];
+                    $v = ($instruction & (1 << OpCodes::POS_K)) !== 0 ? $k[$c] : $R[$c];
                     if ($t instanceof LuaTable && ($t->metatable === null || isset($t->hash[$key]))) {
                         if ($v !== null) {
                             $t->hash[$key] = $v;
@@ -71,12 +71,13 @@ final class TableConstructor
                 case OpCodes::OP_NEWTABLE:
                     $b = ($instruction >> OpCodes::POS_B) & OpCodes::MAXARG_B;
                     $arraySize = $instruction >> OpCodes::POS_C;
-                    if (($instruction & (1 << OpCodes::POS_k)) !== 0) {  // non-zero extra argument?
-                        $arraySize += ($code[$pc + 1] >> OpCodes::POS_Ax) * (OpCodes::MAXARG_C + 1);
+                    if (($instruction & (1 << OpCodes::POS_K)) !== 0) {  // non-zero extra argument?
+                        $arraySize += ($code[$pc + 1] >> OpCodes::POS_AX) * (OpCodes::MAXARG_C + 1);
                     }
                     $hashSize = $b > 0 ? 1 << ($b - 1) : 0;  // size is 2^(b - 1)
                     $R[$a] = new LuaTable($arraySize);
-                    if (($L->globalState->gcDebt += Collector::tableSize($arraySize, $hashSize)) > 0) {  // lvm.c: checkGC
+                    if (($L->globalState->gcDebt += Collector::tableSize($arraySize, $hashSize)) > 0) {
+                        // lvm.c: checkGC
                         $ci->savedpc = $pc;
                         Collector::step($L, $a + 1);
                     }
@@ -84,19 +85,19 @@ final class TableConstructor
                     break;
 
                 case OpCodes::OP_LOADK:
-                    $R[$a] = $k[$instruction >> OpCodes::POS_Bx];
+                    $R[$a] = $k[$instruction >> OpCodes::POS_BX];
                     break;
 
                 case OpCodes::OP_LOADKX:
-                    $R[$a] = $k[$code[++$pc] >> OpCodes::POS_Ax];  // (and skip its OP_EXTRAARG)
+                    $R[$a] = $k[$code[++$pc] >> OpCodes::POS_AX];  // (and skip its OP_EXTRAARG)
                     break;
 
                 case OpCodes::OP_LOADI:
-                    $R[$a] = ($instruction >> OpCodes::POS_Bx) - OpCodes::OFFSET_sBx;
+                    $R[$a] = ($instruction >> OpCodes::POS_BX) - OpCodes::OFFSET_SBX;
                     break;
 
                 case OpCodes::OP_LOADF:
-                    $R[$a] = (float) (($instruction >> OpCodes::POS_Bx) - OpCodes::OFFSET_sBx);
+                    $R[$a] = (float) (($instruction >> OpCodes::POS_BX) - OpCodes::OFFSET_SBX);
                     break;
 
                 case OpCodes::OP_LOADFALSE:
@@ -118,7 +119,7 @@ final class TableConstructor
                     $t = $R[$a];
                     $b = ($instruction >> OpCodes::POS_B) & OpCodes::MAXARG_B;
                     $c = $instruction >> OpCodes::POS_C;
-                    $v = ($instruction & (1 << OpCodes::POS_k)) !== 0 ? $k[$c] : $R[$c];
+                    $v = ($instruction & (1 << OpCodes::POS_K)) !== 0 ? $k[$c] : $R[$c];
                     if ($t instanceof LuaTable && ($t->metatable === null || isset($t->arr[$b]))) {
                         if ($v !== null) {
                             $t->arr[$b] = $v;
@@ -135,14 +136,17 @@ final class TableConstructor
                     $t = $R[$a];
                     $key = $R[($instruction >> OpCodes::POS_B) & OpCodes::MAXARG_B];
                     $c = $instruction >> OpCodes::POS_C;
-                    $v = ($instruction & (1 << OpCodes::POS_k)) !== 0 ? $k[$c] : $R[$c];
+                    $v = ($instruction & (1 << OpCodes::POS_K)) !== 0 ? $k[$c] : $R[$c];
                     if ($t instanceof LuaTable && \is_int($key) && ($t->metatable === null || isset($t->arr[$key]))) {
                         if ($v !== null) {
                             $t->arr[$key] = $v;
                         } else {
                             unset($t->arr[$key]);
                         }
-                    } elseif ($t instanceof LuaTable && \is_string($key) && ($t->metatable === null || isset($t->hash[$key]))) {
+                    } elseif (
+                        $t instanceof LuaTable && \is_string($key)
+                        && ($t->metatable === null || isset($t->hash[$key]))
+                    ) {
                         if ($v !== null) {
                             $t->hash[$key] = $v;
                         } else {
@@ -157,8 +161,9 @@ final class TableConstructor
                 case OpCodes::OP_SETLIST:  // (never with B = 0 here: see FunctionEmitter)
                     $n = ($instruction >> OpCodes::POS_B) & OpCodes::MAXARG_B;
                     $index = $instruction >> OpCodes::POS_C;  // the last index already set
-                    if (($instruction & (1 << OpCodes::POS_k)) !== 0) {
-                        $index += ($code[++$pc] >> OpCodes::POS_Ax) * (OpCodes::MAXARG_C + 1);  // (and skip its OP_EXTRAARG)
+                    if (($instruction & (1 << OpCodes::POS_K)) !== 0) {
+                        // (and skip its OP_EXTRAARG)
+                        $index += ($code[++$pc] >> OpCodes::POS_AX) * (OpCodes::MAXARG_C + 1);
                     }
                     $t = $R[$a];
                     for ($i = 1; $i <= $n; $i++) {
@@ -175,7 +180,9 @@ final class TableConstructor
                     break;
 
                 default:
-                    throw new \LogicException('not a table constructor instruction: ' . OpCodes::OPNAMES[$instruction & 0x7F]);
+                    throw new \LogicException(
+                        'not a table constructor instruction: ' . OpCodes::OPNAMES[$instruction & 0x7F]
+                    );
             }
         }
     }

@@ -37,7 +37,10 @@ final class BaseLib
     private const SPACECHARS = " \f\n\r\t\v";
 
     /** collectgarbage's options (lbaselib.c: luaB_collectgarbage's opts) */
-    private const GC_OPTIONS = ['stop', 'restart', 'collect', 'count', 'step', 'setpause', 'setstepmul', 'isrunning', 'generational', 'incremental'];
+    private const GC_OPTIONS = [
+        'stop', 'restart', 'collect', 'count', 'step', 'setpause', 'setstepmul', 'isrunning',
+        'generational', 'incremental',
+    ];
 
     /** the options collectgarbage has in a sandbox */
     private const SANDBOX_GC_OPTIONS = ['collect', 'count', 'step'];
@@ -177,7 +180,9 @@ final class BaseLib
         $number = 0;
         do {
             $character = $s[$position];
-            $digit = ctype_digit($character) ? \ord($character) - \ord('0') : \ord(strtoupper($character)) - \ord('A') + 10;
+            $digit = ctype_digit($character)
+                ? \ord($character) - \ord('0')
+                : \ord(strtoupper($character)) - \ord('A') + 10;
             if ($digit >= $base) {
                 return null;  // invalid numeral
             }
@@ -251,7 +256,8 @@ final class BaseLib
         }
         $metatableType = Auxiliary::argumentType($args, 2);
         $table = Auxiliary::checkTable($L, $args, 1);
-        Auxiliary::argExpected($L, $metatableType === Lua::LUA_TNIL || $metatableType === Lua::LUA_TTABLE, $args, 2, 'nil or table');
+        $isNilOrTable = $metatableType === Lua::LUA_TNIL || $metatableType === Lua::LUA_TTABLE;
+        Auxiliary::argExpected($L, $isNilOrTable, $args, 2, 'nil or table');
         if (Auxiliary::getMetafield($L, $table, '__metatable') !== null) {
             Auxiliary::error($L, 'cannot change a protected metatable');
         }
@@ -303,9 +309,11 @@ final class BaseLib
     {
         $option = $options[Auxiliary::checkOption($L, $args, 1, 'collect', $options)];
         $G = $L->globalState;
-        $cInt = static fn (int $index): int => ((Auxiliary::optInteger($L, $args, $index, 0) & 0xFFFFFFFF) ^ 0x80000000) - 0x80000000;
+        $cInt = static fn (int $index): int
+            => ((Auxiliary::optInteger($L, $args, $index, 0) & 0xFFFFFFFF) ^ 0x80000000) - 0x80000000;
         $toByte = static fn (int $value): int => $value & 0xFF;  // C: assignment to lu_byte
-        $pushMode = static fn (int $previousMode): array => [$previousMode === Collector::KGC_INC ? 'incremental' : 'generational'];
+        $pushMode = static fn (int $previousMode): array
+            => [$previousMode === Collector::KGC_INC ? 'incremental' : 'generational'];
         switch ($option) {
             case 'count':
                 if ($G->gcstp & Collector::GCSTPGC) {
@@ -504,7 +512,10 @@ final class BaseLib
         $globals->set('loadfile', null);
         $globals->set('load', null);
         if ($allowLoad) {
-            $globals->hash['load'] = new NativeFunction('load', static fn (Coroutine $L, array $args): array => self::load($L, $args, true));
+            $globals->hash['load'] = new NativeFunction(
+                'load',
+                static fn (Coroutine $L, array $args): array => self::load($L, $args, true),
+            );
         }
         $globals->hash['collectgarbage'] = new NativeFunction(
             'collectgarbage',
@@ -526,7 +537,11 @@ final class BaseLib
         }
         if ($chunk !== null) {  // loading a string?
             $chunkname = Auxiliary::optString($L, $args, 2, $chunk);
-            return self::loadResult(static fn (): LuaClosure => ChunkLoader::load($L, $chunk, $chunkname, $mode), $args, 4);
+            return self::loadResult(
+                static fn (): LuaClosure => ChunkLoader::load($L, $chunk, $chunkname, $mode),
+                $args,
+                4,
+            );
         }
         // loading from a reader function
         $chunkname = Auxiliary::optString($L, $args, 2, '=(load)');

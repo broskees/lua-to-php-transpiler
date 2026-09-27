@@ -25,7 +25,11 @@ function runLua(string $name, string $source, array $phpOptions): array
     $directory = scratchDirectory() . '/constructors';
     @mkdir($directory);
     file_put_contents("$directory/$name.lua", $source);
-    return runCommand(['env', '-u', 'LUAPHP_CACHE_DIR', 'php', ...$phpOptions, REPO_ROOT . '/bin/lua', "$name.lua"], '', $directory);
+    return runCommand(
+        ['env', '-u', 'LUAPHP_CACHE_DIR', 'php', ...$phpOptions, REPO_ROOT . '/bin/lua', "$name.lua"],
+        '',
+        $directory,
+    );
 }
 
 function assertSameAsInline(string $name, string $source): string
@@ -60,7 +64,8 @@ function test_collections_in_the_middle_of_constructors_see_the_same_state(): vo
             if name == nil then break end
             registers[#registers + 1] = describe(value)
           end
-          log[#log + 1] = {info.short_src .. ":" .. info.currentline .. " " .. table.concat(registers, " "), info.func, info.currentline}
+          log[#log + 1] = {info.short_src .. ":" .. info.currentline .. " " .. table.concat(registers, " "),
+                           info.func, info.currentline}
           newProbe()
         end
         newProbe()
@@ -82,7 +87,8 @@ function test_collections_in_the_middle_of_constructors_see_the_same_state(): vo
         local inside = 0  -- collections that started inside a constructor
         for _, entry in ipairs(log) do
           local f, line = entry[2], entry[3]
-          if f == big or (f == medium and line > debug.getinfo(medium, "S").linedefined and line < debug.getinfo(medium, "S").lastlinedefined - 1) then
+          if f == big or (f == medium and line > debug.getinfo(medium, "S").linedefined
+                          and line < debug.getinfo(medium, "S").lastlinedefined - 1) then
             inside = inside + 1
           end
         end
@@ -160,12 +166,19 @@ function test_a_data_module_is_one_call_without_literals(): void
 function test_small_constructors_get_a_fast_path_of_literals(): void
 {
     $long = str_repeat('long string ', 5);
-    $code = Emitter::emitChunk(Compiler::compile("local e = {}\nprint(e)\nlocal t = {x = 1, y = 's', 1, 2.5, {true}, '$long'}\nreturn e, t", '=small'));
+    $source = "local e = {}\nprint(e)\nlocal t = {x = 1, y = 's', 1, 2.5, {true}, '$long'}\nreturn e, t";
+    $code = Emitter::emitChunk(Compiler::compile($source, '=small'));
     assertTrue(str_contains($code, "// [1] NEWTABLE 0 0 0 ; line 1\n"), '{} stays inline');
     assertTrue(str_contains($code, "// [6..17] constant table constructor: 12 instructions ; lines 3-3\n"), 'a run');
-    assertTrue(preg_match('/if \(!\$trap && \$L->globalState->gcDebt \+ (\d+) <= 0\) \{/', $code, $match) === 1, 'fast path when no hook or collection can run');
+    assertTrue(
+        preg_match('/if \(!\$trap && \$L->globalState->gcDebt \+ (\d+) <= 0\) \{/', $code, $match) === 1,
+        'fast path when no hook or collection can run',
+    );
     assertTrue(str_contains($code, "\$L->globalState->gcDebt += {$match[1]};"), 'charges the same debt');
-    assertTrue(str_contains($code, "\$table0->arr = [1 => 1, 2 => 2.5, 3 => \$table1, 4 => \$cl->proto->k[6]];"), 'array part, long strings from the Proto');
+    assertTrue(
+        str_contains($code, "\$table0->arr = [1 => 1, 2 => 2.5, 3 => \$table1, 4 => \$cl->proto->k[6]];"),
+        'array part, long strings from the Proto',
+    );
     assertTrue(str_contains($code, "\$table0->hash = ['x' => 1, 'y' => 's'];"), 'hash part');
     assertTrue(str_contains($code, "\$table1->arr = [1 => true];"), 'nested table');
     assertTrue(str_contains($code, 'TableConstructor::run($L, $ci, $R, 6, 17);'), 'steps otherwise');

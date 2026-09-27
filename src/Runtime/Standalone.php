@@ -169,7 +169,11 @@ final class Standalone
         }
         if (str_starts_with($init, '@')) {
             $filename = substr($init, 1);  // precompiled in lua2php output, like any file
-            return self::doChunk($L, $programName, static fn (): LuaClosure => ChunkLoader::loadFile($L, $filename, null));
+            return self::doChunk(
+                $L,
+                $programName,
+                static fn (): LuaClosure => ChunkLoader::loadFile($L, $filename, null),
+            );
         }
         // code that exists only at run time: load(), and its cache, also in lua2php output
         return self::doChunk($L, $programName, static fn (): LuaClosure => ChunkLoader::load($L, $init, $name, null));
@@ -235,7 +239,7 @@ final class Standalone
         $L = Coroutine::newState();
         $L->globalState->filesArePrecompiled = true;
         $L->globalState->gcstp = Collector::GCSTPUSR;  // lua_gc(L, LUA_GCSTOP): stop GC while building state
-        $pmain = new NativeFunction('pmain', static function (Coroutine $L, array $args) use ($argv, $programName, $scriptName, $chunk): array {
+        $runMain = static function (Coroutine $L, array $args) use ($argv, $programName, $scriptName, $chunk): array {
             StandardLibraries::openAll($L);
             $luaArgv = array_merge([$argv[0] ?? 'lua', $scriptName], \array_slice($argv, 1));
             self::createArgTable($L, $luaArgv, 1);
@@ -244,9 +248,11 @@ final class Standalone
             if (self::handleLuaInit($L, $programName) !== Lua::LUA_OK) {
                 return [false];
             }
-            $loadScript = static fn (): LuaClosure => ChunkLoader::loadPrecompiled($L, $chunk, '@' . $scriptName, null);  // luaL_loadfile
+            // luaL_loadfile
+            $loadScript = static fn (): LuaClosure => ChunkLoader::loadPrecompiled($L, $chunk, '@' . $scriptName, null);
             return [self::handleScript($L, $programName, $loadScript) === Lua::LUA_OK];
-        });
+        };
+        $pmain = new NativeFunction('pmain', $runMain);
         [$status, $result] = Calls::protectedCall($L, $pmain, []);
         self::report($programName, $status, $result);
         Collector::closeState($L);  // lua_close

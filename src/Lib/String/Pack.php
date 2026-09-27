@@ -23,21 +23,21 @@ use LuaPhp\Runtime\MemoryLimit;
  */
 final class Pack
 {
-    // lstrlib.c: KOption
     /** string.unpack checks the memory of its results (MemoryLimit::RESULT_BYTES each) every this many */
     private const RESULTS_PER_CHECK = 1024;
 
-    private const Kint = 0;  // signed integers
-    private const Kuint = 1;  // unsigned integers
-    private const Kfloat = 2;  // single-precision floating-point numbers
-    private const Knumber = 3;  // Lua "native" floating-point numbers
-    private const Kdouble = 4;  // double-precision floating-point numbers
-    private const Kchar = 5;  // fixed-length strings
-    private const Kstring = 6;  // strings with prefixed length
-    private const Kzstr = 7;  // zero-terminated strings
-    private const Kpadding = 8;  // padding
-    private const Kpaddalign = 9;  // padding for alignment
-    private const Knop = 10;  // no-op (configuration or spaces)
+    // lstrlib.c: KOption (Kint, Kuint, ... in upper case)
+    private const KINT = 0;  // signed integers
+    private const KUINT = 1;  // unsigned integers
+    private const KFLOAT = 2;  // single-precision floating-point numbers
+    private const KNUMBER = 3;  // Lua "native" floating-point numbers
+    private const KDOUBLE = 4;  // double-precision floating-point numbers
+    private const KCHAR = 5;  // fixed-length strings
+    private const KSTRING = 6;  // strings with prefixed length
+    private const KZSTR = 7;  // zero-terminated strings
+    private const KPADDING = 8;  // padding
+    private const KPADDALIGN = 9;  // padding for alignment
+    private const KNOP = 10;  // no-op (configuration or spaces)
 
     // lstrlib.c: MAXINTSIZE (maximum size for the binary representation of an integer)
     private const MAXINTSIZE = 16;
@@ -115,38 +115,66 @@ final class Pack
     {
         $option = $this->format[$this->position++];
         switch ($option) {
-            case 'b': return [self::Kint, 1];
-            case 'B': return [self::Kuint, 1];
-            case 'h': return [self::Kint, self::SIZEOF_SHORT];
-            case 'H': return [self::Kuint, self::SIZEOF_SHORT];
-            case 'l': return [self::Kint, self::SIZEOF_LONG];
-            case 'L': return [self::Kuint, self::SIZEOF_LONG];
-            case 'j': return [self::Kint, self::SZINT];
-            case 'J': return [self::Kuint, self::SZINT];
-            case 'T': return [self::Kuint, self::SIZEOF_SIZE_T];
-            case 'f': return [self::Kfloat, 4];
-            case 'n': return [self::Knumber, 8];
-            case 'd': return [self::Kdouble, 8];
-            case 'i': return [self::Kint, $this->getNumberLimit(self::SIZEOF_INT)];
-            case 'I': return [self::Kuint, $this->getNumberLimit(self::SIZEOF_INT)];
-            case 's': return [self::Kstring, $this->getNumberLimit(self::SIZEOF_SIZE_T)];
+            case 'b':
+                return [self::KINT, 1];
+            case 'B':
+                return [self::KUINT, 1];
+            case 'h':
+                return [self::KINT, self::SIZEOF_SHORT];
+            case 'H':
+                return [self::KUINT, self::SIZEOF_SHORT];
+            case 'l':
+                return [self::KINT, self::SIZEOF_LONG];
+            case 'L':
+                return [self::KUINT, self::SIZEOF_LONG];
+            case 'j':
+                return [self::KINT, self::SZINT];
+            case 'J':
+                return [self::KUINT, self::SZINT];
+            case 'T':
+                return [self::KUINT, self::SIZEOF_SIZE_T];
+            case 'f':
+                return [self::KFLOAT, 4];
+            case 'n':
+                return [self::KNUMBER, 8];
+            case 'd':
+                return [self::KDOUBLE, 8];
+            case 'i':
+                return [self::KINT, $this->getNumberLimit(self::SIZEOF_INT)];
+            case 'I':
+                return [self::KUINT, $this->getNumberLimit(self::SIZEOF_INT)];
+            case 's':
+                return [self::KSTRING, $this->getNumberLimit(self::SIZEOF_SIZE_T)];
             case 'c':
                 $size = $this->getNumber(-1);
                 if ($size === -1) {
                     Auxiliary::error($this->L, "missing size for format option 'c'");
                 }
-                return [self::Kchar, $size];
-            case 'z': return [self::Kzstr, 0];
-            case 'x': return [self::Kpadding, 1];
-            case 'X': return [self::Kpaddalign, 0];
-            case ' ': break;
-            case '<': $this->isLittle = true; break;
-            case '>': $this->isLittle = false; break;
-            case '=': $this->isLittle = true; break;  // native endianness
-            case '!': $this->maxAlign = $this->getNumberLimit(self::NATIVE_MAXALIGN); break;
-            default: Auxiliary::error($this->L, "invalid format option '$option'");
+                return [self::KCHAR, $size];
+            case 'z':
+                return [self::KZSTR, 0];
+            case 'x':
+                return [self::KPADDING, 1];
+            case 'X':
+                return [self::KPADDALIGN, 0];
+            case ' ':
+                break;
+            case '<':
+                $this->isLittle = true;
+                break;
+            case '>':
+                $this->isLittle = false;
+                break;
+            case '=':  // native endianness
+                $this->isLittle = true;
+                break;
+            case '!':
+                $this->maxAlign = $this->getNumberLimit(self::NATIVE_MAXALIGN);
+                break;
+            default:
+                Auxiliary::error($this->L, "invalid format option '$option'");
         }
-        return [self::Knop, 0];
+        return [self::KNOP, 0];
     }
 
     /**
@@ -159,16 +187,16 @@ final class Pack
     {
         [$option, $size] = $this->getOption();
         $align = $size;  // usually, alignment follows size
-        if ($option === self::Kpaddalign) {  // 'X' gets alignment from following option
+        if ($option === self::KPADDALIGN) {  // 'X' gets alignment from following option
             if ($this->atEnd()) {
                 Auxiliary::argError($this->L, 1, "invalid next option for option 'X'");
             }
             [$nextOption, $align] = $this->getOption();
-            if ($nextOption === self::Kchar || $align === 0) {
+            if ($nextOption === self::KCHAR || $align === 0) {
                 Auxiliary::argError($this->L, 1, "invalid next option for option 'X'");
             }
         }
-        if ($align <= 1 || $option === self::Kchar) {  // need no alignment?
+        if ($align <= 1 || $option === self::KCHAR) {  // need no alignment?
             return [$option, $size, 0];
         }
         if ($align > $this->maxAlign) {  // enforce maximum alignment
@@ -245,12 +273,15 @@ final class Pack
             $totalSize += $alignmentPadding + $size;
             // room for the alignment and a number (strings are checked below, after their argument)
             if (\strlen($result) + $alignmentPadding + self::MAXINTSIZE > $capacity) {
-                $capacity = MemoryLimit::grow(\strlen($result) + $alignmentPadding + self::MAXINTSIZE, $L->globalState->budget);
+                $capacity = MemoryLimit::grow(
+                    \strlen($result) + $alignmentPadding + self::MAXINTSIZE,
+                    $L->globalState->budget,
+                );
             }
             $result .= str_repeat("\0", $alignmentPadding);  // fill alignment
             $arg++;
             switch ($option) {
-                case self::Kint:  // signed integers
+                case self::KINT:  // signed integers
                     $n = Auxiliary::checkInteger($L, $args, $arg);
                     if ($size < self::SZINT) {  // need overflow check?
                         $limit = 1 << ($size * 8 - 1);
@@ -258,21 +289,21 @@ final class Pack
                     }
                     $result .= $header->packInteger($n, $size, $n < 0);
                     break;
-                case self::Kuint:  // unsigned integers
+                case self::KUINT:  // unsigned integers
                     $n = Auxiliary::checkInteger($L, $args, $arg);
                     if ($size < self::SZINT) {  // need overflow check?
                         Auxiliary::argCheck($L, $n >= 0 && $n < (1 << ($size * 8)), $arg, 'unsigned overflow');
                     }
                     $result .= $header->packInteger($n, $size, false);
                     break;
-                case self::Kfloat:  // C float
+                case self::KFLOAT:  // C float
                     $result .= $header->floatBytes(pack('g', (float) Auxiliary::checkNumber($L, $args, $arg)));
                     break;
-                case self::Knumber:  // Lua float
-                case self::Kdouble:  // C double
+                case self::KNUMBER:  // Lua float
+                case self::KDOUBLE:  // C double
                     $result .= $header->floatBytes(pack('e', (float) Auxiliary::checkNumber($L, $args, $arg)));
                     break;
-                case self::Kchar:  // fixed-size string
+                case self::KCHAR:  // fixed-size string
                     $string = Auxiliary::checkString($L, $args, $arg);
                     $length = \strlen($string);
                     Auxiliary::argCheck($L, $length <= $size, $arg, 'string longer than given size');
@@ -281,7 +312,7 @@ final class Pack
                     }
                     $result .= $string . str_repeat("\0", $size - $length);  // pad extra space
                     break;
-                case self::Kstring:  // strings with length count
+                case self::KSTRING:  // strings with length count
                     $string = Auxiliary::checkString($L, $args, $arg);
                     $length = \strlen($string);
                     Auxiliary::argCheck(
@@ -296,7 +327,7 @@ final class Pack
                     $result .= $header->packInteger($length, $size, false) . $string;  // pack length, add string
                     $totalSize += $length;
                     break;
-                case self::Kzstr:  // zero-terminated string
+                case self::KZSTR:  // zero-terminated string
                     $string = Auxiliary::checkString($L, $args, $arg);
                     Auxiliary::argCheck($L, !str_contains($string, "\0"), $arg, 'string contains zeros');
                     if (\strlen($result) + \strlen($string) + 1 > $capacity) {
@@ -305,7 +336,7 @@ final class Pack
                     $result .= $string . "\0";  // add zero at the end
                     $totalSize += \strlen($string) + 1;
                     break;
-                case self::Kpadding:
+                case self::KPADDING:
                     $result .= "\0";
                     $arg--;  // undo increment
                     break;
@@ -325,7 +356,7 @@ final class Pack
         $totalSize = 0;  // accumulate total size of result
         while (!$header->atEnd()) {
             [$option, $size, $alignmentPadding] = $header->getDetails($totalSize);
-            Auxiliary::argCheck($L, $option !== self::Kstring && $option !== self::Kzstr, 1, 'variable-length format');
+            Auxiliary::argCheck($L, $option !== self::KSTRING && $option !== self::KZSTR, 1, 'variable-length format');
             $size += $alignmentPadding;  // total space used by option
             Auxiliary::argCheck($L, $totalSize <= self::MAXSIZE - $size, 1, 'format result too large');
             $totalSize += $size;
@@ -357,29 +388,30 @@ final class Pack
                 MemoryLimit::reserve(self::RESULTS_PER_CHECK * MemoryLimit::RESULT_BYTES, $L->globalState->budget);
             }
             switch ($option) {
-                case self::Kint:
-                case self::Kuint:
-                    $results[] = $header->unpackInteger($data, $position, $size, $option === self::Kint);
+                case self::KINT:
+                case self::KUINT:
+                    $results[] = $header->unpackInteger($data, $position, $size, $option === self::KINT);
                     break;
-                case self::Kfloat:
+                case self::KFLOAT:
                     $results[] = unpack('g', $header->floatBytes(substr($data, $position, 4)))[1];
                     break;
-                case self::Knumber:
-                case self::Kdouble:
+                case self::KNUMBER:
+                case self::KDOUBLE:
                     $results[] = unpack('e', $header->floatBytes(substr($data, $position, 8)))[1];
                     break;
-                case self::Kchar:
+                case self::KCHAR:
                     MemoryLimit::reserve($size, $L->globalState->budget);
                     $results[] = substr($data, $position, $size);
                     break;
-                case self::Kstring:
+                case self::KSTRING:
                     $length = $header->unpackInteger($data, $position, $size, false);  // a size_t
-                    Auxiliary::argCheck($L, $length >= 0 && $length <= $dataLength - $position - $size, 2, 'data string too short');
+                    $fits = $length >= 0 && $length <= $dataLength - $position - $size;
+                    Auxiliary::argCheck($L, $fits, 2, 'data string too short');
                     MemoryLimit::reserve($length, $L->globalState->budget);
                     $results[] = substr($data, $position + $size, $length);
                     $position += $length;  // skip string
                     break;
-                case self::Kzstr:
+                case self::KZSTR:
                     $zeroPosition = strpos($data, "\0", $position);
                     $length = ($zeroPosition === false ? $dataLength : $zeroPosition) - $position;
                     Auxiliary::argCheck($L, $position + $length < $dataLength, 2, "unfinished string for format 'z'");

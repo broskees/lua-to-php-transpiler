@@ -27,7 +27,7 @@ function assertCorpusBehavesLikeLua(array $phpOptions, string $label): void
     assertSame(0, $expected[0], 'lua5.4 exit status');
     assertSame([0, ''], [$actual[0], $actual[2]], "$label: exit status and stderr");
     if ($expected[1] !== $actual[1]) {
-        throw new \AssertionFailed("$label: stdout differs" . firstDifference($expected[1], $actual[1]));
+        throw new \Tests\AssertionFailed("$label: stdout differs" . firstDifference($expected[1], $actual[1]));
     }
 }
 
@@ -66,8 +66,10 @@ function test_patterns_are_translated_unless_the_matcher_could_raise_an_error():
         assertTrue($isTranslated($pattern), "translated: '$pattern'");
     }
     // (a pattern here is what match() sees: the drivers strip a leading '^')
-    $leftToThePort = ['%', 'x%', '[a', '[^]', '(a', 'a)', '())', '%0', '%1', '(%1)', '(a)%2', '%b', '%bx', '%f', '%fx', '%f[a',
-        str_repeat('a?', 191), str_repeat('(a)', 33), str_repeat('a', 513)];
+    $leftToThePort = [
+        '%', 'x%', '[a', '[^]', '(a', 'a)', '())', '%0', '%1', '(%1)', '(a)%2', '%b', '%bx', '%f', '%fx', '%f[a',
+        str_repeat('a?', 191), str_repeat('(a)', 33), str_repeat('a', 513),
+    ];
     foreach ($leftToThePort as $pattern) {
         assertTrue(!$isTranslated($pattern), "left to the port: '$pattern'");
     }

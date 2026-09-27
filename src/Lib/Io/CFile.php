@@ -135,13 +135,22 @@ final class CFile
         $stream = @fopen(self::plainPath($filename), $mode);
         if ($stream === false) {
             Errno::setFromPhpError(Errno::ENOENT);
-            if (Errno::$errno === Errno::ENOENT || Errno::$errno === Errno::EINVAL) {  // maybe PHP's own path lookup failed
+            if (Errno::$errno === Errno::ENOENT || Errno::$errno === Errno::EINVAL) {
+                // maybe PHP's own path lookup failed
                 Errno::$errno = Errno::lookupError($filename, $mode[0] !== 'r') ?? Errno::$errno;
             }
             return null;
         }
         $update = str_contains($mode, '+');
-        $file = new self($stream, $mode[0] === 'r' || $update, $mode[0] !== 'r' || $update, true, false, null, $mode[0] === 'a');
+        $file = new self(
+            $stream,
+            $mode[0] === 'r' || $update,
+            $mode[0] !== 'r' || $update,
+            true,
+            false,
+            null,
+            $mode[0] === 'a',
+        );
         $status = @fstat($stream);
         $file->isDirectory = \is_array($status) && ($status['mode'] & 0170000) === 0040000;
         if ($mode[0] === 'a' && !$update) {  // glibc: write-only append streams start at the end
@@ -173,7 +182,8 @@ final class CFile
         $file = match ($fd) {
             0 => new self(\defined('STDIN') ? STDIN : fopen('php://stdin', 'r'), true, false, false),
             1 => new self(\defined('STDOUT') ? STDOUT : fopen('php://stdout', 'w'), false, true, false, true),
-            default => (new self(\defined('STDERR') ? STDERR : fopen('php://stderr', 'w'), false, true, false))->unbuffered(),
+            default => (new self(\defined('STDERR') ? STDERR : fopen('php://stderr', 'w'), false, true, false))
+                ->unbuffered(),
         };
         if ($fd !== 0) {
             $file->sinkState = $G;
@@ -610,8 +620,12 @@ final class CFile
         $this->atEndAfterAppend = false;
         $this->pushback = '';
         $stream = $this->stream;
-        if ($this->sinkState !== null
-            && !($this->isStdout ? $this->sinkState->output instanceof StandardOutput : $this->sinkState->errorOutput instanceof StandardError)) {
+        if (
+            $this->sinkState !== null
+            && !($this->isStdout
+                ? $this->sinkState->output instanceof StandardOutput
+                : $this->sinkState->errorOutput instanceof StandardError)
+        ) {
             Errno::$errno = Errno::ESPIPE;  // an output sink is like a pipe
             return null;
         }
@@ -681,7 +695,8 @@ final class CFile
     {
         $status = proc_get_status($process);
         $pcntlAvailable = \function_exists('pcntl_waitpid') && \function_exists('pcntl_get_last_error')
-            && \function_exists('pcntl_wifsignaled') && \function_exists('pcntl_wtermsig') && \function_exists('pcntl_wexitstatus');
+            && \function_exists('pcntl_wifsignaled') && \function_exists('pcntl_wtermsig')
+            && \function_exists('pcntl_wexitstatus');
         if ($status['running'] && !$pcntlAvailable) {
             for ($delayMicroseconds = 100; $status['running']; $status = proc_get_status($process)) {
                 usleep($delayMicroseconds);

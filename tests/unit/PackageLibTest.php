@@ -19,7 +19,10 @@ namespace Tests\PackageLibTest;
  */
 function assertSameAsReference(array $arguments, array $environment = [], ?string $workingDirectory = null): void
 {
-    $envCommand = ['env', '-u', 'LUA_PATH', '-u', 'LUA_PATH_5_4', '-u', 'LUA_CPATH', '-u', 'LUA_CPATH_5_4', '-u', 'LUA_INIT', '-u', 'LUA_INIT_5_4'];
+    $envCommand = [
+        'env', '-u', 'LUA_PATH', '-u', 'LUA_PATH_5_4', '-u', 'LUA_CPATH', '-u', 'LUA_CPATH_5_4',
+        '-u', 'LUA_INIT', '-u', 'LUA_INIT_5_4',
+    ];
     foreach ($environment as $name => $value) {
         $envCommand[] = "$name=$value";
     }
@@ -29,7 +32,11 @@ function assertSameAsReference(array $arguments, array $environment = [], ?strin
     $label = 'lua ' . implode(' ', $arguments) . ' with ' . json_encode($environment);
     assertSame($reference[0], $ours[0], "$label: exit status");
     assertSame($reference[1], $ours[1], "$label: stdout");
-    assertSame(str_replace('lua5.4:', 'lua:', $reference[2]), str_replace($ourProgram . ':', 'lua:', $ours[2]), "$label: stderr");
+    assertSame(
+        str_replace('lua5.4:', 'lua:', $reference[2]),
+        str_replace($ourProgram . ':', 'lua:', $ours[2]),
+        "$label: stderr",
+    );
 }
 
 function test_paths_come_from_the_environment(): void
@@ -71,7 +78,8 @@ function test_loadlib_without_dynamic_libraries(): void
     $dlmsg = 'dynamic libraries not enabled; check your Lua installation';
     assertSame([
         0,
-        "nil\t$dlmsg\tabsent\nnil\t$dlmsg\tabsent\nfalse\tbad argument #2 to 'package.loadlib' (string expected, got no value)\n",
+        "nil\t$dlmsg\tabsent\nnil\t$dlmsg\tabsent\n"
+            . "false\tbad argument #2 to 'package.loadlib' (string expected, got no value)\n",
         '',
     ], $result);
 }

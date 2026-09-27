@@ -17,8 +17,11 @@ namespace LuaPhp\Compiler;
  * iAx                           Ax(25)                     |   Op(7)     |
  * isJ                           sJ (signed)(25)            |   Op(7)     |
  *
- * Macros keep their C names (GETARG_A, SETARG_sBx, CREATE_ABCk, ...) so C
- * code ports mechanically. The C getters' check_exp() mode assertions are
+ * Macros are methods named after them in camelCase (GETARG_A is getArgA,
+ * SETARG_sBx setArgSBx, CREATE_ABCk createABCk, GET_OPCODE getOpcode,
+ * MASK1 mask1) and constants keep their C names in upper case (iABC is
+ * IABC, MAXARG_Bx MAXARG_BX, OFFSET_sBx OFFSET_SBX, POS_k POS_K), so C code
+ * still ports mechanically. The C getters' check_exp() mode assertions are
  * debug-only in C and are not ported. SET* functions return the new
  * instruction instead of modifying their argument.
  *
@@ -26,46 +29,46 @@ namespace LuaPhp\Compiler;
  */
 final class OpCodes
 {
-    // lopcodes.h: enum OpMode
-    public const iABC = 0;
-    public const iABx = 1;
-    public const iAsBx = 2;
-    public const iAx = 3;
-    public const isJ = 4;
+    // lopcodes.h: enum OpMode (iABC, iABx, iAsBx, iAx, isJ)
+    public const IABC = 0;
+    public const IABX = 1;
+    public const IASBX = 2;
+    public const IAX = 3;
+    public const ISJ = 4;
 
     // lopcodes.h: size and position of opcode arguments
     public const SIZE_C = 8;
     public const SIZE_B = 8;
-    public const SIZE_Bx = self::SIZE_C + self::SIZE_B + 1;
+    public const SIZE_BX = self::SIZE_C + self::SIZE_B + 1;
     public const SIZE_A = 8;
-    public const SIZE_Ax = self::SIZE_Bx + self::SIZE_A;
-    public const SIZE_sJ = self::SIZE_Bx + self::SIZE_A;
+    public const SIZE_AX = self::SIZE_BX + self::SIZE_A;
+    public const SIZE_SJ = self::SIZE_BX + self::SIZE_A;
 
     public const SIZE_OP = 7;
 
     public const POS_OP = 0;
 
     public const POS_A = self::POS_OP + self::SIZE_OP;
-    public const POS_k = self::POS_A + self::SIZE_A;
-    public const POS_B = self::POS_k + 1;
+    public const POS_K = self::POS_A + self::SIZE_A;
+    public const POS_B = self::POS_K + 1;
     public const POS_C = self::POS_B + self::SIZE_B;
 
-    public const POS_Bx = self::POS_k;
+    public const POS_BX = self::POS_K;
 
-    public const POS_Ax = self::POS_A;
+    public const POS_AX = self::POS_A;
 
-    public const POS_sJ = self::POS_A;
+    public const POS_SJ = self::POS_A;
 
     // lopcodes.h: limits for opcode arguments ('int' has 32 bits here)
-    public const MAXARG_Bx = (1 << self::SIZE_Bx) - 1;
-    public const OFFSET_sBx = self::MAXARG_Bx >> 1;
-    public const MAXARG_Ax = (1 << self::SIZE_Ax) - 1;
-    public const MAXARG_sJ = (1 << self::SIZE_sJ) - 1;
-    public const OFFSET_sJ = self::MAXARG_sJ >> 1;
+    public const MAXARG_BX = (1 << self::SIZE_BX) - 1;
+    public const OFFSET_SBX = self::MAXARG_BX >> 1;
+    public const MAXARG_AX = (1 << self::SIZE_AX) - 1;
+    public const MAXARG_SJ = (1 << self::SIZE_SJ) - 1;
+    public const OFFSET_SJ = self::MAXARG_SJ >> 1;
     public const MAXARG_A = (1 << self::SIZE_A) - 1;
     public const MAXARG_B = (1 << self::SIZE_B) - 1;
     public const MAXARG_C = (1 << self::SIZE_C) - 1;
-    public const OFFSET_sC = self::MAXARG_C >> 1;
+    public const OFFSET_SC = self::MAXARG_C >> 1;
 
     // lopcodes.h: MAXINDEXRK
     public const MAXINDEXRK = self::MAXARG_B;
@@ -261,89 +264,89 @@ final class OpCodes
      */
     public const OPMODES = [
         //          MM OT IT T  A  mode              opcode
-        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::iABC,   // OP_MOVE
-        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::iAsBx,  // OP_LOADI
-        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::iAsBx,  // OP_LOADF
-        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::iABx,   // OP_LOADK
-        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::iABx,   // OP_LOADKX
-        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::iABC,   // OP_LOADFALSE
-        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::iABC,   // OP_LFALSESKIP
-        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::iABC,   // OP_LOADTRUE
-        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::iABC,   // OP_LOADNIL
-        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::iABC,   // OP_GETUPVAL
-        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (0 << 3) | self::iABC,   // OP_SETUPVAL
-        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::iABC,   // OP_GETTABUP
-        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::iABC,   // OP_GETTABLE
-        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::iABC,   // OP_GETI
-        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::iABC,   // OP_GETFIELD
-        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (0 << 3) | self::iABC,   // OP_SETTABUP
-        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (0 << 3) | self::iABC,   // OP_SETTABLE
-        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (0 << 3) | self::iABC,   // OP_SETI
-        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (0 << 3) | self::iABC,   // OP_SETFIELD
-        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::iABC,   // OP_NEWTABLE
-        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::iABC,   // OP_SELF
-        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::iABC,   // OP_ADDI
-        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::iABC,   // OP_ADDK
-        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::iABC,   // OP_SUBK
-        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::iABC,   // OP_MULK
-        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::iABC,   // OP_MODK
-        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::iABC,   // OP_POWK
-        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::iABC,   // OP_DIVK
-        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::iABC,   // OP_IDIVK
-        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::iABC,   // OP_BANDK
-        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::iABC,   // OP_BORK
-        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::iABC,   // OP_BXORK
-        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::iABC,   // OP_SHRI
-        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::iABC,   // OP_SHLI
-        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::iABC,   // OP_ADD
-        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::iABC,   // OP_SUB
-        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::iABC,   // OP_MUL
-        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::iABC,   // OP_MOD
-        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::iABC,   // OP_POW
-        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::iABC,   // OP_DIV
-        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::iABC,   // OP_IDIV
-        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::iABC,   // OP_BAND
-        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::iABC,   // OP_BOR
-        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::iABC,   // OP_BXOR
-        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::iABC,   // OP_SHL
-        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::iABC,   // OP_SHR
-        (1 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (0 << 3) | self::iABC,   // OP_MMBIN
-        (1 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (0 << 3) | self::iABC,   // OP_MMBINI
-        (1 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (0 << 3) | self::iABC,   // OP_MMBINK
-        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::iABC,   // OP_UNM
-        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::iABC,   // OP_BNOT
-        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::iABC,   // OP_NOT
-        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::iABC,   // OP_LEN
-        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::iABC,   // OP_CONCAT
-        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (0 << 3) | self::iABC,   // OP_CLOSE
-        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (0 << 3) | self::iABC,   // OP_TBC
-        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (0 << 3) | self::isJ,    // OP_JMP
-        (0 << 7) | (0 << 6) | (0 << 5) | (1 << 4) | (0 << 3) | self::iABC,   // OP_EQ
-        (0 << 7) | (0 << 6) | (0 << 5) | (1 << 4) | (0 << 3) | self::iABC,   // OP_LT
-        (0 << 7) | (0 << 6) | (0 << 5) | (1 << 4) | (0 << 3) | self::iABC,   // OP_LE
-        (0 << 7) | (0 << 6) | (0 << 5) | (1 << 4) | (0 << 3) | self::iABC,   // OP_EQK
-        (0 << 7) | (0 << 6) | (0 << 5) | (1 << 4) | (0 << 3) | self::iABC,   // OP_EQI
-        (0 << 7) | (0 << 6) | (0 << 5) | (1 << 4) | (0 << 3) | self::iABC,   // OP_LTI
-        (0 << 7) | (0 << 6) | (0 << 5) | (1 << 4) | (0 << 3) | self::iABC,   // OP_LEI
-        (0 << 7) | (0 << 6) | (0 << 5) | (1 << 4) | (0 << 3) | self::iABC,   // OP_GTI
-        (0 << 7) | (0 << 6) | (0 << 5) | (1 << 4) | (0 << 3) | self::iABC,   // OP_GEI
-        (0 << 7) | (0 << 6) | (0 << 5) | (1 << 4) | (0 << 3) | self::iABC,   // OP_TEST
-        (0 << 7) | (0 << 6) | (0 << 5) | (1 << 4) | (1 << 3) | self::iABC,   // OP_TESTSET
-        (0 << 7) | (1 << 6) | (1 << 5) | (0 << 4) | (1 << 3) | self::iABC,   // OP_CALL
-        (0 << 7) | (1 << 6) | (1 << 5) | (0 << 4) | (1 << 3) | self::iABC,   // OP_TAILCALL
-        (0 << 7) | (0 << 6) | (1 << 5) | (0 << 4) | (0 << 3) | self::iABC,   // OP_RETURN
-        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (0 << 3) | self::iABC,   // OP_RETURN0
-        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (0 << 3) | self::iABC,   // OP_RETURN1
-        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::iABx,   // OP_FORLOOP
-        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::iABx,   // OP_FORPREP
-        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (0 << 3) | self::iABx,   // OP_TFORPREP
-        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (0 << 3) | self::iABC,   // OP_TFORCALL
-        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::iABx,   // OP_TFORLOOP
-        (0 << 7) | (0 << 6) | (1 << 5) | (0 << 4) | (0 << 3) | self::iABC,   // OP_SETLIST
-        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::iABx,   // OP_CLOSURE
-        (0 << 7) | (1 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::iABC,   // OP_VARARG
-        (0 << 7) | (0 << 6) | (1 << 5) | (0 << 4) | (1 << 3) | self::iABC,   // OP_VARARGPREP
-        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (0 << 3) | self::iAx,    // OP_EXTRAARG
+        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::IABC,   // OP_MOVE
+        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::IASBX,  // OP_LOADI
+        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::IASBX,  // OP_LOADF
+        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::IABX,   // OP_LOADK
+        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::IABX,   // OP_LOADKX
+        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::IABC,   // OP_LOADFALSE
+        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::IABC,   // OP_LFALSESKIP
+        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::IABC,   // OP_LOADTRUE
+        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::IABC,   // OP_LOADNIL
+        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::IABC,   // OP_GETUPVAL
+        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (0 << 3) | self::IABC,   // OP_SETUPVAL
+        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::IABC,   // OP_GETTABUP
+        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::IABC,   // OP_GETTABLE
+        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::IABC,   // OP_GETI
+        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::IABC,   // OP_GETFIELD
+        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (0 << 3) | self::IABC,   // OP_SETTABUP
+        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (0 << 3) | self::IABC,   // OP_SETTABLE
+        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (0 << 3) | self::IABC,   // OP_SETI
+        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (0 << 3) | self::IABC,   // OP_SETFIELD
+        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::IABC,   // OP_NEWTABLE
+        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::IABC,   // OP_SELF
+        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::IABC,   // OP_ADDI
+        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::IABC,   // OP_ADDK
+        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::IABC,   // OP_SUBK
+        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::IABC,   // OP_MULK
+        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::IABC,   // OP_MODK
+        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::IABC,   // OP_POWK
+        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::IABC,   // OP_DIVK
+        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::IABC,   // OP_IDIVK
+        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::IABC,   // OP_BANDK
+        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::IABC,   // OP_BORK
+        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::IABC,   // OP_BXORK
+        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::IABC,   // OP_SHRI
+        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::IABC,   // OP_SHLI
+        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::IABC,   // OP_ADD
+        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::IABC,   // OP_SUB
+        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::IABC,   // OP_MUL
+        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::IABC,   // OP_MOD
+        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::IABC,   // OP_POW
+        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::IABC,   // OP_DIV
+        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::IABC,   // OP_IDIV
+        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::IABC,   // OP_BAND
+        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::IABC,   // OP_BOR
+        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::IABC,   // OP_BXOR
+        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::IABC,   // OP_SHL
+        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::IABC,   // OP_SHR
+        (1 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (0 << 3) | self::IABC,   // OP_MMBIN
+        (1 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (0 << 3) | self::IABC,   // OP_MMBINI
+        (1 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (0 << 3) | self::IABC,   // OP_MMBINK
+        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::IABC,   // OP_UNM
+        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::IABC,   // OP_BNOT
+        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::IABC,   // OP_NOT
+        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::IABC,   // OP_LEN
+        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::IABC,   // OP_CONCAT
+        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (0 << 3) | self::IABC,   // OP_CLOSE
+        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (0 << 3) | self::IABC,   // OP_TBC
+        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (0 << 3) | self::ISJ,    // OP_JMP
+        (0 << 7) | (0 << 6) | (0 << 5) | (1 << 4) | (0 << 3) | self::IABC,   // OP_EQ
+        (0 << 7) | (0 << 6) | (0 << 5) | (1 << 4) | (0 << 3) | self::IABC,   // OP_LT
+        (0 << 7) | (0 << 6) | (0 << 5) | (1 << 4) | (0 << 3) | self::IABC,   // OP_LE
+        (0 << 7) | (0 << 6) | (0 << 5) | (1 << 4) | (0 << 3) | self::IABC,   // OP_EQK
+        (0 << 7) | (0 << 6) | (0 << 5) | (1 << 4) | (0 << 3) | self::IABC,   // OP_EQI
+        (0 << 7) | (0 << 6) | (0 << 5) | (1 << 4) | (0 << 3) | self::IABC,   // OP_LTI
+        (0 << 7) | (0 << 6) | (0 << 5) | (1 << 4) | (0 << 3) | self::IABC,   // OP_LEI
+        (0 << 7) | (0 << 6) | (0 << 5) | (1 << 4) | (0 << 3) | self::IABC,   // OP_GTI
+        (0 << 7) | (0 << 6) | (0 << 5) | (1 << 4) | (0 << 3) | self::IABC,   // OP_GEI
+        (0 << 7) | (0 << 6) | (0 << 5) | (1 << 4) | (0 << 3) | self::IABC,   // OP_TEST
+        (0 << 7) | (0 << 6) | (0 << 5) | (1 << 4) | (1 << 3) | self::IABC,   // OP_TESTSET
+        (0 << 7) | (1 << 6) | (1 << 5) | (0 << 4) | (1 << 3) | self::IABC,   // OP_CALL
+        (0 << 7) | (1 << 6) | (1 << 5) | (0 << 4) | (1 << 3) | self::IABC,   // OP_TAILCALL
+        (0 << 7) | (0 << 6) | (1 << 5) | (0 << 4) | (0 << 3) | self::IABC,   // OP_RETURN
+        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (0 << 3) | self::IABC,   // OP_RETURN0
+        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (0 << 3) | self::IABC,   // OP_RETURN1
+        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::IABX,   // OP_FORLOOP
+        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::IABX,   // OP_FORPREP
+        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (0 << 3) | self::IABX,   // OP_TFORPREP
+        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (0 << 3) | self::IABC,   // OP_TFORCALL
+        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::IABX,   // OP_TFORLOOP
+        (0 << 7) | (0 << 6) | (1 << 5) | (0 << 4) | (0 << 3) | self::IABC,   // OP_SETLIST
+        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::IABX,   // OP_CLOSURE
+        (0 << 7) | (1 << 6) | (0 << 5) | (0 << 4) | (1 << 3) | self::IABC,   // OP_VARARG
+        (0 << 7) | (0 << 6) | (1 << 5) | (0 << 4) | (1 << 3) | self::IABC,   // OP_VARARGPREP
+        (0 << 7) | (0 << 6) | (0 << 5) | (0 << 4) | (0 << 3) | self::IAX,    // OP_EXTRAARG
     ];
 
     private const INSTRUCTION_MASK = 0xFFFFFFFF;
@@ -387,49 +390,49 @@ final class OpCodes
     // lopcodes.h: isOT ("out top": set top for next instruction)
     public static function isOT(int $instruction): bool
     {
-        $opcode = self::GET_OPCODE($instruction);
-        return (self::testOTMode($opcode) && self::GETARG_C($instruction) === 0)
+        $opcode = self::getOpcode($instruction);
+        return (self::testOTMode($opcode) && self::getArgC($instruction) === 0)
             || $opcode === self::OP_TAILCALL;
     }
 
     // lopcodes.h: isIT ("in top": uses top from previous instruction)
     public static function isIT(int $instruction): bool
     {
-        return self::testITMode(self::GET_OPCODE($instruction)) && self::GETARG_B($instruction) === 0;
+        return self::testITMode(self::getOpcode($instruction)) && self::getArgB($instruction) === 0;
     }
 
     // lopcodes.h: int2sC
     public static function int2sC(int $value): int
     {
-        return $value + self::OFFSET_sC;
+        return $value + self::OFFSET_SC;
     }
 
     // lopcodes.h: sC2int
     public static function sC2int(int $value): int
     {
-        return $value - self::OFFSET_sC;
+        return $value - self::OFFSET_SC;
     }
 
     // lopcodes.h: MASK1 (a mask with 'n' 1 bits at position 'p')
-    public static function MASK1(int $bitCount, int $position): int
+    public static function mask1(int $bitCount, int $position): int
     {
         return (((1 << $bitCount) - 1) << $position) & self::INSTRUCTION_MASK;
     }
 
     // lopcodes.h: MASK0 (a mask with 'n' 0 bits at position 'p')
-    public static function MASK0(int $bitCount, int $position): int
+    public static function mask0(int $bitCount, int $position): int
     {
-        return ~self::MASK1($bitCount, $position) & self::INSTRUCTION_MASK;
+        return ~self::mask1($bitCount, $position) & self::INSTRUCTION_MASK;
     }
 
     // lopcodes.h: GET_OPCODE
-    public static function GET_OPCODE(int $instruction): int
+    public static function getOpcode(int $instruction): int
     {
-        return ($instruction >> self::POS_OP) & self::MASK1(self::SIZE_OP, 0);
+        return ($instruction >> self::POS_OP) & self::mask1(self::SIZE_OP, 0);
     }
 
     // lopcodes.h: SET_OPCODE
-    public static function SET_OPCODE(int $instruction, int $opcode): int
+    public static function setOpcode(int $instruction, int $opcode): int
     {
         return self::setarg($instruction, $opcode, self::POS_OP, self::SIZE_OP);
     }
@@ -437,160 +440,161 @@ final class OpCodes
     // lopcodes.h: getarg
     public static function getarg(int $instruction, int $position, int $size): int
     {
-        return ($instruction >> $position) & self::MASK1($size, 0);
+        return ($instruction >> $position) & self::mask1($size, 0);
     }
 
     // lopcodes.h: setarg
     public static function setarg(int $instruction, int $value, int $position, int $size): int
     {
-        return ($instruction & self::MASK0($size, $position))
-            | (($value << $position) & self::MASK1($size, $position));
+        return ($instruction & self::mask0($size, $position))
+            | (($value << $position) & self::mask1($size, $position));
     }
 
     // lopcodes.h: GETARG_A
-    public static function GETARG_A(int $instruction): int
+    public static function getArgA(int $instruction): int
     {
         return self::getarg($instruction, self::POS_A, self::SIZE_A);
     }
 
     // lopcodes.h: SETARG_A
-    public static function SETARG_A(int $instruction, int $value): int
+    public static function setArgA(int $instruction, int $value): int
     {
         return self::setarg($instruction, $value, self::POS_A, self::SIZE_A);
     }
 
     // lopcodes.h: GETARG_B
-    public static function GETARG_B(int $instruction): int
+    public static function getArgB(int $instruction): int
     {
         return self::getarg($instruction, self::POS_B, self::SIZE_B);
     }
 
     // lopcodes.h: GETARG_sB
-    public static function GETARG_sB(int $instruction): int
+    public static function getArgSB(int $instruction): int
     {
-        return self::sC2int(self::GETARG_B($instruction));
+        return self::sC2int(self::getArgB($instruction));
     }
 
     // lopcodes.h: SETARG_B
-    public static function SETARG_B(int $instruction, int $value): int
+    public static function setArgB(int $instruction, int $value): int
     {
         return self::setarg($instruction, $value, self::POS_B, self::SIZE_B);
     }
 
     // lopcodes.h: GETARG_C
-    public static function GETARG_C(int $instruction): int
+    public static function getArgC(int $instruction): int
     {
         return self::getarg($instruction, self::POS_C, self::SIZE_C);
     }
 
     // lopcodes.h: GETARG_sC
-    public static function GETARG_sC(int $instruction): int
+    public static function getArgSC(int $instruction): int
     {
-        return self::sC2int(self::GETARG_C($instruction));
+        return self::sC2int(self::getArgC($instruction));
     }
 
     // lopcodes.h: SETARG_C
-    public static function SETARG_C(int $instruction, int $value): int
+    public static function setArgC(int $instruction, int $value): int
     {
         return self::setarg($instruction, $value, self::POS_C, self::SIZE_C);
     }
 
     // lopcodes.h: TESTARG_k
-    public static function TESTARG_k(int $instruction): bool
+    public static function testArgK(int $instruction): bool
     {
-        return ($instruction & (1 << self::POS_k)) !== 0;
+        return ($instruction & (1 << self::POS_K)) !== 0;
     }
 
     // lopcodes.h: GETARG_k
-    public static function GETARG_k(int $instruction): int
+    public static function getArgK(int $instruction): int
     {
-        return self::getarg($instruction, self::POS_k, 1);
+        return self::getarg($instruction, self::POS_K, 1);
     }
 
     // lopcodes.h: SETARG_k
-    public static function SETARG_k(int $instruction, int $value): int
+    public static function setArgK(int $instruction, int $value): int
     {
-        return self::setarg($instruction, $value, self::POS_k, 1);
+        return self::setarg($instruction, $value, self::POS_K, 1);
     }
 
     // lopcodes.h: GETARG_Bx
-    public static function GETARG_Bx(int $instruction): int
+    public static function getArgBx(int $instruction): int
     {
-        return self::getarg($instruction, self::POS_Bx, self::SIZE_Bx);
+        return self::getarg($instruction, self::POS_BX, self::SIZE_BX);
     }
 
     // lopcodes.h: SETARG_Bx
-    public static function SETARG_Bx(int $instruction, int $value): int
+    public static function setArgBx(int $instruction, int $value): int
     {
-        return self::setarg($instruction, $value, self::POS_Bx, self::SIZE_Bx);
+        return self::setarg($instruction, $value, self::POS_BX, self::SIZE_BX);
     }
 
     // lopcodes.h: GETARG_Ax
-    public static function GETARG_Ax(int $instruction): int
+    public static function getArgAx(int $instruction): int
     {
-        return self::getarg($instruction, self::POS_Ax, self::SIZE_Ax);
+        return self::getarg($instruction, self::POS_AX, self::SIZE_AX);
     }
 
     // lopcodes.h: SETARG_Ax
-    public static function SETARG_Ax(int $instruction, int $value): int
+    public static function setArgAx(int $instruction, int $value): int
     {
-        return self::setarg($instruction, $value, self::POS_Ax, self::SIZE_Ax);
+        return self::setarg($instruction, $value, self::POS_AX, self::SIZE_AX);
     }
 
     // lopcodes.h: GETARG_sBx
-    public static function GETARG_sBx(int $instruction): int
+    public static function getArgSBx(int $instruction): int
     {
-        return self::getarg($instruction, self::POS_Bx, self::SIZE_Bx) - self::OFFSET_sBx;
+        return self::getarg($instruction, self::POS_BX, self::SIZE_BX) - self::OFFSET_SBX;
     }
 
     // lopcodes.h: SETARG_sBx
-    public static function SETARG_sBx(int $instruction, int $value): int
+    public static function setArgSBx(int $instruction, int $value): int
     {
-        return self::SETARG_Bx($instruction, ($value + self::OFFSET_sBx) & self::INSTRUCTION_MASK);
+        return self::setArgBx($instruction, ($value + self::OFFSET_SBX) & self::INSTRUCTION_MASK);
     }
 
     // lopcodes.h: GETARG_sJ
-    public static function GETARG_sJ(int $instruction): int
+    public static function getArgSJ(int $instruction): int
     {
-        return self::getarg($instruction, self::POS_sJ, self::SIZE_sJ) - self::OFFSET_sJ;
+        return self::getarg($instruction, self::POS_SJ, self::SIZE_SJ) - self::OFFSET_SJ;
     }
 
     // lopcodes.h: SETARG_sJ
-    public static function SETARG_sJ(int $instruction, int $value): int
+    public static function setArgSJ(int $instruction, int $value): int
     {
-        return self::setarg($instruction, ($value + self::OFFSET_sJ) & self::INSTRUCTION_MASK, self::POS_sJ, self::SIZE_sJ);
+        $field = ($value + self::OFFSET_SJ) & self::INSTRUCTION_MASK;
+        return self::setarg($instruction, $field, self::POS_SJ, self::SIZE_SJ);
     }
 
     // lopcodes.h: CREATE_ABCk
-    public static function CREATE_ABCk(int $opcode, int $a, int $b, int $c, int $k): int
+    public static function createABCk(int $opcode, int $a, int $b, int $c, int $k): int
     {
         return (($opcode << self::POS_OP)
             | ($a << self::POS_A)
             | ($b << self::POS_B)
             | ($c << self::POS_C)
-            | ($k << self::POS_k)) & self::INSTRUCTION_MASK;
+            | ($k << self::POS_K)) & self::INSTRUCTION_MASK;
     }
 
     // lopcodes.h: CREATE_ABx
-    public static function CREATE_ABx(int $opcode, int $a, int $bx): int
+    public static function createABx(int $opcode, int $a, int $bx): int
     {
         return (($opcode << self::POS_OP)
             | ($a << self::POS_A)
-            | ($bx << self::POS_Bx)) & self::INSTRUCTION_MASK;
+            | ($bx << self::POS_BX)) & self::INSTRUCTION_MASK;
     }
 
     // lopcodes.h: CREATE_Ax
-    public static function CREATE_Ax(int $opcode, int $ax): int
+    public static function createAx(int $opcode, int $ax): int
     {
         return (($opcode << self::POS_OP)
-            | ($ax << self::POS_Ax)) & self::INSTRUCTION_MASK;
+            | ($ax << self::POS_AX)) & self::INSTRUCTION_MASK;
     }
 
     // lopcodes.h: CREATE_sJ (callers pass j already offset, as lcode.c does)
-    public static function CREATE_sJ(int $opcode, int $j, int $k): int
+    public static function createSJ(int $opcode, int $j, int $k): int
     {
         return (($opcode << self::POS_OP)
-            | ($j << self::POS_sJ)
-            | ($k << self::POS_k)) & self::INSTRUCTION_MASK;
+            | ($j << self::POS_SJ)
+            | ($k << self::POS_K)) & self::INSTRUCTION_MASK;
     }
 }

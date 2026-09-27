@@ -42,7 +42,10 @@ final class FilesystemLoader implements Loader
     /** the real path of the readable file $name under the root, or null */
     private function path(string $name): ?string
     {
-        if ($name === '' || $name[0] === '/' || str_contains($name, "\0") || \in_array('..', explode('/', $name), true)) {
+        if (
+            $name === '' || $name[0] === '/' || str_contains($name, "\0")
+            || \in_array('..', explode('/', $name), true)
+        ) {
             return null;
         }
         $path = realpath($this->root . $name);

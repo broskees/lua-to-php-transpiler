@@ -38,7 +38,8 @@ final class Sink implements OutputSink
     {
         $this->written += \strlen($bytes);
         if ($this->host === null) {
-            MemoryLimit::reserve(\strlen($this->collected) + \strlen($bytes), $this->budget);  // (it may move as it grows)
+            // (it may move as it grows)
+            MemoryLimit::reserve(\strlen($this->collected) + \strlen($bytes), $this->budget);
             $this->collected .= $bytes;
             return;
         }

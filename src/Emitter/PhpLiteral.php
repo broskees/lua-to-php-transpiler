@@ -45,7 +45,8 @@ final class PhpLiteral
             return $value > 0 ? '\INF' : '-\INF';
         }
         $text = var_export($value, true);  // shortest round-trip text (serialize_precision = -1)
-        if ((float) $text === $value && (ord(pack('E', (float) $text)[0]) & 0x80) === (ord(pack('E', $value)[0]) & 0x80)) {
+        $sameSign = (ord(pack('E', (float) $text)[0]) & 0x80) === (ord(pack('E', $value)[0]) & 0x80);
+        if ((float) $text === $value && $sameSign) {
             return $text;
         }
         return "\\unpack('E', " . self::string(pack('E', $value)) . ')[1]';

@@ -41,7 +41,9 @@ function hostModules(Environment $environment): void
     ]);
     $environment->addModule('mymath', ['sqrt' => static fn (float $x): float => sqrt($x)]);
     $environment->addModule('my_G', ['next' => static fn (LuaTable $t): int => $t->length()]);
-    $environment->addModule('mytable', ['concat' => static fn (array $list, string $separator = ''): string => implode($separator, $list)]);
+    $environment->addModule('mytable', [
+        'concat' => static fn (array $list, string $separator = ''): string => implode($separator, $list),
+    ]);
     $environment->addModule('mycoroutine', ['create' => static fn (LuaFunction $f): string => 'thread']);
 }
 
@@ -119,14 +121,21 @@ function test_parameter_kinds(): void
 {
     $sandbox = (new Environment())->newSandbox();
     $sandbox->setGlobal('h', [
-        'defaults' => static fn (int $n = 5, ?string $s = null, ?array $a = null, bool $b = false, float $x = 1.5): string => json_encode([$n, $s, $a, $b, var_export($x, true)]),
+        'defaults' => static fn (
+            int $n = 5,
+            ?string $s = null,
+            ?array $a = null,
+            bool $b = false,
+            float $x = 1.5,
+        ): string => json_encode([$n, $s, $a, $b, var_export($x, true)]),
         'nullable' => static fn (?int $n, ?bool $b): string => json_encode([$n, $b]),
         'bool' => static fn (bool $b): bool => $b,
         'float' => static fn (float $x): float => $x,
         'string' => static fn (string $s): string => $s,
         'mixed' => static fn (mixed $v): string => get_debug_type($v),
         'untyped' => static fn ($v) => \is_array($v) ? $v : get_debug_type($v),
-        'rest' => static fn (string $separator, ...$rest): string => implode($separator, array_map('json_encode', $rest)),
+        'rest' => static fn (string $separator, ...$rest): string
+            => implode($separator, array_map('json_encode', $rest)),
         'ints' => static fn (int ...$numbers): int => array_sum($numbers),
         'mark' => static fn (LuaTable $t): null => $t->set('seen', true),
         'copy' => static function (array $t): int {
@@ -140,26 +149,43 @@ function test_parameter_kinds(): void
     assertSame(['[5,null,null,false,"1.5"]'], $run('return h.defaults(nil, nil, nil, nil, nil)'));
     assertSame(['[7,"8",["x"],true,"2.0"]'], $run('return h.defaults(7.0, 8, {"x"}, 0, 2)'));
     assertSame(['[null,null]', '[3,true]'], $run('return h.nullable(), h.nullable("3", 0)'));
-    assertSame([true, true, false, false, true], $run('return h.bool(0), h.bool(""), h.bool(nil), h.bool(), h.bool({})'));
+    assertSame(
+        [true, true, false, false, true],
+        $run('return h.bool(0), h.bool(""), h.bool(nil), h.bool(), h.bool({})'),
+    );
     assertSame([3.0, 'float'], $run('local x = h.float(3) return x, math.type(x)'));
-    assertSame(['1.5', '10', '1e+100', '-0.0'], $run('return h.string(1.5), h.string(10), h.string(1e100), h.string(-0.0)'));
-    assertSame(['null', 'int', 'float', 'string', 'bool', 'array', LuaFunction::class, 'LuaPhp\Embed\LuaValue'],
-        $run('return h.mixed(), h.mixed(1), h.mixed(1.0), h.mixed(""), h.mixed(false), h.mixed({}), h.mixed(print), h.mixed(coroutine.create(print))'));
+    assertSame(
+        ['1.5', '10', '1e+100', '-0.0'],
+        $run('return h.string(1.5), h.string(10), h.string(1e100), h.string(-0.0)'),
+    );
+    assertSame(
+        ['null', 'int', 'float', 'string', 'bool', 'array', LuaFunction::class, 'LuaPhp\Embed\LuaValue'],
+        $run('return h.mixed(), h.mixed(1), h.mixed(1.0), h.mixed(""), h.mixed(false), h.mixed({}), h.mixed(print),'
+            . ' h.mixed(coroutine.create(print))')
+    );
     assertSame([['a' => 1], 'null'], $run('return h.untyped({a = 1}), h.untyped()'));
     assertSame(['1-"a"-[true]', ''], $run('return h.rest("-", 1, "a", {true}), h.rest("")'));
-    assertSame([6, 'test:1: bad argument #3 to \'ints\' (number expected, got table)'],
-        $run('return h.ints(1, 2.0, "3"), select(2, pcall(function () return h.ints(1, 2, {}) end))'));
+    assertSame(
+        [6, 'test:1: bad argument #3 to \'ints\' (number expected, got table)'],
+        $run('return h.ints(1, 2.0, "3"), select(2, pcall(function () return h.ints(1, 2, {}) end))')
+    );
     // a table handle is the table itself; an array is a copy
     assertSame([true, 2, true], $run('local t = {} h.mark(t) local u = {1} return t.seen, h.copy(u), u.seen == nil'));
     // a Lua function called back from PHP
     assertSame([[42, 'x']], $run('return h.callback(function (a, b) return a * 21, "x" end, 2)'));
     // a table that cannot be converted is a bad argument
-    assertSame([false, "test:1: bad argument #1 to 'mixed' (table contains a cycle at self)"],
-        $run('local t = {} t.self = t return pcall(function () return h.mixed(t) end)'));
-    assertSame([false, "test:1: bad argument #1 to 'copy' (table has both 1 and \"1\" as keys)"],
-        $run('return pcall(function () return h.copy({"a", ["1"] = "b"}) end)'));
-    assertSame([false, "test:1: bad argument #2 to 'callback' (table contains a cycle at [1][1])"],
-        $run('local t = {} t[1] = {t} return pcall(function () return h.callback(print, t) end)'));
+    assertSame(
+        [false, "test:1: bad argument #1 to 'mixed' (table contains a cycle at self)"],
+        $run('local t = {} t.self = t return pcall(function () return h.mixed(t) end)')
+    );
+    assertSame(
+        [false, "test:1: bad argument #1 to 'copy' (table has both 1 and \"1\" as keys)"],
+        $run('return pcall(function () return h.copy({"a", ["1"] = "b"}) end)')
+    );
+    assertSame(
+        [false, "test:1: bad argument #2 to 'callback' (table contains a cycle at [1][1])"],
+        $run('local t = {} t[1] = {t} return pcall(function () return h.callback(print, t) end)')
+    );
 }
 
 function test_results(): void
@@ -177,13 +203,17 @@ function test_results(): void
     ]);
     $run = static fn (string $code): array => $sandbox->load($code, '=test')->call();
     assertSame([0, 1, 7, 2, 3, 'two', 42], $run(
-        'return select("#", h.void()), select("#", h.null()), h.scalar(), #h.list(), select("#", h.multiple()), select(2, h.multiple()), h.functions().double(21)'
+        'return select("#", h.void()), select("#", h.null()), h.scalar(), #h.list(), select("#", h.multiple()),'
+        . ' select(2, h.multiple()), h.functions().double(21)'
     ));
     // one Closure is one Lua function in a sandbox
     $callback = static fn (): int => 1;
     $sandbox->setGlobal('first', $callback);
     $sandbox->setGlobal('again', ['nested' => $callback, 'get' => static fn (): \Closure => $callback]);
-    assertSame([true, true, false], $run('return rawequal(first, again.nested), rawequal(again.get(), again.get()), rawequal(first, again.get)'));
+    assertSame(
+        [true, true, false],
+        $run('return rawequal(first, again.nested), rawequal(again.get(), again.get()), rawequal(first, again.get)'),
+    );
     // a result that cannot go to Lua is a PHP bug: it stops the run
     $error = assertThrows(ConversionError::class, static fn () => $run('return pcall(h.object)'));
     assertSame("cannot pass object of class DateTime to Lua at h['object']()['when']", $error);
@@ -202,10 +232,16 @@ function test_script_errors_are_lua_errors(): void
         print(select(2, pcall(string.rep, 'xx', math.maxinteger)))
         LUA);
     [$direct, $protected] = explode("\n", rtrim($reference[1]));
-    assertSame($direct, assertThrows(RuntimeError::class, static fn () => $sandbox->load("local x = 1\nreturn require('mystring').fail()", '=test')->call()));
+    assertSame($direct, assertThrows(
+        RuntimeError::class,
+        static fn () => $sandbox->load("local x = 1\nreturn require('mystring').fail()", '=test')->call(),
+    ));
     assertSame([$protected], $sandbox->load("return select(2, pcall(require('mystring').fail))", '=test')->call());
     // a value: the script gets it (a table); uncaught, the RuntimeError carries it
-    assertSame([false, 'OUT_OF_STOCK', 4], $sandbox->load('local ok, e = pcall(fail) return ok, e.code, e.items[2]')->call());
+    assertSame(
+        [false, 'OUT_OF_STOCK', 4],
+        $sandbox->load('local ok, e = pcall(fail) return ok, e.code, e.items[2]')->call(),
+    );
     $error = null;
     try {
         $sandbox->load('fail()')->call();
@@ -249,12 +285,18 @@ function test_php_exceptions_stop_the_run(): void
         'pcall of a Lua function' => 'pcall(function () local x = h.throw() end) h.mark("after pcall")',
         'xpcall' => 'xpcall(h.throw, function (m) h.mark("handler") return m end) h.mark("after xpcall")',
         'error in error handling' => 'xpcall(error, h.throw)',
-        'coroutine.resume' => 'coroutine.resume(coroutine.create(function () pcall(h.throw) end)) h.mark("after resume")',
+        'coroutine.resume' => 'coroutine.resume(coroutine.create(function () pcall(h.throw) end))'
+            . ' h.mark("after resume")',
         'coroutine.wrap' => 'pcall(coroutine.wrap(function () h.throw() end)) h.mark("after wrap")',
-        'yielded coroutine' => 'local co = coroutine.wrap(function () coroutine.yield(1) h.throw() end) co() pcall(co) h.mark("after")',
-        '__close' => 'do local x <close> = setmetatable({}, {__close = function () h.mark("__close") end}) h.throw() end',
-        '__close in pcall' => 'pcall(function () local x <close> = setmetatable({}, {__close = function () h.mark("__close") end}) h.throw() end) h.mark("after")',
-        'metamethod' => 'local t = setmetatable({}, {__index = function () return h.throw() end}) pcall(function () return t.x end) h.mark("after")',
+        'yielded coroutine' => 'local co = coroutine.wrap(function () coroutine.yield(1) h.throw() end)'
+            . ' co() pcall(co) h.mark("after")',
+        '__close' => 'do local x <close> = setmetatable({}, {__close = function () h.mark("__close") end})'
+            . ' h.throw() end',
+        '__close in pcall' => 'pcall(function ()'
+            . ' local x <close> = setmetatable({}, {__close = function () h.mark("__close") end}) h.throw() end)'
+            . ' h.mark("after")',
+        'metamethod' => 'local t = setmetatable({}, {__index = function () return h.throw() end})'
+            . ' pcall(function () return t.x end) h.mark("after")',
         'sort comparator' => 'pcall(table.sort, {3, 2, 1}, function (a, b) h.throw() end) h.mark("after")',
         'caught by PHP' => 'h.swallow(function () h.throw() end) h.mark("after swallow")',
     ];
@@ -275,7 +317,8 @@ function test_php_exceptions_stop_the_run(): void
                 $sandbox->load($script)->call();
             } catch (\Throwable $caught) {
             }
-            assertTrue($caught === $exception, "$class, $label: the same exception reaches PHP, got " . ($caught === null ? 'nothing' : $caught::class . ': ' . $caught->getMessage()));
+            $got = $caught === null ? 'nothing' : $caught::class . ': ' . $caught->getMessage();
+            assertTrue($caught === $exception, "$class, $label: the same exception reaches PHP, got $got");
             $expectedMarks = $label === 'caught by PHP' ? ['caught ' . $class] : [];
             assertSame($expectedMarks, $marks, "$class, $label: no Lua code ran after it");
             // the sandbox and its handles are closed
@@ -297,7 +340,10 @@ function test_real_php_errors_in_php_functions_stop_the_run(): void
     assertThrows(\TypeError::class, static fn () => $sandbox->load('return pcall(h.length, 1)')->call());
     $sandbox = (new Environment())->newSandbox();
     $sandbox->setGlobal('divide', static fn (int $n): int => intdiv(1, $n));
-    assertSame('Division by zero', assertThrows(\DivisionByZeroError::class, static fn () => $sandbox->load('return pcall(divide, 0)')->call()));
+    assertSame('Division by zero', assertThrows(
+        \DivisionByZeroError::class,
+        static fn () => $sandbox->load('return pcall(divide, 0)')->call(),
+    ));
 }
 
 function test_lua_errors_pass_through_php_functions(): void
@@ -315,10 +361,18 @@ function test_lua_errors_pass_through_php_functions(): void
             return 'caught: ' . $error->luaMessage;
         }
     });
-    assertSame([false, true], $sandbox->load('local e = {} local ok, got = pcall(each, function () error(e) end) return ok, rawequal(got, e)')->call());
-    assertSame(['caught: test:1: boom', 'still running'], $sandbox->load('return guard(function () error("boom") end), "still running"', '=test')->call());
+    assertSame([false, true], $sandbox->load(
+        'local e = {} local ok, got = pcall(each, function () error(e) end) return ok, rawequal(got, e)'
+    )->call());
+    assertSame(
+        ['caught: test:1: boom', 'still running'],
+        $sandbox->load('return guard(function () error("boom") end), "still running"', '=test')->call(),
+    );
     // and uncaught, to PHP
-    assertSame('test:1: deep', assertThrows(RuntimeError::class, static fn () => $sandbox->load('each(function () error("deep") end)', '=test')->call()));
+    assertSame('test:1: deep', assertThrows(
+        RuntimeError::class,
+        static fn () => $sandbox->load('each(function () error("deep") end)', '=test')->call(),
+    ));
 }
 
 function test_signatures_are_read_when_registered(): void
@@ -326,15 +380,35 @@ function test_signatures_are_read_when_registered(): void
     $closure = static fn (int $n): int => $n;
     assertTrue(HostFunction::of($closure, 'a') === HostFunction::of($closure, 'b'), 'read once');
     $environment = new Environment();
-    assertSame('cannot pass a Closure with a parameter of type DateTime ($when) to Lua at h[\'f\']',
-        assertThrows(ConversionError::class, static fn () => $environment->addModule('h', ['f' => static fn (\DateTime $when) => 1])));
-    assertSame('cannot pass a Closure with a by-reference parameter ($n) to Lua at f',
-        assertThrows(ConversionError::class, static fn () => $environment->addGlobal('f', static function (int &$n): void {
-        })));
-    assertSame('cannot pass a Closure with a parameter of type int|float ($x) to Lua at f',
-        assertThrows(ConversionError::class, static fn () => $environment->addGlobal('f', static fn (int|float $x) => $x)));
-    assertSame('cannot pass a Closure with a parameter of type RunContext ($context) to Lua at f',
-        str_replace('LuaPhp\Embed\\', '', assertThrows(ConversionError::class, static fn () => $environment->addGlobal('f', static fn (RunContext $context) => 1))));
+    assertSame(
+        'cannot pass a Closure with a parameter of type DateTime ($when) to Lua at h[\'f\']',
+        assertThrows(
+            ConversionError::class,
+            static fn () => $environment->addModule('h', ['f' => static fn (\DateTime $when) => 1]),
+        )
+    );
+    assertSame(
+        'cannot pass a Closure with a by-reference parameter ($n) to Lua at f',
+        assertThrows(
+            ConversionError::class,
+            static fn () => $environment->addGlobal('f', static function (int &$n): void {
+            }),
+        )
+    );
+    assertSame(
+        'cannot pass a Closure with a parameter of type int|float ($x) to Lua at f',
+        assertThrows(
+            ConversionError::class,
+            static fn () => $environment->addGlobal('f', static fn (int|float $x) => $x),
+        )
+    );
+    assertSame(
+        'cannot pass a Closure with a parameter of type RunContext ($context) to Lua at f',
+        str_replace('LuaPhp\Embed\\', '', assertThrows(
+            ConversionError::class,
+            static fn () => $environment->addGlobal('f', static fn (RunContext $context) => 1),
+        ))
+    );
     // first-class callables of PHP functions are Closures too
     $sandbox = (new Environment())->newSandbox();
     $sandbox->setGlobal('upper', strtoupper(...));
@@ -358,16 +432,23 @@ function test_run_context(): void
     });
     $sandbox = $environment->newSandbox(['user' => 'ana', 'tenant' => null]);
     assertSame(['ana', true, false, 1, true], $sandbox->load(
-        'local a = require("account") return a.owner, a.has("tenant"), a.has("other"), a.expensive(), rawequal(a, require("account"))'
+        'local a = require("account")'
+        . ' return a.owner, a.has("tenant"), a.has("other"), a.expensive(), rawequal(a, require("account"))'
     )->call());
     assertSame(1, $calls, 'a factory runs once per sandbox');
     $environment->newSandbox(['user' => 'bo'])->load('require("account") require("account")')->call();
     assertSame(2, $calls);
-    assertSame('the run context has no value \'user\'', assertThrows(\OutOfBoundsException::class,
-        static fn () => $environment->newSandbox()->load('require("account")')->call()));
-    $environment->addModule('negative', static fn (RunContext $context): array => ['charge' => static fn () => $context->chargeSteps(-1)]);
-    assertSame('steps to charge must be at least 0', assertThrows(\InvalidArgumentException::class,
-        static fn () => $environment->newSandbox()->load('require("negative").charge()')->call()));
+    assertSame('the run context has no value \'user\'', assertThrows(
+        \OutOfBoundsException::class,
+        static fn () => $environment->newSandbox()->load('require("account")')->call()
+    ));
+    $environment->addModule('negative', static fn (RunContext $context): array => [
+        'charge' => static fn () => $context->chargeSteps(-1),
+    ]);
+    assertSame('steps to charge must be at least 0', assertThrows(
+        \InvalidArgumentException::class,
+        static fn () => $environment->newSandbox()->load('require("negative").charge()')->call()
+    ));
 }
 
 function test_php_warnings_while_lua_runs_are_exceptions(): void

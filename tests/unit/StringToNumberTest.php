@@ -98,7 +98,8 @@ function test_convert_matches_lua_tonumber(): void
           local n = tonumber(s)
           if n == nil then print('nil')
           elseif math.type(n) == 'integer' then print(string.format('int %d', n))
-          else print('float ' .. (string.pack('>d', n):gsub('.', function(c) return string.format('%02x', c:byte()) end)))
+          else
+            print('float ' .. (string.pack('>d', n):gsub('.', function(c) return string.format('%02x', c:byte()) end)))
           end
         end
         LUA;
@@ -109,6 +110,10 @@ function test_convert_matches_lua_tonumber(): void
     $expectedLines = explode("\n", rtrim($output, "\n"));
     assertSame(count($cases), count($expectedLines), 'one answer per case');
     foreach ($cases as $index => $case) {
-        assertSame($expectedLines[$index], describe(StringToNumber::convert($case)), 'tonumber(' . var_export($case, true) . ')');
+        assertSame(
+            $expectedLines[$index],
+            describe(StringToNumber::convert($case)),
+            'tonumber(' . var_export($case, true) . ')',
+        );
     }
 }

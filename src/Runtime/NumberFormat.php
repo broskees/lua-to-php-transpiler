@@ -31,8 +31,13 @@ final class NumberFormat
      * "aAeEfFgG"), $flags (any of "-+ #0"), minimum field width $width
      * (0 for none) and $precision (null when the format has none).
      */
-    public static function formatFloat(float $value, string $conversion, string $flags, int $width, ?int $precision): string
-    {
+    public static function formatFloat(
+        float $value,
+        string $conversion,
+        string $flags,
+        int $width,
+        ?int $precision,
+    ): string {
         $uppercase = ctype_upper($conversion);
         $alternateForm = str_contains($flags, '#');
         if (self::hasSignBit($value)) {
@@ -251,8 +256,11 @@ final class NumberFormat
      *
      * @return array{string, int}
      */
-    private static function roundToSignificantDigits(string $digits, int $fractionDigitCount, int $significantDigitCount): array
-    {
+    private static function roundToSignificantDigits(
+        string $digits,
+        int $fractionDigitCount,
+        int $significantDigitCount,
+    ): array {
         if ($digits === '0') {
             return [str_repeat('0', $significantDigitCount), 0];
         }
@@ -273,8 +281,11 @@ final class NumberFormat
      * Returns the rounded value * 10^$keptFractionDigits as a digit string
      * without leading zeros.
      */
-    private static function roundToFractionDigits(string $digits, int $fractionDigitCount, int $keptFractionDigits): string
-    {
+    private static function roundToFractionDigits(
+        string $digits,
+        int $fractionDigitCount,
+        int $keptFractionDigits,
+    ): string {
         $droppedDigitCount = $fractionDigitCount - $keptFractionDigits;
         if ($droppedDigitCount <= 0) {
             $scaledDigits = $digits . str_repeat('0', -$droppedDigitCount);

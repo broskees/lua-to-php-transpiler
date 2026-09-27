@@ -55,7 +55,10 @@ final class Environment
     ) {
         $this->libraries = Libraries::check($libraries);
         // (an unknown library or function is an \InvalidArgumentException now rather than at the first run)
-        PhpErrors::call(static fn () => StandardLibraries::openSelected(Coroutine::newState(), $libraries, $libraries !== Libraries::ALL, $allowLoad));
+        $sandboxed = $libraries !== Libraries::ALL;
+        PhpErrors::call(
+            static fn () => StandardLibraries::openSelected(Coroutine::newState(), $libraries, $sandboxed, $allowLoad)
+        );
         $this->cache = new CompileCache($cacheDir);
         $this->output = match (true) {
             $output === null => null,
@@ -137,7 +140,8 @@ final class Environment
         }
         $L = Coroutine::newState();  // the compiler runs on a thread (its protected parser, its C-call depth)
         $L->globalState->chunkCache = $this->cache;
-        $L->globalState->countSteps = $this->limits->needStepCounting();  // (as the sandboxes will: the cache keeps both kinds apart)
+        // (as the sandboxes will: the cache keeps both kinds apart)
+        $L->globalState->countSteps = $this->limits->needStepCounting();
         $errors = [];
         foreach ($names as $name) {
             $source = $this->loader->getSource($name);

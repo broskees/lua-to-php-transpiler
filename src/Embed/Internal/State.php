@@ -137,7 +137,8 @@ final class State
         $G->countSteps = $countSteps;
         $G->output = $this->sink;
         $G->errorOutput = $this->sink;
-        PhpErrors::call(static fn () => StandardLibraries::openSelected($L, $libraries, $libraries !== Libraries::ALL, $allowLoad));
+        $sandboxed = $libraries !== Libraries::ALL;
+        PhpErrors::call(static fn () => StandardLibraries::openSelected($L, $libraries, $sandboxed, $allowLoad));
         $this->anchors = new RuntimeTable();
         $G->libraryState['embed.handles'] = $this->anchors;
         if (\in_array('package', $libraries, true)) {
@@ -159,7 +160,15 @@ final class State
         if ($limits == Limits::none()) {
             return null;
         }
-        $budget = new Budget($limits->steps, $limits->memoryBytes, $limits->seconds, $limits->outputBytes, $limits->coroutines, $limits->callDepth, $limits->sourceBytes);
+        $budget = new Budget(
+            $limits->steps,
+            $limits->memoryBytes,
+            $limits->seconds,
+            $limits->outputBytes,
+            $limits->coroutines,
+            $limits->callDepth,
+            $limits->sourceBytes,
+        );
         $budget->hostMemoryIsLimit = true;
         return $budget;
     }
@@ -172,7 +181,11 @@ final class State
         if ($this->stoppedBy === null) {
             throw new SandboxClosed('the sandbox is closed');
         }
-        throw new SandboxClosed('the sandbox is closed: a ' . $this->stoppedBy::class . ' stopped a run in it', 0, $this->stoppedBy);
+        throw new SandboxClosed(
+            'the sandbox is closed: a ' . $this->stoppedBy::class . ' stopped a run in it',
+            0,
+            $this->stoppedBy,
+        );
     }
 
     /** closes the sandbox: no more Lua code runs in it (pending '__gc' finalizers are skipped) */
@@ -303,7 +316,7 @@ final class State
         $error = null;
         try {
             $result = $body();
-        } catch (ScriptError|RuntimeError $error) {
+        } catch (ScriptError | RuntimeError $error) {
             if ($error instanceof RuntimeError && !isset($this->raisedErrors[$error])) {
                 throw $error;  // (another sandbox's: it stops the run)
             }
@@ -428,19 +441,23 @@ final class State
     {
         $L = $this->runningThread ?? $this->L;
         $failure = null;  // [error value, message, traceback], from the message handler
-        $messageHandler = new NativeFunction('messageHandler', static function (Coroutine $L, array $args) use (&$failure): array {
+        $handleMessage = static function (Coroutine $L, array $args) use (&$failure): array {
             $value = $args[0] ?? null;
             $failure = [$value, self::errorMessage($L, $value), Auxiliary::traceback($L, $L, null, 1)];
             return [$value];
-        });
-        [$status, $result] = $this->enter(static fn (): array => Calls::protectedCall($L, $function, $arguments, $messageHandler));
+        };
+        $messageHandler = new NativeFunction('messageHandler', $handleMessage);
+        [$status, $result] = $this->enter(
+            static fn (): array => Calls::protectedCall($L, $function, $arguments, $messageHandler)
+        );
         if ($status === Lua::LUA_OK) {
             return $result;
         }
         if ($failure !== null && $failure[0] === $result) {
             [, $message, $traceback] = $failure;
         } else {  // no message handler ran (a memory error, an error in error handling)
-            $message = LuaObject::toStringCoerced($result) ?? '(error object is a ' . LuaObject::typeName($result) . ' value)';
+            $message = LuaObject::toStringCoerced($result)
+                ?? '(error object is a ' . LuaObject::typeName($result) . ' value)';
             $traceback = '';
         }
         try {
@@ -549,7 +566,10 @@ final class State
             if ($module instanceof \Closure) {  // a factory: once per sandbox (package.loaded keeps its table)
                 $module = $this->callHost($L, fn (): mixed => $module($this->context));
                 if (!\is_array($module)) {
-                    throw new ConversionError('a module factory must return an array, not ' . get_debug_type($module), $name);
+                    throw new ConversionError(
+                        'a module factory must return an array, not ' . get_debug_type($module),
+                        $name,
+                    );
                 }
             }
             return [Convert::toLua($module, $name, $this)];
@@ -561,7 +581,8 @@ final class State
     private function fileSearcher(string $suffix): \Closure
     {
         return function (Coroutine $L, string $name) use ($suffix): array {
-            MemoryLimit::reserve(3 * \strlen($name), $L->globalState->budget);  // (the file name, the loader's path, the message)
+            // (the file name, the loader's path, the message)
+            MemoryLimit::reserve(3 * \strlen($name), $L->globalState->budget);
             $file = str_replace('.', '/', $name) . $suffix;
             if ($this->loader === null || !$this->loader->exists($file)) {
                 return [null, "no file '$file'"];
@@ -571,7 +592,8 @@ final class State
                 $loader = CompileCache::load($L, $source);
             } catch (LuaError $error) {
                 // loadlib.c: checkload (luaL_error from a searcher: no position)
-                LuaError::raise("error loading module '$name' from file '$file':\n\t" . (LuaObject::toStringCoerced($error->value) ?? ''));
+                $loaderError = LuaObject::toStringCoerced($error->value) ?? '';
+                LuaError::raise("error loading module '$name' from file '$file':\n\t" . $loaderError);
             }
             return [$loader, $file];
         };

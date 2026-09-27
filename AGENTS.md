@@ -1,8 +1,13 @@
 # lua-to-php-transpiler
 
 Lua 5.4 source goes in, PHP comes out, and the PHP behaves exactly like Lua 5.4.9
-at runtime. The transpiler and its runtime are written in PHP (8.5 CLI, no
-Composer, no extensions beyond what `php -m` shows).
+at runtime. The transpiler and its runtime are written in PHP (8.5 CLI; 8.4 and
+newer run it). The package installs with Composer
+(`broskees/lua-to-php-transpiler`) and has no runtime dependencies beyond PHP
+and its ctype extension (opcache, posix and pcntl are optional: every use has a
+fallback); Composer is used only for the dev-only code-style tool
+(PHP_CodeSniffer). `src/autoload.php` loads the classes with or without
+Composer.
 
 ## Definition of done
 
@@ -37,18 +42,32 @@ The C source in `reference/lua-5.4.9/src/` is the spec. Port faithfully and
 name the C origin in a comment (`// lcode.c: luaK_exp2anyreg`) so the next
 agent can diff behavior against C. Never edit anything under `reference/`.
 
+The code follows PSR-12, and `composer lint` checks it (phpcs.xml.dist:
+src/, bin/, tests/, bench/; 0 errors and 0 warnings). C names become
+camelCase methods without their module prefix, the class being the module
+(luaK_exp2anyreg is `CodeGen::exp2anyreg`, luaY_nvarstack
+`Parser::nvarstack`, GETARG_sBx `OpCodes::getArgSBx`), and C's constants
+upper case (MAXARG_Bx is `OpCodes::MAXARG_BX`); the comment keeps the C
+name. A PHP file declares symbols or runs code, not both: bin/ scripts only
+call their `LuaPhp\Cli` class. The PHP the emitter generates is data, not
+code: restyling the emitter must not change a byte of it (compare bin/lua2php
+output before and after).
+
 ## Layout
 
     bin/lua            standalone interpreter, mirrors lua.c (arg table, -e, -l, -v, -, script args)
     bin/luac           mirrors luac.c (-l, -l -l, -p, -o, -s)
     bin/lua2php        the transpiler deliverable, ahead of time: in.lua -> out.php, or a project
                        directory -> one .php per .lua (require/dofile load those; see Chunks)
+    composer.json      the Composer package (bin, PSR-4 autoload, scripts test and lint)
+    phpcs.xml.dist     the code style (PSR-12) for `composer lint`
     src/autoload.php   PSR-4 autoloader: namespace LuaPhp\ -> src/
+    src/Cli/           the programs of bin/: LuaCommand (lua.c), LuacCommand (luac.c), Lua2PhpCommand
     src/Compiler/      Proto, OpCodes, Lexer, Parser, CodeGen, Dump, Undump, Listing, Compiler
     src/Emitter/       Proto -> PHP source
     src/Runtime/       values, tables, calls, errors, coroutines, metamethods, debug info
     src/Lib/           standard libraries (one file per C lib)
-    tests/             our own tests + harness scripts (see Testing)
+    tests/             our own tests + harness scripts (see Testing; shared helpers in tests/harness.php)
     bench/             memory/speed benchmarks against lua5.4 (see bench/README.md)
     reference/         Lua 5.4.9 C source and official test suites (read-only)
 
@@ -798,7 +817,8 @@ handles wrap them. Its internals are `LuaPhp\Embed\Internal`.
 Tests are the project's memory. Behavior is checked against the reference
 interpreter `lua5.4` (5.4.9) and compiler `luac5.4`, both installed.
 
-    php tests/run.php            our own tests (unit + differential); must stay green
+    php tests/run.php            our own tests (unit + differential); must stay green (composer test)
+    composer lint                PSR-12 check of src/, bin/, tests/, bench/ (after composer install)
     tests/bytecode.sh [file...]  diff `bin/luac -l -l -p` vs `luac5.4 -l -l -p` for official test files
     tests/official.sh [name...]  run official test files one at a time through bin/lua with
                                  -e"_U=true _soft=true _port=true _nomsg=true"; PASS/FAIL per file
@@ -818,7 +838,7 @@ interpreter `lua5.4` (5.4.9) and compiler `luac5.4`, both installed.
 - opcache: this machine's php.ini enables it for the CLI, but it skips files
   younger than `opcache.file_update_protection` (2 s), which is every file
   a test has just generated or cached. Tests that run generated or cached
-  files pass `OPCACHE_ON_NEW_FILES` (tests/run.php: `-d opcache.enable_cli=1
+  files pass `OPCACHE_ON_NEW_FILES` (tests/harness.php: `-d opcache.enable_cli=1
   -d opcache.file_update_protection=0`) so opcache really compiles and
   optimizes them (e.g. Lua2PhpTest's cold and warm passes, and its data
   modules at 8 MB and 1 MB stacks).

@@ -30,8 +30,10 @@ use LuaPhp\Runtime\PhpErrors;
  * is the reference.
  */
 
-/** the libraries of the brief's SAFE profile */
-const SAFE = ['base', 'package', 'string', 'table', 'math', 'utf8', 'coroutine', 'os.time', 'os.date', 'os.clock', 'os.difftime'];
+// the libraries of the brief's SAFE profile
+const SAFE = [
+    'base', 'package', 'string', 'table', 'math', 'utf8', 'coroutine', 'os.time', 'os.date', 'os.clock', 'os.difftime',
+];
 
 final class CollectingSink implements OutputSink
 {
@@ -49,8 +51,12 @@ final class CollectingSink implements OutputSink
  *
  * @param list<string> $libraries
  */
-function embeddedState(array $libraries = SAFE, ?Budget $budget = null, bool $allowLoad = false, bool $sandboxed = true): Coroutine
-{
+function embeddedState(
+    array $libraries = SAFE,
+    ?Budget $budget = null,
+    bool $allowLoad = false,
+    bool $sandboxed = true,
+): Coroutine {
     $L = Coroutine::newState();
     $G = $L->globalState;
     $G->countSteps = true;
@@ -93,7 +99,8 @@ function limitReachedBy(Coroutine $L, string $code, string $chunkname = '=stdin'
     } catch (LimitReached $reached) {
         return $reached->limit;
     }
-    throw new \AssertionFailed("no limit reached by $code; status $status: " . (\is_string($result) ? $result : get_debug_type($result)));
+    $outcome = \is_string($result) ? $result : get_debug_type($result);
+    throw new \Tests\AssertionFailed("no limit reached by $code; status $status: $outcome");
 }
 
 /**
@@ -104,7 +111,10 @@ function limitReachedBy(Coroutine $L, string $code, string $chunkname = '=stdin'
 function addBuilders(Coroutine $L): void
 {
     $globals = $L->globalState->globals;
-    $globals->hash['bigString'] = new NativeFunction('bigString', static fn (Coroutine $L, array $args): array => [str_repeat($args[1], (int) $args[0])]);
+    $globals->hash['bigString'] = new NativeFunction(
+        'bigString',
+        static fn (Coroutine $L, array $args): array => [str_repeat($args[1], (int) $args[0])],
+    );
     $globals->hash['list'] = new NativeFunction('list', static function (Coroutine $L, array $args): array {
         $list = new LuaTable();
         for ($i = 1; $i <= $args[0]; $i++) {
@@ -208,7 +218,10 @@ function test_the_php_error_scope_turns_warnings_into_exceptions_and_restores_th
     $hostHandler = static fn (): bool => true;
     set_error_handler($hostHandler);
     try {
-        $message = assertThrows(\ErrorException::class, static fn () => PhpErrors::call(static fn () => trigger_error('inside', E_USER_WARNING)));
+        $message = assertThrows(
+            \ErrorException::class,
+            static fn () => PhpErrors::call(static fn () => trigger_error('inside', E_USER_WARNING)),
+        );
         assertSame('inside', $message);
         assertSame($hostHandler, currentErrorHandler(), 'after an exception');
         assertSame(true, PhpErrors::call(static fn (): bool => @trigger_error('silenced', E_USER_WARNING)));
@@ -216,7 +229,10 @@ function test_the_php_error_scope_turns_warnings_into_exceptions_and_restores_th
         $result = PhpErrors::call(static function () use ($hostHandler): string {
             $scopeHandler = currentErrorHandler();
             assertTrue($scopeHandler !== $hostHandler, 'the scope installs its handler');
-            assertThrows(\RuntimeException::class, static fn () => PhpErrors::call(static fn () => throw new \RuntimeException('nested')));
+            assertThrows(
+                \RuntimeException::class,
+                static fn () => PhpErrors::call(static fn () => throw new \RuntimeException('nested')),
+            );
             assertSame($scopeHandler, currentErrorHandler(), 'a nested scope restores the outer one');
             return PhpErrors::call(static fn (): string => 'nested result');
         });
@@ -229,17 +245,21 @@ function test_the_php_error_scope_turns_warnings_into_exceptions_and_restores_th
 
 function test_php_exceptions_from_a_native_function_escape_pcall_coroutines_and_close(): void
 {
-    foreach ([
+    $scripts = [
         'pcall(boom)',
         'xpcall(boom, function() handled = true end)',
         'coroutine.resume(coroutine.create(boom))',
         'coroutine.wrap(function() pcall(boom) end)()',
         'do local x <close> = setmetatable({}, {__close = function() closed = true end}) boom() end',
         'local t = setmetatable({}, {__index = function() return boom() end}) print(pcall(function() return t.x end))',
-    ] as $code) {
+    ];
+    foreach ($scripts as $code) {
         $L = embeddedState();
         $G = $L->globalState;
-        $G->globals->hash['boom'] = new NativeFunction('boom', static fn (): array => throw new \DomainException('from PHP'));
+        $G->globals->hash['boom'] = new NativeFunction(
+            'boom',
+            static fn (): array => throw new \DomainException('from PHP'),
+        );
         $message = assertThrows(\DomainException::class, static fn () => runIn($L, $code));
         assertSame('from PHP', $message, $code);
         assertSame(null, $G->globals->hash['handled'] ?? null, "$code: message handler ran");
@@ -262,21 +282,29 @@ function test_safe_leaves_out_what_the_brief_lists_with_lua_messages(): void
         print(pcall(function() return ("x"):dump() end))
         print(pcall(collectgarbage, "bogus"))
         print(type(collectgarbage("count")), collectgarbage(), type(collectgarbage("step")), collectgarbage("collect"))
-        print(os.time{year = 2020, month = 1, day = 1, hour = 12} - os.time{year = 2020, month = 1, day = 1, hour = 0}, os.date("!%Y", 0), type(os.clock()), os.difftime(10, 4))
-        print(math.max(3, 7), string.format("%5.2f", 3.14159), table.concat({1, 2}, ","), utf8.char(72, 228), coroutine.isyieldable())
+        print(os.time{year = 2020, month = 1, day = 1, hour = 12} - os.time{year = 2020, month = 1, day = 1, hour = 0},
+          os.date("!%Y", 0), type(os.clock()), os.difftime(10, 4))
+        print(math.max(3, 7), string.format("%5.2f", 3.14159), table.concat({1, 2}, ","), utf8.char(72, 228),
+          coroutine.isyieldable())
         LUA;
-    $reference = referenceOutput($code, 'io = nil debug = nil load = nil dofile = nil string.dump = nil for k in pairs(os) do if k ~= "time" and k ~= "date" and k ~= "clock" and k ~= "difftime" then os[k] = nil end end');
+    $reference = referenceOutput($code, 'io = nil debug = nil load = nil dofile = nil string.dump = nil '
+        . 'for k in pairs(os) do '
+        . 'if k ~= "time" and k ~= "date" and k ~= "clock" and k ~= "difftime" then os[k] = nil end end');
     assertSame($reference, printedBy(embeddedState(), $code));
-    foreach ([
+    $messages = [
         "stdin:1: attempt to index a nil value (global 'io')",
         "stdin:2: attempt to call a nil value (field 'execute')",
         "stdin:3: attempt to index a nil value (global 'debug')",
         "stdin:4: attempt to call a nil value (global 'load')",
-    ] as $message) {
+    ];
+    foreach ($messages as $message) {
         assertTrue(str_contains($reference, "false\t$message\n"), $message);
     }
     $L = embeddedState();
-    assertSame("false\tbad argument #1 to 'collectgarbage' (invalid option 'stop')\n", printedBy($L, 'print(pcall(collectgarbage, "stop"))'));
+    assertSame(
+        "false\tbad argument #1 to 'collectgarbage' (invalid option 'stop')\n",
+        printedBy($L, 'print(pcall(collectgarbage, "stop"))'),
+    );
 }
 
 function test_safe_is_lua_with_exactly_the_brief_s_removals(): void
@@ -294,11 +322,17 @@ function test_safe_is_lua_with_exactly_the_brief_s_removals(): void
         print(table.concat(names, " "))
         LUA;
     $ours = printedBy(embeddedState(), $code);
-    $reference = referenceOutput($code, 'io = nil debug = nil load = nil dofile = nil loadfile = nil require = nil string.dump = nil '
-        . 'for k in pairs(os) do if k ~= "time" and k ~= "date" and k ~= "clock" and k ~= "difftime" then os[k] = nil end end '
+    $reference = referenceOutput($code, 'io = nil debug = nil load = nil dofile = nil loadfile = nil require = nil '
+        . 'string.dump = nil '
+        . 'for k in pairs(os) do '
+        . 'if k ~= "time" and k ~= "date" and k ~= "clock" and k ~= "difftime" then os[k] = nil end end '
         . 'for k in pairs(package) do if k ~= "loaded" then package[k] = nil end end');
     assertSame($reference, $ours);
-    foreach (['assert', 'collectgarbage', 'coroutine.wrap', 'math.random', 'os.date', 'package.loaded', 'string.rep', 'table.sort', 'utf8.char', 'warn'] as $name) {
+    $names = [
+        'assert', 'collectgarbage', 'coroutine.wrap', 'math.random', 'os.date', 'package.loaded', 'string.rep',
+        'table.sort', 'utf8.char', 'warn',
+    ];
+    foreach ($names as $name) {
         assertTrue(str_contains($ours, " $name "), $name);
     }
 }
@@ -312,10 +346,17 @@ function test_load_in_a_sandbox_takes_text_chunks_only_and_counts_steps(): void
         print(type(load(function() return nil end)))
         LUA;
     $L = embeddedState(SAFE, null, true);
-    $L->globalState->globals->hash['string']->hash['dump'] = new NativeFunction('dump', static fn (): array => ["\x1bLua fake binary chunk"]);
+    $L->globalState->globals->hash['string']->hash['dump'] = new NativeFunction(
+        'dump',
+        static fn (): array => ["\x1bLua fake binary chunk"],
+    );
     $ours = printedBy($L, $code);
     // lua5.4 with mode "t" (what the sandbox leaves of any mode)
-    $reference = referenceOutput(str_replace(['load(string.dump(function() end))', '"=chunk", "b"'], ['load(string.dump(function() end), nil, "t")', '"=chunk", ""'], $code));
+    $reference = referenceOutput(str_replace(
+        ['load(string.dump(function() end))', '"=chunk", "b"'],
+        ['load(string.dump(function() end), nil, "t")', '"=chunk", ""'],
+        $code,
+    ));
     assertSame($reference, $ours);
 
     $L = embeddedState(SAFE, new Budget(steps: 10000), true);
@@ -329,7 +370,10 @@ function test_single_functions_and_the_string_metatable_follow_the_selection(): 
         print(("a"):upper(), string.rep, os.date, os.time() > 0, tostring, _VERSION)
         print(pcall(function() return ("a"):rep(2) end))
         LUA);
-    assertSame("A\tnil\tnil\ttrue\tnil\tLua 5.4\nfalse\tstdin:2: attempt to call a nil value (method 'rep')\n", $printed);
+    assertSame(
+        "A\tnil\tnil\ttrue\tnil\tLua 5.4\nfalse\tstdin:2: attempt to call a nil value (method 'rep')\n",
+        $printed,
+    );
 
     assertThrows(\InvalidArgumentException::class, static fn () => embeddedState(['base', 'sockets']));
     assertThrows(\InvalidArgumentException::class, static fn () => embeddedState(['string.nosuch']));
@@ -338,8 +382,12 @@ function test_single_functions_and_the_string_metatable_follow_the_selection(): 
 
 function test_all_libraries_unsandboxed_are_the_command_line_s(): void
 {
-    $L = embeddedState(['base', 'package', 'coroutine', 'table', 'io', 'os', 'string', 'math', 'utf8', 'debug'], null, false, false);
-    $code = 'local n = 0 for name, lib in pairs(package.loaded) do if name ~= "_G" then n = n + 1 for _ in pairs(lib) do n = n + 1 end end end print(n, type(load), type(dofile), type(string.dump), type(require), #package.searchers)';
+    $allLibraries = ['base', 'package', 'coroutine', 'table', 'io', 'os', 'string', 'math', 'utf8', 'debug'];
+    $L = embeddedState($allLibraries, null, false, false);
+    $code = 'local n = 0 '
+        . 'for name, lib in pairs(package.loaded) do '
+        . 'if name ~= "_G" then n = n + 1 for _ in pairs(lib) do n = n + 1 end end end '
+        . 'print(n, type(load), type(dofile), type(string.dump), type(require), #package.searchers)';
     assertSame(referenceOutput($code), printedBy($L, $code));
 }
 
@@ -355,11 +403,20 @@ function test_sandbox_require_uses_php_searchers_like_ll_require(): void
         $module->hash['answer'] = 42;
         return [$module];
     });
-    $fileLoader = ChunkLoader::load($L, 'local name, extra = ... return {name = name, extra = extra}', '@lib/mod.lua', 't');
+    $fileLoader = ChunkLoader::load(
+        $L,
+        'local name, extra = ... return {name = name, extra = extra}',
+        '@lib/mod.lua',
+        't',
+    );
     PackageLib::openSandboxRequire($L, [
-        static fn (Coroutine $L, string $name): array => $name === 'host' ? [$moduleLoader, ':host:'] : [null, "no host module '$name'"],
+        static fn (Coroutine $L, string $name): array => $name === 'host'
+            ? [$moduleLoader, ':host:']
+            : [null, "no host module '$name'"],
         static fn (Coroutine $L, string $name): array => $name === 'nothing' ? [null, null] : [null, null],
-        static fn (Coroutine $L, string $name): array => $name === 'lib.mod' ? [$fileLoader, 'lib/mod.lua'] : [null, "no file '" . str_replace('.', '/', $name) . ".lua'"],
+        static fn (Coroutine $L, string $name): array => $name === 'lib.mod'
+            ? [$fileLoader, 'lib/mod.lua']
+            : [null, "no file '" . str_replace('.', '/', $name) . ".lua'"],
     ]);
     $printed = printedBy($L, <<<'LUA'
         local host, data = require("host")
@@ -392,7 +449,8 @@ function test_sandbox_require_stores_true_for_a_loader_that_returns_nothing(): v
     $loader = ChunkLoader::load($L, 'loaded_with = ...', '=mod', 't');
     PackageLib::openSandboxRequire($L, [static fn (Coroutine $L, string $name): array => [$loader, 'data']]);
     $ours = printedBy($L, 'print(require("mod")) print(loaded_with, package.loaded.mod)');
-    $reference = referenceOutput('package.preload.mod = function(...) loaded_with = ... end print(require("mod")) print(loaded_with, package.loaded.mod)');
+    $reference = referenceOutput('package.preload.mod = function(...) loaded_with = ... end '
+        . 'print(require("mod")) print(loaded_with, package.loaded.mod)');
     assertSame(str_replace(':preload:', 'data', $reference), $ours);
 }
 
@@ -411,8 +469,10 @@ function test_steps_stop_endless_loops_and_nothing_in_lua_catches_it(): void
         'coroutine.resume(coroutine.create(function() while true do end end))',
         'coroutine.wrap(function() pcall(function() while true do end end) end)()',
         'do local x <close> = setmetatable({}, {__close = function() closed = true end}) while true do end end',
-        'local t = setmetatable({}, {__index = function() while true do end end}) print(pcall(function() return t.x end))',
-        'local t = setmetatable({}, {__add = function() while true do end end}) print(pcall(function() return t + 1 end))',
+        'local t = setmetatable({}, {__index = function() while true do end end})'
+            . ' print(pcall(function() return t.x end))',
+        'local t = setmetatable({}, {__add = function() while true do end end})'
+            . ' print(pcall(function() return t + 1 end))',
         'local function f() return f() end f()',
         'string.gsub(("a"):rep(1000), ".", function() while true do end end)',
         'table.sort({3, 2, 1}, function() while true do end end)',
@@ -431,7 +491,8 @@ function test_steps_stop_endless_loops_and_nothing_in_lua_catches_it(): void
 function test_a_budget_replaced_between_runs_is_charged_by_suspended_code_too(): void
 {
     $L = embeddedState(SAFE, new Budget(steps: 1000000));
-    printedBy($L, 'co = coroutine.wrap(function() local n = 0 while true do n = n + 1 coroutine.yield(n) end end) co()');
+    printedBy($L, 'co = coroutine.wrap(function() local n = 0 while true do n = n + 1 coroutine.yield(n) end end)'
+        . ' co()');
     $budget = new Budget(steps: 50000);
     $L->globalState->setBudget($budget);
     assertSame("101\n", printedBy($L, 'local n for i = 1, 100 do n = co() end print(n)'));
@@ -446,7 +507,8 @@ function test_steps_are_at_least_the_instructions_run(): void
     $L = embeddedState(SAFE, new Budget());
     runIn($L, 'local s = 0 for i = 1, 1000 do s = s + i end return s');
     $steps = $L->globalState->budget->usage()['steps'];
-    // the main function's size when it starts, the loop's 3 instructions (ADD, MMBIN, FORLOOP) at each of its 999 jumps back
+    // the main function's size when it starts, the loop's 3 instructions (ADD, MMBIN, FORLOOP) at each of its
+    // 999 jumps back
     assertTrue($steps >= 3000 && $steps < 3100, "$steps steps");
 }
 
@@ -463,8 +525,10 @@ function test_copying_all_varargs_costs_a_step_per_value_inline_and_compact(): v
         FunctionEmitter::$compactEverywhere = $compact;
         try {
             // (the comment keeps the two forms' chunks apart in the load cache)
-            $copying = $stepsOf("local values = list(20000, 1) local function f(...) return select('#', ...) end return f(table.unpack(values)) -- $form");
-            $notCopying = $stepsOf("local values = list(20000, 1) local function f(...) return 1 end return f(table.unpack(values)) -- $form");
+            $copying = $stepsOf("local values = list(20000, 1) local function f(...) return select('#', ...) end"
+                . " return f(table.unpack(values)) -- $form");
+            $notCopying = $stepsOf("local values = list(20000, 1) local function f(...) return 1 end"
+                . " return f(table.unpack(values)) -- $form");
         } finally {
             FunctionEmitter::$compactEverywhere = false;
         }
@@ -476,7 +540,7 @@ function test_copying_all_varargs_costs_a_step_per_value_inline_and_compact(): v
 function test_library_functions_charge_in_proportion_to_their_work(): void
 {
     // each takes far fewer than 15000 steps of Lua instructions (big values come from PHP)
-    foreach ([
+    $cases = [
         'string.rep' => 'local s = ("x"):rep(1e6)',
         'table.concat' => 'local s = table.concat(list(20000, "x"))',
         'table.concat with i, j' => 'local s = table.concat(list(20000, "x"), "", 1, 20000)',
@@ -498,7 +562,8 @@ function test_library_functions_charge_in_proportion_to_their_work(): void
         'string.upper' => 'local s = bigString(1e6, "x"):upper()',
         'string.pack' => 'local s = string.pack("z", bigString(1e6, "x"))',
         'load' => 'load(bigString(20000, " "))',
-    ] as $name => $code) {
+    ];
+    foreach ($cases as $name => $code) {
         $L = embeddedState(SAFE, new Budget(steps: 15000), true);
         addBuilders($L);
         assertSame('steps', limitReachedBy($L, $code), $name);
@@ -518,7 +583,7 @@ function test_memory_stops_big_allocations_and_slow_growth(): void
 
 function assertMemoryLimitsReached(): void
 {
-    foreach ([
+    $scripts = [
         'return ("x"):rep(1e9)',
         'local s = ("x"):rep(2^20) for i = 1, 20 do s = s .. s end',
         'local t = {} for i = 1, 1e9 do t[i] = ("x"):rep(100) end',
@@ -527,7 +592,8 @@ function assertMemoryLimitsReached(): void
         'local s = ("ab"):rep(2^20) return (s:gsub("a", ("a"):rep(32)))',
         'return pcall(string.rep, "x", 1e9)',
         'local t = {} for i = 1, 1e9 do t[i] = {} end',
-    ] as $code) {
+    ];
+    foreach ($scripts as $code) {
         $L = embeddedState(SAFE, new Budget(memoryBytes: 32 * 1024 * 1024));
         assertSame('memory', limitReachedBy($L, $code), $code);
         assertTrue($L->globalState->budget->usage()['peakMemoryBytes'] > 0, $code);
@@ -547,7 +613,8 @@ function test_the_host_memory_limit_stays_a_lua_memory_error(): void
         $budget = new Budget(memoryBytes: 1 << 30);
         $L->globalState->setBudget($budget);
         $budget->start();
-        [$status, $result] = Calls::protectedCall($L, ChunkLoader::load($L, "return pcall(string.rep, \"x\", 2^28)", "=host", "t"), []);
+        $chunk = ChunkLoader::load($L, "return pcall(string.rep, \"x\", 2^28)", "=host", "t");
+        [$status, $result] = Calls::protectedCall($L, $chunk, []);
         echo json_encode([$status, $result]), "\n";
         ');
     [$status, $stdout, $stderr] = runCommand(['php', '-d', 'memory_limit=128M', $script]);
@@ -576,7 +643,9 @@ function test_time_counts_php_functions_and_is_checked_as_steps_go(): void
 function test_coroutines_alive_at_once_are_limited_and_finished_ones_do_not_count(): void
 {
     $L = embeddedState(SAFE, new Budget(coroutines: 1000));
-    assertSame('coroutines', limitReachedBy($L, 'local t = {} for i = 1, 100000 do t[i] = coroutine.create(function() coroutine.yield() end) coroutine.resume(t[i]) end'));
+    $code = 'local t = {} for i = 1, 100000 do'
+        . ' t[i] = coroutine.create(function() coroutine.yield() end) coroutine.resume(t[i]) end';
+    assertSame('coroutines', limitReachedBy($L, $code));
 
     $L = embeddedState(SAFE, new Budget(coroutines: 100));
     $printed = printedBy($L, <<<'LUA'
@@ -628,7 +697,8 @@ function test_call_depth_counts_the_lua_levels_below_native_calls_too(): void
 
 function test_limits_of_a_budget_without_limits_and_a_state_without_budget_cost_nothing(): void
 {
-    $code = 'local t = {} for i = 1, 1000 do t[i] = ("x"):rep(i % 7) .. i end table.sort(t) return #table.concat(t), select("#", string.find(t[1], "x"))';
+    $code = 'local t = {} for i = 1, 1000 do t[i] = ("x"):rep(i % 7) .. i end table.sort(t)'
+        . ' return #table.concat(t), select("#", string.find(t[1], "x"))';
     // plain code without a budget: nothing is charged
     $L = Coroutine::newState();
     StandardLibraries::openAll($L);
@@ -645,7 +715,8 @@ function test_limits_of_a_budget_without_limits_and_a_state_without_budget_cost_
 function test_code_without_step_counting_is_what_it_always_was(): void
 {
     foreach (officialTestFiles() as $file) {
-        $source = preg_replace('/^#[^\n]*/', '', file_get_contents($file));  // (a first line starting with '#', as loadfile skips it)
+        // (a first line starting with '#', as loadfile skips it)
+        $source = preg_replace('/^#[^\n]*/', '', file_get_contents($file));
         $proto = Compiler::compile($source, '@' . basename($file));
         $plain = Emitter::emitChunk($proto);
         assertSame($plain, Emitter::emitChunk($proto, false), basename($file));
@@ -694,19 +765,22 @@ function test_states_do_not_see_each_other(): void
     printedBy($b, 'math.randomseed(7)');
     printedBy($fresh, 'math.randomseed(7)');
     printedBy($a, 'math.random() math.randomseed(1)');
-    assertSame(printedBy($fresh, 'print(math.random(1000), math.random(1000))'), printedBy($b, 'print(math.random(1000), math.random(1000))'));
+    $twoRandoms = 'print(math.random(1000), math.random(1000))';
+    assertSame(printedBy($fresh, $twoRandoms), printedBy($b, $twoRandoms));
 
     // '%p' of long strings: each state numbers its own
     $long = 'string.format("%p", string.rep("x", 50))';
-    $first = printedBy($a, "keep = {} for i = 1, 5 do keep[i] = string.rep('y', 60) .. i end for i = 1, 5 do string.format('%p', keep[i]) end print($long)");
-    assertSame($first, printedBy(embeddedState(), "keep = {} for i = 1, 5 do keep[i] = string.rep('y', 60) .. i end for i = 1, 5 do string.format('%p', keep[i]) end print($long)"));
+    $numberOthersFirst = "keep = {} for i = 1, 5 do keep[i] = string.rep('y', 60) .. i end"
+        . " for i = 1, 5 do string.format('%p', keep[i]) end print($long)";
+    $first = printedBy($a, $numberOthersFirst);
+    assertSame($first, printedBy(embeddedState(), $numberOthersFirst));
     assertSame(printedBy(embeddedState(), "print($long)"), printedBy(embeddedState(), "print($long)"));
 }
 
 function test_a_state_run_from_inside_another_keeps_its_own_limits(): void
 {
     $outer = embeddedState(SAFE, new Budget(steps: 1000000, outputBytes: 1000));
-    $outer->globalState->globals->hash['inner'] = new NativeFunction('inner', static function (Coroutine $L, array $args): array {
+    $runInner = static function (Coroutine $L, array $args): array {
         $inner = embeddedState(SAFE, new Budget(steps: 10000));
         [$status, $results] = runIn($inner, 'print("inner output") return ' . $args[0]);
         try {
@@ -716,7 +790,8 @@ function test_a_state_run_from_inside_another_keeps_its_own_limits(): void
         }
         $results[] = $inner->globalState->output->bytes;
         return $results;
-    });
+    };
+    $outer->globalState->globals->hash['inner'] = new NativeFunction('inner', $runInner);
     $printed = printedBy($outer, <<<'LUA'
         print(inner("1 + 1"))
         print(coroutine.wrap(function() return inner("'from a coroutine'") end)())
@@ -725,7 +800,10 @@ function test_a_state_run_from_inside_another_keeps_its_own_limits(): void
         LUA);
     assertSame("2\tsteps\tinner output\n\nfrom a coroutine\tsteps\tinner output\n\n50000\n", $printed);
     $usage = $outer->globalState->budget->usage();
-    assertTrue($usage['steps'] > 150000 && $usage['steps'] < 160000, "the inner states' steps were charged to the outer: " . $usage['steps']);
+    assertTrue(
+        $usage['steps'] > 150000 && $usage['steps'] < 160000,
+        "the inner states' steps were charged to the outer: " . $usage['steps'],
+    );
 }
 
 // ---------------------------------------------------------------- closing
@@ -738,7 +816,9 @@ function test_an_abandoned_state_runs_no_finalizer(): void
         $finalized = true;
         return [];
     });
-    assertSame('steps', limitReachedBy($L, 'keep = setmetatable({}, {__gc = function() mark() end}) setmetatable({}, {__gc = function() mark() end}) while true do end'));
+    $code = 'keep = setmetatable({}, {__gc = function() mark() end})'
+        . ' setmetatable({}, {__gc = function() mark() end}) while true do end';
+    assertSame('steps', limitReachedBy($L, $code));
     Collector::abandonState($L->globalState);
     unset($L);
     gc_collect_cycles();
@@ -746,7 +826,8 @@ function test_an_abandoned_state_runs_no_finalizer(): void
 
     // a finalizer that reaches a limit stops the collection that runs it
     $L = embeddedState(SAFE, new Budget(steps: 100000));
-    assertSame('steps', limitReachedBy($L, 'warn("@on") setmetatable({}, {__gc = function() while true do end end}) collectgarbage() print("after")'));
+    $code = 'warn("@on") setmetatable({}, {__gc = function() while true do end end}) collectgarbage() print("after")';
+    assertSame('steps', limitReachedBy($L, $code));
     assertSame('', $L->globalState->output->bytes);
     assertSame('', $L->globalState->errorOutput->bytes);
 }

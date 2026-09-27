@@ -26,8 +26,14 @@ function test_syntax_errors_carry_luas_message_and_chunk_name(): void
         '[string "local x <const> = 1; x = 2"]:1: attempt to assign to const variable \'x\'',
         compileError('local x <const> = 1; x = 2', 'local x <const> = 1; x = 2'),
     );
-    assertSame("multi:3: 'end' expected (to close 'if' at line 1) near <eof>", compileError("if x then\n  y = 1\n", '=multi'));
-    assertSame('[string "x = \'unfinished"]:1: unfinished string near <eof>', compileError("x = 'unfinished", "x = 'unfinished"));
+    assertSame(
+        "multi:3: 'end' expected (to close 'if' at line 1) near <eof>",
+        compileError("if x then\n  y = 1\n", '=multi'),
+    );
+    assertSame(
+        '[string "x = \'unfinished"]:1: unfinished string near <eof>',
+        compileError("x = 'unfinished", "x = 'unfinished"),
+    );
     assertSame("goto:1: no visible label 'nowhere' for <goto> at line 1", compileError('goto nowhere', '=goto'));
     $longFileName = '@' . str_repeat('d/', 40) . 'file.lua';
     assertSame(

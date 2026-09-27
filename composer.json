@@ -1,0 +1,59 @@
+{
+    "name": "broskees/lua-to-php-transpiler",
+    "description": "Transpiles Lua 5.4 to PHP that behaves exactly like Lua 5.4.9, and runs sandboxed Lua inside PHP applications.",
+    "type": "library",
+    "license": "MIT",
+    "keywords": [
+        "lua",
+        "lua5.4",
+        "transpiler",
+        "compiler",
+        "interpreter",
+        "scripting",
+        "sandbox",
+        "embedding"
+    ],
+    "homepage": "https://github.com/broskees/lua-to-php-transpiler",
+    "support": {
+        "issues": "https://github.com/broskees/lua-to-php-transpiler/issues",
+        "source": "https://github.com/broskees/lua-to-php-transpiler"
+    },
+    "authors": [
+        {
+            "name": "Joseph Roberts"
+        }
+    ],
+    "require": {
+        "php": ">=8.4",
+        "ext-ctype": "*"
+    },
+    "require-dev": {
+        "squizlabs/php_codesniffer": "^4.0"
+    },
+    "suggest": {
+        "ext-opcache": "Caches and optimizes the generated PHP; its tracing JIT runs it 1.3 to 2 times faster",
+        "ext-posix": "Error texts (strerror) of the host's C library; without it, glibc's texts",
+        "ext-pcntl": "Exit statuses of io.popen and os.execute by waitpid; without it, by polling"
+    },
+    "autoload": {
+        "psr-4": {
+            "LuaPhp\\": "src/"
+        }
+    },
+    "bin": [
+        "bin/lua2php",
+        "bin/lua",
+        "bin/luac"
+    ],
+    "scripts": {
+        "test": [
+            "Composer\\Config::disableProcessTimeout",
+            "@php tests/run.php"
+        ],
+        "lint": "phpcs"
+    },
+    "scripts-descriptions": {
+        "test": "Runs the unit and differential tests (needs lua5.4 and luac5.4 5.4.9).",
+        "lint": "Checks the code style (PSR-12) with PHP_CodeSniffer."
+    }
+}

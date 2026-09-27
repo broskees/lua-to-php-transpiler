@@ -165,8 +165,10 @@ final class Coroutine
         foreach ($this->pendingCloses as [$abandonedTop, $protectedCi]) {
             Calls::unlinkAbandonedFrames($abandonedTop, $protectedCi);
         }
-        if ($this->body === null && $this->errorValue === null && $this->errfunc === null
-            && $this->tailCallFunction === null && $this->tailCallArguments === []) {
+        if (
+            $this->body === null && $this->errorValue === null && $this->errfunc === null
+            && $this->tailCallFunction === null && $this->tailCallArguments === []
+        ) {
             return;
         }
         if (Teardown::$releasing) {
@@ -254,7 +256,7 @@ final class Coroutine
             } else {  // resuming from previous yield: yield() returns the arguments
                 $values = $this->fiber->resume($arguments);
             }
-        } catch (LuaError|\Error $error) {  // unrecoverable error
+        } catch (LuaError | \Error $error) {  // unrecoverable error
             if ($error instanceof \Error) {
                 $error = Calls::cStackOverflowError($this, $error);
             }
@@ -284,12 +286,13 @@ final class Coroutine
      */
     private function start(array $arguments): mixed
     {
-        $this->globalState->budget?->reserveMemory(Budget::FIBER_BYTES);  // (between two step checks, many fibers may start)
+        // (between two step checks, many fibers may start)
+        $this->globalState->budget?->reserveMemory(Budget::FIBER_BYTES);
         $body = $this->body;
         $this->body = null;
         // one PHP closure for all fibers: PHP makes a new closure object
         // (about 400 bytes, kept by the fiber) each time it evaluates one
-        $this->fiber = new \Fiber(self::$fiberFunction ??= static function (Coroutine $L, mixed $body, array $arguments): array {
+        self::$fiberFunction ??= static function (Coroutine $L, mixed $body, array $arguments): array {
             if ($L->nCcalls >= Lua::LUAI_MAXCCALLS) {  // ccall checks even when it adds nothing
                 Calls::checkCStack($L);
             }
@@ -297,7 +300,8 @@ final class Coroutine
                 return ($body->code)($L, $body, $arguments) ?? Calls::finishTailCall($L);
             }
             return Calls::callNonLua($L, $body, $arguments);
-        });
+        };
+        $this->fiber = new \Fiber(self::$fiberFunction);
         // read when a fiber starts; every fiber the runtime starts sets its own
         // size. Hosts may disable ini_set, and embedded states leave it alone
         // (GlobalState::$setsFiberStackSize): fibers then get the host's size

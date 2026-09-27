@@ -78,7 +78,7 @@ final class ChunkLoader
         // current message handler for errors the parser raises as runtime
         // errors ("C stack overflow" and the like; PHP compiling the emitted
         // code can exhaust the C stack too, see Calls::cStackOverflowError)
-        [$status, $result] = Calls::protectedRun($L, static function () use ($L, $chunk, $chunkname, $mode): LuaClosure {
+        $compile = static function () use ($L, $chunk, $chunkname, $mode): LuaClosure {
             $isBinary = $chunk !== '' && $chunk[0] === Undump::LUA_SIGNATURE[0];
             self::checkMode($mode, $isBinary ? 'binary' : 'text');
             $budget = $L->globalState->budget;
@@ -88,7 +88,9 @@ final class ChunkLoader
             $countSteps = $L->globalState->countSteps;
             $key = LoadCache::key($chunk, $chunkname, $countSteps);
             $cache = $L->globalState->chunkCache;  // (an embedded state's own, else LoadCache)
-            $cached = $cache === null ? LoadCache::find($key, $L->nCcalls, $budget) : $cache->find($key, $L->nCcalls, $budget);
+            $cached = $cache === null
+                ? LoadCache::find($key, $L->nCcalls, $budget)
+                : $cache->find($key, $L->nCcalls, $budget);
             if ($cached !== null) {
                 [$protos, $factory] = $cached;
                 // fresh Protos, as a compile (one string per contents) or an undump makes
@@ -121,7 +123,8 @@ final class ChunkLoader
                 $cache->store($key, $protos, $nesting, $factory, $factorySource);
             }
             return self::instantiate($proto, $factory);
-        }, $L->errfunc);
+        };
+        [$status, $result] = Calls::protectedRun($L, $compile, $L->errfunc);
         if ($status !== Lua::LUA_OK) {
             throw new LuaError($result, $status);
         }
@@ -136,7 +139,10 @@ final class ChunkLoader
     private static function checkMode(?string $mode, string $kind): void
     {
         if ($mode !== null && !str_contains(DebugInfo::cString($mode), $kind[0])) {
-            throw new LuaError("attempt to load a $kind chunk (mode is '" . DebugInfo::cString($mode) . "')", Lua::LUA_ERRSYNTAX);
+            throw new LuaError(
+                "attempt to load a $kind chunk (mode is '" . DebugInfo::cString($mode) . "')",
+                Lua::LUA_ERRSYNTAX,
+            );
         }
     }
 
@@ -276,7 +282,8 @@ final class ChunkLoader
         if ($nameEnd === false) {
             return null;
         }
-        return rawurldecode(substr($start, \strlen(self::PRECOMPILED_HEADER), $nameEnd - \strlen(self::PRECOMPILED_HEADER)));
+        $headerLength = \strlen(self::PRECOMPILED_HEADER);
+        return rawurldecode(substr($start, $headerLength, $nameEnd - $headerLength));
     }
 
     /** whether the Lua file $filename was transpiled: its precompiled file came from it */
@@ -296,7 +303,10 @@ final class ChunkLoader
     private static function loadPrecompiledFile(Coroutine $L, ?string $filename, ?string $mode): LuaClosure
     {
         if ($filename === null) {
-            throw new LuaError('cannot load stdin: standard input cannot be transpiled ahead of time', Lua::LUA_ERRFILE);
+            throw new LuaError(
+                'cannot load stdin: standard input cannot be transpiled ahead of time',
+                Lua::LUA_ERRFILE,
+            );
         }
         $filename = DebugInfo::cString($filename);  // C's fopen sees a C string
         $phpFile = self::precompiledFileName($filename);
@@ -355,7 +365,7 @@ final class ChunkLoader
      */
     public static function loadPrecompiled(Coroutine $L, array $chunk, string $chunkname, ?string $mode): LuaClosure
     {
-        [$status, $result] = Calls::protectedRun($L, static function () use ($L, $chunk, $chunkname, $mode): LuaClosure {
+        $load = static function () use ($L, $chunk, $chunkname, $mode): LuaClosure {
             self::checkMode($mode, $chunk['binary'] ? 'binary' : 'text');
             $nestingError = self::nestingError($L->nCcalls, $chunk['nesting']);
             if ($nestingError !== null) {
@@ -364,7 +374,8 @@ final class ChunkLoader
             if ($chunk['error'] !== null) {
                 [$errorStatus, $message, $followsName] = $chunk['error'];
                 if ($followsName) {
-                    $message = ($chunk['binary'] ? Undump::nameForErrors($chunkname) : ChunkId::of($chunkname)) . $message;
+                    $name = $chunk['binary'] ? Undump::nameForErrors($chunkname) : ChunkId::of($chunkname);
+                    $message = $name . $message;
                 }
                 throw new LuaError($message, $errorStatus);
             }
@@ -373,7 +384,8 @@ final class ChunkLoader
                 self::setSource($proto, DebugInfo::cString($chunkname));  // a binary chunk keeps its own
             }
             return self::instantiate($proto, $chunk['factory']);
-        }, $L->errfunc);
+        };
+        [$status, $result] = Calls::protectedRun($L, $load, $L->errfunc);
         if ($status !== Lua::LUA_OK) {
             throw new LuaError($result, $status);
         }

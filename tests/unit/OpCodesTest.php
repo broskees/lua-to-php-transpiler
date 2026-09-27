@@ -20,19 +20,19 @@ function test_argument_limits_match_lopcodes_h(): void
     assertSame(255, OpCodes::MAXARG_A);
     assertSame(255, OpCodes::MAXARG_B);
     assertSame(255, OpCodes::MAXARG_C);
-    assertSame(127, OpCodes::OFFSET_sC);
-    assertSame(131071, OpCodes::MAXARG_Bx);
-    assertSame(65535, OpCodes::OFFSET_sBx);
-    assertSame(33554431, OpCodes::MAXARG_Ax);
-    assertSame(16777215, OpCodes::OFFSET_sJ);
+    assertSame(127, OpCodes::OFFSET_SC);
+    assertSame(131071, OpCodes::MAXARG_BX);
+    assertSame(65535, OpCodes::OFFSET_SBX);
+    assertSame(33554431, OpCodes::MAXARG_AX);
+    assertSame(16777215, OpCodes::OFFSET_SJ);
 }
 
 function test_opmodes_match_lopcodes_c(): void
 {
-    assertSame(OpCodes::iAsBx, OpCodes::getOpMode(OpCodes::OP_LOADI));
-    assertSame(OpCodes::iABx, OpCodes::getOpMode(OpCodes::OP_CLOSURE));
-    assertSame(OpCodes::isJ, OpCodes::getOpMode(OpCodes::OP_JMP));
-    assertSame(OpCodes::iAx, OpCodes::getOpMode(OpCodes::OP_EXTRAARG));
+    assertSame(OpCodes::IASBX, OpCodes::getOpMode(OpCodes::OP_LOADI));
+    assertSame(OpCodes::IABX, OpCodes::getOpMode(OpCodes::OP_CLOSURE));
+    assertSame(OpCodes::ISJ, OpCodes::getOpMode(OpCodes::OP_JMP));
+    assertSame(OpCodes::IAX, OpCodes::getOpMode(OpCodes::OP_EXTRAARG));
     assertTrue(OpCodes::testMMMode(OpCodes::OP_MMBINK));
     assertTrue(OpCodes::testTMode(OpCodes::OP_TESTSET) && OpCodes::testAMode(OpCodes::OP_TESTSET));
     assertTrue(OpCodes::testITMode(OpCodes::OP_SETLIST) && !OpCodes::testOTMode(OpCodes::OP_SETLIST));
@@ -44,20 +44,25 @@ function test_known_instructions_decode(): void
 {
     // Words from `luac5.4 -o` of "local a, b = ...\na = b + 1\n", listed by luac5.4 -l as
     // "ADDI 0 1 1" and "MMBINI 1 1 6 0 ; __add".
-    $addi = OpCodes::CREATE_ABCk(OpCodes::OP_ADDI, 0, 1, OpCodes::int2sC(1), 0);
+    $addi = OpCodes::createABCk(OpCodes::OP_ADDI, 0, 1, OpCodes::int2sC(1), 0);
     assertSame(0x80010015, $addi);
-    assertSame(OpCodes::OP_ADDI, OpCodes::GET_OPCODE($addi));
-    assertSame(0, OpCodes::GETARG_A($addi));
-    assertSame(1, OpCodes::GETARG_B($addi));
-    assertSame(1, OpCodes::GETARG_sC($addi));
+    assertSame(OpCodes::OP_ADDI, OpCodes::getOpcode($addi));
+    assertSame(0, OpCodes::getArgA($addi));
+    assertSame(1, OpCodes::getArgB($addi));
+    assertSame(1, OpCodes::getArgSC($addi));
 
     $mmbini = 0x068000af;
-    assertSame(OpCodes::OP_MMBINI, OpCodes::GET_OPCODE($mmbini));
-    assertSame([1, 1, 6, 0], [OpCodes::GETARG_A($mmbini), OpCodes::GETARG_sB($mmbini), OpCodes::GETARG_C($mmbini), OpCodes::GETARG_k($mmbini)]);
+    assertSame(OpCodes::OP_MMBINI, OpCodes::getOpcode($mmbini));
+    assertSame([1, 1, 6, 0], [
+        OpCodes::getArgA($mmbini),
+        OpCodes::getArgSB($mmbini),
+        OpCodes::getArgC($mmbini),
+        OpCodes::getArgK($mmbini),
+    ]);
 
-    $jump = OpCodes::CREATE_sJ(OpCodes::OP_JMP, -3 + OpCodes::OFFSET_sJ, 0);
-    assertSame(-3, OpCodes::GETARG_sJ($jump));
-    assertSame(OpCodes::OP_JMP, OpCodes::GET_OPCODE($jump));
+    $jump = OpCodes::createSJ(OpCodes::OP_JMP, -3 + OpCodes::OFFSET_SJ, 0);
+    assertSame(-3, OpCodes::getArgSJ($jump));
+    assertSame(OpCodes::OP_JMP, OpCodes::getOpcode($jump));
 }
 
 function test_encoders_and_decoders_round_trip(): void
@@ -69,49 +74,58 @@ function test_encoders_and_decoders_round_trip(): void
         $b = mt_rand(0, OpCodes::MAXARG_B);
         $c = mt_rand(0, OpCodes::MAXARG_C);
         $k = mt_rand(0, 1);
-        $abck = OpCodes::CREATE_ABCk($opcode, $a, $b, $c, $k);
+        $abck = OpCodes::createABCk($opcode, $a, $b, $c, $k);
         assertTrue($abck >= 0 && $abck <= 0xFFFFFFFF, 'instructions are unsigned 32-bit');
         assertSame([$opcode, $a, $b, $c, $k], [
-            OpCodes::GET_OPCODE($abck), OpCodes::GETARG_A($abck), OpCodes::GETARG_B($abck),
-            OpCodes::GETARG_C($abck), OpCodes::GETARG_k($abck),
+            OpCodes::getOpcode($abck), OpCodes::getArgA($abck), OpCodes::getArgB($abck),
+            OpCodes::getArgC($abck), OpCodes::getArgK($abck),
         ]);
-        assertSame($b - OpCodes::OFFSET_sC, OpCodes::GETARG_sB($abck));
-        assertSame($c - OpCodes::OFFSET_sC, OpCodes::GETARG_sC($abck));
-        assertSame($k === 1, OpCodes::TESTARG_k($abck));
+        assertSame($b - OpCodes::OFFSET_SC, OpCodes::getArgSB($abck));
+        assertSame($c - OpCodes::OFFSET_SC, OpCodes::getArgSC($abck));
+        assertSame($k === 1, OpCodes::testArgK($abck));
 
-        $bx = mt_rand(0, OpCodes::MAXARG_Bx);
-        $abx = OpCodes::CREATE_ABx($opcode, $a, $bx);
-        assertSame([$opcode, $a, $bx], [OpCodes::GET_OPCODE($abx), OpCodes::GETARG_A($abx), OpCodes::GETARG_Bx($abx)]);
+        $bx = mt_rand(0, OpCodes::MAXARG_BX);
+        $abx = OpCodes::createABx($opcode, $a, $bx);
+        assertSame([$opcode, $a, $bx], [OpCodes::getOpcode($abx), OpCodes::getArgA($abx), OpCodes::getArgBx($abx)]);
 
-        $sbx = mt_rand(-OpCodes::OFFSET_sBx, OpCodes::MAXARG_Bx - OpCodes::OFFSET_sBx);
-        assertSame($sbx, OpCodes::GETARG_sBx(OpCodes::SETARG_sBx($abx, $sbx)));
+        $sbx = mt_rand(-OpCodes::OFFSET_SBX, OpCodes::MAXARG_BX - OpCodes::OFFSET_SBX);
+        assertSame($sbx, OpCodes::getArgSBx(OpCodes::setArgSBx($abx, $sbx)));
 
-        $ax = mt_rand(0, OpCodes::MAXARG_Ax);
-        $axInstruction = OpCodes::CREATE_Ax($opcode, $ax);
-        assertSame([$opcode, $ax], [OpCodes::GET_OPCODE($axInstruction), OpCodes::GETARG_Ax($axInstruction)]);
+        $ax = mt_rand(0, OpCodes::MAXARG_AX);
+        $axInstruction = OpCodes::createAx($opcode, $ax);
+        assertSame([$opcode, $ax], [OpCodes::getOpcode($axInstruction), OpCodes::getArgAx($axInstruction)]);
 
-        $sj = mt_rand(-OpCodes::OFFSET_sJ, OpCodes::MAXARG_sJ - OpCodes::OFFSET_sJ);
-        $jump = OpCodes::CREATE_sJ(OpCodes::OP_JMP, $sj + OpCodes::OFFSET_sJ, 0);
-        assertSame($sj, OpCodes::GETARG_sJ($jump));
-        assertSame($sj, OpCodes::GETARG_sJ(OpCodes::SETARG_sJ(OpCodes::CREATE_sJ(OpCodes::OP_JMP, 0, 0), $sj)));
+        $sj = mt_rand(-OpCodes::OFFSET_SJ, OpCodes::MAXARG_SJ - OpCodes::OFFSET_SJ);
+        $jump = OpCodes::createSJ(OpCodes::OP_JMP, $sj + OpCodes::OFFSET_SJ, 0);
+        assertSame($sj, OpCodes::getArgSJ($jump));
+        assertSame($sj, OpCodes::getArgSJ(OpCodes::setArgSJ(OpCodes::createSJ(OpCodes::OP_JMP, 0, 0), $sj)));
     }
 }
 
 function test_setters_change_only_their_field(): void
 {
-    $instruction = OpCodes::CREATE_ABCk(OpCodes::OP_CALL, 1, 2, 3, 1);
-    $instruction = OpCodes::SETARG_A($instruction, 200);
-    $instruction = OpCodes::SETARG_B($instruction, 0);
-    $instruction = OpCodes::SETARG_C($instruction, 255);
-    $instruction = OpCodes::SETARG_k($instruction, 0);
-    $instruction = OpCodes::SET_OPCODE($instruction, OpCodes::OP_TAILCALL);
-    assertSame(OpCodes::CREATE_ABCk(OpCodes::OP_TAILCALL, 200, 0, 255, 0), $instruction);
-    assertSame(OpCodes::CREATE_Ax(OpCodes::OP_EXTRAARG, 12345), OpCodes::SETARG_Ax(OpCodes::CREATE_Ax(OpCodes::OP_EXTRAARG, 1), 12345));
-    assertSame(OpCodes::CREATE_ABx(OpCodes::OP_LOADK, 3, 999), OpCodes::SETARG_Bx(OpCodes::CREATE_ABx(OpCodes::OP_LOADK, 3, 7), 999));
+    $instruction = OpCodes::createABCk(OpCodes::OP_CALL, 1, 2, 3, 1);
+    $instruction = OpCodes::setArgA($instruction, 200);
+    $instruction = OpCodes::setArgB($instruction, 0);
+    $instruction = OpCodes::setArgC($instruction, 255);
+    $instruction = OpCodes::setArgK($instruction, 0);
+    $instruction = OpCodes::setOpcode($instruction, OpCodes::OP_TAILCALL);
+    assertSame(OpCodes::createABCk(OpCodes::OP_TAILCALL, 200, 0, 255, 0), $instruction);
+    assertSame(
+        OpCodes::createAx(OpCodes::OP_EXTRAARG, 12345),
+        OpCodes::setArgAx(OpCodes::createAx(OpCodes::OP_EXTRAARG, 1), 12345),
+    );
+    assertSame(
+        OpCodes::createABx(OpCodes::OP_LOADK, 3, 999),
+        OpCodes::setArgBx(OpCodes::createABx(OpCodes::OP_LOADK, 3, 7), 999),
+    );
     // an out-of-range value is cut to the field, never spilling into neighbours
-    assertSame(OpCodes::CREATE_ABCk(OpCodes::OP_MOVE, 0xFF, 1, 2, 0), OpCodes::SETARG_A(OpCodes::CREATE_ABCk(OpCodes::OP_MOVE, 0, 1, 2, 0), 0x1FF));
-    assertTrue(OpCodes::isOT(OpCodes::CREATE_ABCk(OpCodes::OP_CALL, 0, 1, 0, 0)));
-    assertTrue(!OpCodes::isOT(OpCodes::CREATE_ABCk(OpCodes::OP_CALL, 0, 1, 1, 0)));
-    assertTrue(OpCodes::isOT(OpCodes::CREATE_ABCk(OpCodes::OP_TAILCALL, 0, 1, 1, 0)));
-    assertTrue(OpCodes::isIT(OpCodes::CREATE_ABCk(OpCodes::OP_RETURN, 0, 0, 1, 0)));
+    assertSame(
+        OpCodes::createABCk(OpCodes::OP_MOVE, 0xFF, 1, 2, 0),
+        OpCodes::setArgA(OpCodes::createABCk(OpCodes::OP_MOVE, 0, 1, 2, 0), 0x1FF),
+    );
+    assertTrue(OpCodes::isOT(OpCodes::createABCk(OpCodes::OP_CALL, 0, 1, 0, 0)));
+    assertTrue(!OpCodes::isOT(OpCodes::createABCk(OpCodes::OP_CALL, 0, 1, 1, 0)));
+    assertTrue(OpCodes::isOT(OpCodes::createABCk(OpCodes::OP_TAILCALL, 0, 1, 1, 0)));
+    assertTrue(OpCodes::isIT(OpCodes::createABCk(OpCodes::OP_RETURN, 0, 0, 1, 0)));
 }

@@ -108,8 +108,13 @@ final class LoadCache
      * a binary chunk), how deep its parser nesting went (see
      * Compiler::compile), its factory and the factory's PHP source.
      */
-    public static function store(string $key, ?string $protos, int $nesting, \Closure $factory, string $factorySource): void
-    {
+    public static function store(
+        string $key,
+        ?string $protos,
+        int $nesting,
+        \Closure $factory,
+        string $factorySource,
+    ): void {
         self::remember($key, [$protos, $nesting, $factory]);
         self::$disk?->write($key, $protos, $nesting, $factorySource, self::$diskEntryLimit, self::$diskByteLimit);
     }

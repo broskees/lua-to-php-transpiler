@@ -15,7 +15,11 @@ function workingDirectory(): string
     $directory = scratchDirectory() . '/luac';
     if (!is_dir($directory)) {
         mkdir($directory);
-        file_put_contents($directory . '/sample.lua', "#!/usr/bin/env lua\nlocal t = {1, 2.5, 'x\\0y'}\nfor i, v in ipairs(t) do\n  print(i, v)\nend\nreturn function(...) return ... end\n");
+        file_put_contents(
+            $directory . '/sample.lua',
+            "#!/usr/bin/env lua\nlocal t = {1, 2.5, 'x\\0y'}\nfor i, v in ipairs(t) do\n  print(i, v)\nend\n"
+            . "return function(...) return ... end\n",
+        );
         file_put_contents($directory . '/broken.lua', "local x = \n\n  = 3\n");
         file_put_contents($directory . '/bom.lua', "\xEF\xBB\xBFreturn 42\n");
     }
@@ -54,7 +58,11 @@ function test_output_files_are_byte_identical(): void
     $directory = workingDirectory();
     foreach ([[], ['-s']] as $extraOptions) {
         runCommand(['luac5.4', ...$extraOptions, '-o', 'reference.out', 'sample.lua'], '', $directory);
-        [$exitCode, , $errorOutput] = runCommand(['php', REPO_ROOT . '/bin/luac', ...$extraOptions, '-o', 'ours.out', 'sample.lua'], '', $directory);
+        [$exitCode, , $errorOutput] = runCommand(
+            ['php', REPO_ROOT . '/bin/luac', ...$extraOptions, '-o', 'ours.out', 'sample.lua'],
+            '',
+            $directory,
+        );
         assertSame(0, $exitCode, $errorOutput);
         assertTrue(
             file_get_contents("$directory/reference.out") === file_get_contents("$directory/ours.out"),
@@ -64,7 +72,10 @@ function test_output_files_are_byte_identical(): void
     // default output name
     runCommand(['php', REPO_ROOT . '/bin/luac', 'sample.lua'], '', $directory);
     runCommand(['luac5.4', '-o', 'reference.out', 'sample.lua'], '', $directory);
-    assertTrue(file_get_contents("$directory/luac.out") === file_get_contents("$directory/reference.out"), 'luac.out differs');
+    assertTrue(
+        file_get_contents("$directory/luac.out") === file_get_contents("$directory/reference.out"),
+        'luac.out differs',
+    );
 }
 
 function test_listings_match(): void

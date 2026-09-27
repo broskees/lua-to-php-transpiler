@@ -11,6 +11,8 @@ namespace LuaPhp\Compiler;
  * into floats, so + - * go through the wrapping helpers below.
  *
  * Operation codes are lua.h's LUA_OPADD..LUA_OPBNOT ("ORDER TM, ORDER OP").
+ * Functions keep their C names without the module prefix: luaO_rawarith
+ * is rawarith, luaV_flttointeger flttointeger.
  *
  * @internal
  */
@@ -38,7 +40,7 @@ final class RawArith
      * lobject.c: luaO_rawarith. Returns the result, or null when the
      * operands do not allow a raw operation (C returns 0: "fail").
      */
-    public static function luaO_rawarith(int $op, int|float $p1, int|float $p2): int|float|null
+    public static function rawarith(int $op, int|float $p1, int|float $p2): int|float|null
     {
         switch ($op) {
             case self::LUA_OPBAND:
@@ -47,8 +49,8 @@ final class RawArith
             case self::LUA_OPSHL:
             case self::LUA_OPSHR:
             case self::LUA_OPBNOT:  // operate only on integers
-                $i1 = is_int($p1) ? $p1 : self::luaV_flttointeger($p1);
-                $i2 = is_int($p2) ? $p2 : self::luaV_flttointeger($p2);
+                $i1 = is_int($p1) ? $p1 : self::flttointeger($p1);
+                $i2 = is_int($p2) ? $p2 : self::flttointeger($p2);
                 if ($i1 === null || $i2 === null) {
                     return null;  // fail
                 }
@@ -71,13 +73,13 @@ final class RawArith
             self::LUA_OPADD => self::addWrapping($v1, $v2),
             self::LUA_OPSUB => self::subtractWrapping($v1, $v2),
             self::LUA_OPMUL => self::multiplyWrapping($v1, $v2),
-            self::LUA_OPMOD => self::luaV_mod($v1, $v2),
-            self::LUA_OPIDIV => self::luaV_idiv($v1, $v2),
+            self::LUA_OPMOD => self::mod($v1, $v2),
+            self::LUA_OPIDIV => self::idiv($v1, $v2),
             self::LUA_OPBAND => $v1 & $v2,
             self::LUA_OPBOR => $v1 | $v2,
             self::LUA_OPBXOR => $v1 ^ $v2,
-            self::LUA_OPSHL => self::luaV_shiftl($v1, $v2),
-            self::LUA_OPSHR => self::luaV_shiftl($v1, self::subtractWrapping(0, $v2)),  // luaV_shiftr
+            self::LUA_OPSHL => self::shiftl($v1, $v2),
+            self::LUA_OPSHR => self::shiftl($v1, self::subtractWrapping(0, $v2)),  // luaV_shiftr
             self::LUA_OPUNM => self::subtractWrapping(0, $v1),
             self::LUA_OPBNOT => ~$v1,
         };
@@ -115,7 +117,7 @@ final class RawArith
      * lvm.c: luaV_flttointeger with mode F2Ieq (the value must be integral
      * and in the range of a lua_Integer); null when it fails.
      */
-    public static function luaV_flttointeger(float $n): ?int
+    public static function flttointeger(float $n): ?int
     {
         $floor = floor($n);
         if ($n != $floor) {  // not an integral value? (also NaN)
@@ -129,7 +131,7 @@ final class RawArith
     }
 
     // lvm.c: luaV_idiv (floor division; the caller excludes n == 0)
-    private static function luaV_idiv(int $m, int $n): int
+    private static function idiv(int $m, int $n): int
     {
         if ($n === -1) {
             return self::subtractWrapping(0, $m);  // avoid overflow with 0x80000...//-1
@@ -142,7 +144,7 @@ final class RawArith
     }
 
     // lvm.c: luaV_mod (the caller excludes n == 0)
-    private static function luaV_mod(int $m, int $n): int
+    private static function mod(int $m, int $n): int
     {
         if ($n === -1) {
             return 0;  // m % -1 == 0; avoid overflow with 0x80000...%-1
@@ -155,7 +157,7 @@ final class RawArith
     }
 
     // lvm.c: luaV_shiftl (negative shifts go right; shifts are logical)
-    private static function luaV_shiftl(int $x, int $y): int
+    private static function shiftl(int $x, int $y): int
     {
         if ($y < 0) {  // shift right?
             if ($y <= -self::NBITS) {

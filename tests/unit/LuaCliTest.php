@@ -15,12 +15,18 @@ function workingDirectory(): string
     $directory = scratchDirectory() . '/lua-cli';
     if (!is_dir($directory)) {
         mkdir($directory);
-        file_put_contents($directory . '/args.lua', "#!/usr/bin/env lua\nprint(select('#', ...), ...)\nfor i = -1, #arg do print(i, arg[i]) end\n");
+        file_put_contents(
+            $directory . '/args.lua',
+            "#!/usr/bin/env lua\nprint(select('#', ...), ...)\nfor i = -1, #arg do print(i, arg[i]) end\n",
+        );
         file_put_contents($directory . '/fails.lua', "local t = nil\nprint('partial output')\nreturn t.x\n");
         file_put_contents($directory . '/syntax.lua', "x = = 1\n");
         file_put_contents($directory . '/returns.lua', "return 1, 2, 3\n");
         file_put_contents($directory . '/bom.lua', "\xEF\xBB\xBFprint('bom ok')\n");
-        file_put_contents($directory . '/errorobject.lua', "error(setmetatable({}, {__tostring = function () return 'as string' end}))\n");
+        file_put_contents(
+            $directory . '/errorobject.lua',
+            "error(setmetatable({}, {__tostring = function () return 'as string' end}))\n",
+        );
         file_put_contents($directory . '/errornil.lua', "error()\n");
     }
     return $directory;
@@ -99,7 +105,11 @@ function test_version_and_environment(): void
     assertSameAsReference(['-v']);
     assertSameAsReference(['-v', '-e', 'print(1)']);
     assertSameAsReference(['-e', 'print(1)'], '', ['LUA_INIT' => 'print("init ran")']);
-    assertSameAsReference(['-e', 'print(1)'], '', ['LUA_INIT_5_4' => 'print("5.4 init ran")', 'LUA_INIT' => 'print("not this one")']);
+    assertSameAsReference(
+        ['-e', 'print(1)'],
+        '',
+        ['LUA_INIT_5_4' => 'print("5.4 init ran")', 'LUA_INIT' => 'print("not this one")'],
+    );
     assertSameAsReference(['-E', '-e', 'print(1)'], '', ['LUA_INIT' => 'print("ignored")']);
     assertSameAsReference(['-e', 'print(1)'], '', ['LUA_INIT' => 'error("init failed")']);
     assertSameAsReference(['-e', 'print(1)'], '', ['LUA_INIT' => '@args.lua']);

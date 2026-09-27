@@ -1,0 +1,13 @@
+# Left out of the package's dist archives (composer archive, GitHub's zips,
+# Packagist): what users of the library do not need. (vendor/ and
+# composer.lock are never committed; listed so that a local composer
+# archive leaves the dev tools out too.)
+/reference      export-ignore
+/tests          export-ignore
+/bench          export-ignore
+/AGENTS.md      export-ignore
+/phpcs.xml.dist export-ignore
+/.gitignore     export-ignore
+/.gitattributes export-ignore
+/vendor         export-ignore
+/composer.lock  export-ignore

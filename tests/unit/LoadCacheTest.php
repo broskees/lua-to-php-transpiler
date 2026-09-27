@@ -30,11 +30,20 @@ const HITS_SCRIPT = <<<'LUA'
     LUA;
 
 /** @return array{int, string, string} */
-function runLua(string $script, string $workingDirectory, ?string $cacheDirectory, bool $guarded = false, string $program = REPO_ROOT . '/bin/lua'): array
-{
+function runLua(
+    string $script,
+    string $workingDirectory,
+    ?string $cacheDirectory,
+    bool $guarded = false,
+    string $program = REPO_ROOT . '/bin/lua',
+): array {
     $environment = $cacheDirectory === null ? ['-u', 'LUAPHP_CACHE_DIR'] : ["LUAPHP_CACHE_DIR=$cacheDirectory"];
     $phpOptions = $guarded ? ['-d', 'auto_prepend_file=' . GUARD] : [];
-    return runCommand(['env', ...$environment, 'php', ...OPCACHE_ON_NEW_FILES, ...$phpOptions, $program, $script], '', $workingDirectory);
+    return runCommand(
+        ['env', ...$environment, 'php', ...OPCACHE_ON_NEW_FILES, ...$phpOptions, $program, $script],
+        '',
+        $workingDirectory,
+    );
 }
 
 /** @return list<string> the cache entries (generated PHP files) in $directory */
@@ -55,13 +64,25 @@ function newDirectory(string $name): string
 function test_cached_loads_behave_like_fresh_ones(): void
 {
     $diffDirectory = REPO_ROOT . '/tests/diff';
-    foreach (['load_cache.lua', 'load_cache_depth.lua', 'load_chunks.lua', 'load_nesting.lua', 'string_dump.lua', 'string_pointer.lua'] as $script) {
+    $scripts = [
+        'load_cache.lua', 'load_cache_depth.lua', 'load_chunks.lua', 'load_nesting.lua', 'string_dump.lua',
+        'string_pointer.lua',
+    ];
+    foreach ($scripts as $script) {
         $cacheDirectory = newDirectory("cache-behaves-$script");
         $reference = runCommand(['lua5.4', $script], '', $diffDirectory);
-        $expected = [$reference[0], normalizeDifferentialOutput($reference[1], 'lua5.4'), normalizeDifferentialOutput($reference[2], 'lua5.4')];
+        $expected = [
+            $reference[0],
+            normalizeDifferentialOutput($reference[1], 'lua5.4'),
+            normalizeDifferentialOutput($reference[2], 'lua5.4'),
+        ];
         foreach (['cold', 'warm'] as $run) {
             $result = runLua($script, $diffDirectory, $cacheDirectory);
-            $actual = [$result[0], normalizeDifferentialOutput($result[1], 'lua5.4'), normalizeDifferentialOutput($result[2], REPO_ROOT . '/bin/lua')];
+            $actual = [
+                $result[0],
+                normalizeDifferentialOutput($result[1], 'lua5.4'),
+                normalizeDifferentialOutput($result[2], REPO_ROOT . '/bin/lua'),
+            ];
             assertSame($expected, $actual, "$script, $run cache");
             assertTrue(entries($cacheDirectory) !== [], "$script: entries written");
         }
@@ -77,7 +98,10 @@ function test_a_warm_cache_compiles_nothing(): void
     // bin/lua loads its script through load() too: a warm run compiles nothing at all
     assertSame($expected, runLua('hits.lua', $directory, "$directory/cache", guarded: true));
     // without LUAPHP_CACHE_DIR, bin/lua uses no disk cache
-    [$status] = runCommand(['env', '-u', 'LUAPHP_CACHE_DIR', 'TMPDIR=' . newDirectory('cache-warm-tmp'), 'php', '-d', 'auto_prepend_file=' . GUARD, REPO_ROOT . '/bin/lua', 'hits.lua'], '', $directory);
+    [$status] = runCommand([
+        'env', '-u', 'LUAPHP_CACHE_DIR', 'TMPDIR=' . newDirectory('cache-warm-tmp'),
+        'php', '-d', 'auto_prepend_file=' . GUARD, REPO_ROOT . '/bin/lua', 'hits.lua',
+    ], '', $directory);
     assertSame(97, $status);
     assertSame([], glob(scratchDirectory() . '/cache-warm-tmp/*'), 'bin/lua writes no cache without LUAPHP_CACHE_DIR');
 }
@@ -94,7 +118,8 @@ function test_corrupt_entries_are_misses(): void
         'garbage' => static fn (string $contents): string => "<?php \x01\x02 garbage (\n",
         'not PHP' => static fn (string $contents): string => random_bytes(200),
         'another array' => static fn (string $contents): string => "<?php return [1, 2, 3];\n",
-        'another key' => static fn (string $contents): string => preg_replace("/'key' => '[0-9a-f]+'/", "'key' => 'x'", $contents),
+        'another key' => static fn (string $contents): string
+            => preg_replace("/'key' => '[0-9a-f]+'/", "'key' => 'x'", $contents),
         'throws' => static fn (string $contents): string => "<?php throw new \\RuntimeException('corrupt');\n",
     ];
     foreach ($corruptions as $label => $corrupt) {
@@ -105,7 +130,11 @@ function test_corrupt_entries_are_misses(): void
         }
         assertSame($expected, runLua('hits.lua', $directory, "$directory/cache"), "run with '$label' entries");
         // the misses rewrote the entries
-        assertSame($expected, runLua('hits.lua', $directory, "$directory/cache", guarded: true), "guarded run after '$label'");
+        assertSame(
+            $expected,
+            runLua('hits.lua', $directory, "$directory/cache", guarded: true),
+            "guarded run after '$label'",
+        );
     }
     // an unreadable entry is a miss too
     foreach (entries("$directory/cache") as $entry) {
@@ -129,13 +158,20 @@ function test_concurrent_writers(): void
     $cacheDirectory = newDirectory('cache-concurrent/cache');
     $processes = [];
     for ($i = 0; $i < 3; $i++) {
-        $processes[] = startProcess(['env', "LUAPHP_CACHE_DIR=$cacheDirectory", 'php', ...OPCACHE_ON_NEW_FILES, REPO_ROOT . '/bin/lua', 'writers.lua'], $directory);
+        $processes[] = startProcess([
+            'env', "LUAPHP_CACHE_DIR=$cacheDirectory",
+            'php', ...OPCACHE_ON_NEW_FILES, REPO_ROOT . '/bin/lua', 'writers.lua',
+        ], $directory);
     }
     foreach ($processes as $process) {
         assertSame([0, "60300\t3000\n", ''], finishProcess($process));
     }
     assertSame(202, \count(entries($cacheDirectory)), 'one entry per chunk (the script, 200 small ones, the big one)');
-    $others = array_diff(scandir($cacheDirectory), ['.', '..', 'usage'], array_map('basename', entries($cacheDirectory)));
+    $others = array_diff(
+        scandir($cacheDirectory),
+        ['.', '..', 'usage'],
+        array_map('basename', entries($cacheDirectory)),
+    );
     assertSame([], array_values($others), 'no temporary files left');
     assertSame([0, "60300\t3000\n", ''], runLua('writers.lua', $directory, $cacheDirectory, guarded: true));
 }
@@ -143,18 +179,25 @@ function test_concurrent_writers(): void
 function test_entries_of_another_runtime_version_are_not_used(): void
 {
     $directory = newDirectory('cache-version');
-    exec('cp -R ' . escapeshellarg(REPO_ROOT . '/src') . ' ' . escapeshellarg(REPO_ROOT . '/bin') . ' ' . escapeshellarg($directory), $output, $status);
+    $sources = escapeshellarg(REPO_ROOT . '/src') . ' ' . escapeshellarg(REPO_ROOT . '/bin');
+    exec('cp -R ' . $sources . ' ' . escapeshellarg($directory), $output, $status);
     assertSame(0, $status);
     file_put_contents("$directory/hits.lua", HITS_SCRIPT);
     $expected = [0, "true\ttrue\n230\thits.lua:1: boom\n", ''];
     assertSame($expected, runLua('hits.lua', $directory, "$directory/cache", program: "$directory/bin/lua"));
-    assertSame($expected, runLua('hits.lua', $directory, "$directory/cache", guarded: true, program: "$directory/bin/lua"));
+    assertSame(
+        $expected,
+        runLua('hits.lua', $directory, "$directory/cache", guarded: true, program: "$directory/bin/lua"),
+    );
     // any change to the runtime or the transpiler changes the fingerprint
     file_put_contents("$directory/src/Runtime/Lua.php", "\n// another version\n", FILE_APPEND);
     [$status] = runLua('hits.lua', $directory, "$directory/cache", guarded: true, program: "$directory/bin/lua");
     assertSame(97, $status, 'entries of the other version are misses');
     assertSame($expected, runLua('hits.lua', $directory, "$directory/cache", program: "$directory/bin/lua"));
-    assertSame($expected, runLua('hits.lua', $directory, "$directory/cache", guarded: true, program: "$directory/bin/lua"));
+    assertSame(
+        $expected,
+        runLua('hits.lua', $directory, "$directory/cache", guarded: true, program: "$directory/bin/lua"),
+    );
 }
 
 function test_the_disk_cache_is_bounded(): void
@@ -184,7 +227,8 @@ function test_the_disk_cache_is_bounded(): void
         LoadCache::$diskByteLimit = 2 * $entrySize + intdiv($entrySize, 2);
         for ($i = 20; $i < 26; $i++) {
             ChunkLoader::load($L, "return $i", '=bound', null);
-            assertTrue(array_sum(array_map('filesize', entries($directory))) <= LoadCache::$diskByteLimit, 'within the byte limit');
+            $diskBytes = array_sum(array_map('filesize', entries($directory)));
+            assertTrue($diskBytes <= LoadCache::$diskByteLimit, 'within the byte limit');
         }
         // an entry bigger than the limit on its own is not written
         $before = entries($directory);
@@ -219,7 +263,11 @@ function test_the_cache_directory_must_be_private(): void
     assertSame(['.', '..'], scandir("$directory/shared"), 'nor with two');
 
     file_put_contents("$directory/file", '');
-    assertSame($expected, runLua('hits.lua', $directory, "$directory/file/cache"), 'a directory that cannot be created: silently no cache');
+    assertSame(
+        $expected,
+        runLua('hits.lua', $directory, "$directory/file/cache"),
+        'a directory that cannot be created: silently no cache',
+    );
 
     assertSame($expected, runLua('hits.lua', $directory, "$directory/new/cache"));
     assertSame(040700, fileperms("$directory/new/cache") & 0777777, 'created private');
@@ -254,7 +302,10 @@ function test_a_cache_directory_others_could_replace_is_not_used(): void
         }
         mkdir("$directory/open/cache", 0777);
         $marker = "$directory/foreign-code-ran";
-        file_put_contents("$directory/open/cache/$entryName", '<?php file_put_contents(' . var_export($marker, true) . ', "x"); return null;');
+        file_put_contents(
+            "$directory/open/cache/$entryName",
+            '<?php file_put_contents(' . var_export($marker, true) . ', "x"); return null;',
+        );
         assertSame([0, [42]], Standalone::docall($L, ChunkLoader::load($L, 'return 42', '=victim', null), []));
         assertTrue(!file_exists($marker), 'a replaced cache directory is never included from');
 
@@ -281,18 +332,30 @@ function test_the_disk_cache_works_without_posix_functions(): void
     $expected = [0, "true\ttrue\n230\thits.lua:1: boom\n", ''];
     $noPosix = ['-d', 'disable_functions=posix_geteuid,posix_getuid,posix_getegid,posix_getgid,posix_getpwuid'];
     $run = static fn (array $environment, array $phpOptions, array $script): array
-        => runCommand(['env', ...$environment, 'php', ...OPCACHE_ON_NEW_FILES, ...$noPosix, ...$phpOptions, ...$script], '', $directory);
+        => runCommand(
+            ['env', ...$environment, 'php', ...OPCACHE_ON_NEW_FILES, ...$noPosix, ...$phpOptions, ...$script],
+            '',
+            $directory,
+        );
     // bin/lua with LUAPHP_CACHE_DIR
     $cacheDirectory = "$directory/cache";
     assertSame($expected, $run(["LUAPHP_CACHE_DIR=$cacheDirectory"], [], [REPO_ROOT . '/bin/lua', 'hits.lua']));
     assertSame(23, \count(entries($cacheDirectory)));
-    assertSame($expected, $run(["LUAPHP_CACHE_DIR=$cacheDirectory"], ['-d', 'auto_prepend_file=' . GUARD], [REPO_ROOT . '/bin/lua', 'hits.lua']));
+    assertSame($expected, $run(
+        ["LUAPHP_CACHE_DIR=$cacheDirectory"],
+        ['-d', 'auto_prepend_file=' . GUARD],
+        [REPO_ROOT . '/bin/lua', 'hits.lua'],
+    ));
     // a generated script's default directory
     runCommand(['php', REPO_ROOT . '/bin/lua2php', 'hits.lua'], '', $directory);
     $temporary = newDirectory('cache-no-posix/tmp');
     assertSame($expected, $run(['-u', 'LUAPHP_CACHE_DIR', "TMPDIR=$temporary"], [], ['hits.php']));
     assertSame(22, \count(entries("$temporary/luaphp-" . posix_geteuid())), 'luaphp-<uid> without posix');
-    assertSame($expected, $run(['-u', 'LUAPHP_CACHE_DIR', "TMPDIR=$temporary"], ['-d', 'auto_prepend_file=' . GUARD], ['hits.php']));
+    assertSame($expected, $run(
+        ['-u', 'LUAPHP_CACHE_DIR', "TMPDIR=$temporary"],
+        ['-d', 'auto_prepend_file=' . GUARD],
+        ['hits.php'],
+    ));
 }
 
 function test_generated_scripts_default_to_a_private_directory_under_tmp(): void
@@ -303,16 +366,27 @@ function test_generated_scripts_default_to_a_private_directory_under_tmp(): void
     $expected = [0, "true\ttrue\n230\thits.lua:1: boom\n", ''];
     $temporary = newDirectory('cache-default/tmp');
     $cacheDirectory = "$temporary/luaphp-" . posix_geteuid();
-    assertSame($expected, runCommand(['env', '-u', 'LUAPHP_CACHE_DIR', "TMPDIR=$temporary", 'php', ...OPCACHE_ON_NEW_FILES, 'hits.php'], '', $directory));
+    assertSame($expected, runCommand(
+        ['env', '-u', 'LUAPHP_CACHE_DIR', "TMPDIR=$temporary", 'php', ...OPCACHE_ON_NEW_FILES, 'hits.php'],
+        '',
+        $directory,
+    ));
     assertSame(040700, fileperms($cacheDirectory) & 0777777);
     assertSame(22, \count(entries($cacheDirectory)), 'one entry per load()');
-    assertSame($expected, runCommand(['env', '-u', 'LUAPHP_CACHE_DIR', "TMPDIR=$temporary", 'php', ...OPCACHE_ON_NEW_FILES, '-d', 'auto_prepend_file=' . GUARD, 'hits.php'], '', $directory));
+    assertSame($expected, runCommand([
+        'env', '-u', 'LUAPHP_CACHE_DIR', "TMPDIR=$temporary",
+        'php', ...OPCACHE_ON_NEW_FILES, '-d', 'auto_prepend_file=' . GUARD, 'hits.php',
+    ], '', $directory));
 
     // a directory that is not private (here: world-writable) is not used
     $otherTemporary = newDirectory('cache-default/other-tmp');
     mkdir("$otherTemporary/luaphp-" . posix_geteuid(), 0777);
     chmod("$otherTemporary/luaphp-" . posix_geteuid(), 0777);
-    assertSame($expected, runCommand(['env', '-u', 'LUAPHP_CACHE_DIR', "TMPDIR=$otherTemporary", 'php', ...OPCACHE_ON_NEW_FILES, 'hits.php'], '', $directory));
+    assertSame($expected, runCommand(
+        ['env', '-u', 'LUAPHP_CACHE_DIR', "TMPDIR=$otherTemporary", 'php', ...OPCACHE_ON_NEW_FILES, 'hits.php'],
+        '',
+        $directory,
+    ));
     assertSame([], entries("$otherTemporary/luaphp-" . posix_geteuid()));
 }
 

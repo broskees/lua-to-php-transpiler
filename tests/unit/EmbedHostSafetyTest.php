@@ -23,7 +23,9 @@ function outcomeOf(string $name): array
         $driver = scratchDirectory() . '/host-safety-driver.php';
         file_put_contents($driver, SCENARIOS);
     }
-    [$status, $output, $errors] = runCommand(['timeout', '-s', 'KILL', '60', 'php', '-d', 'memory_limit=128M', $driver, REPO_ROOT, $name]);
+    [$status, $output, $errors] = runCommand(
+        ['timeout', '-s', 'KILL', '60', 'php', '-d', 'memory_limit=128M', $driver, REPO_ROOT, $name]
+    );
     assertSame(0, $status, "$name: the host process survives (exit $status): " . substr($errors . $output, 0, 600));
     $outcome = json_decode($output, true);
     assertTrue(\is_array($outcome), "$name: " . substr($output, 0, 600));
@@ -38,9 +40,10 @@ function assertOutcomes(array $expected): void
         try {
             $actual = outcomeOf($name);
             if (\array_slice($actual, 0, \count($outcome)) !== $outcome) {
-                $failures[] = "$name: expected " . json_encode($outcome) . ', got ' . substr(json_encode($actual), 0, 300);
+                $failures[] = "$name: expected " . json_encode($outcome)
+                    . ', got ' . substr(json_encode($actual), 0, 300);
             }
-        } catch (\AssertionFailed $failed) {
+        } catch (\Tests\AssertionFailed $failed) {
             $failures[] = $failed->getMessage();
         }
     }
@@ -64,16 +67,27 @@ const SCENARIOS = <<<'PHP'
     {
         return "local a = 0\n" . str_repeat('a = a + 1;', $statements) . "\nreturn a";
     }
-    const LONG_KEY_CHAIN = 'local k = string.rep("k", 1000000) local t = {} local c = t for i = 1, 90 do c[k] = {} c = c[k] end ';
+    const LONG_KEY_CHAIN = 'local k = string.rep("k", 1000000) local t = {} local c = t'
+        . ' for i = 1, 90 do c[k] = {} c = c[k] end ';
 
     /**
      * runs script $code in a new sandbox (after $setup($sandbox)) of an
      * Environment ($prepare($environment) first): its values, or what it
      * threw
      */
-    function script(string $code, array $limits = LIMITS, ?Closure $setup = null, bool $allowLoad = false, array $files = [], ?Closure $prepare = null): array
-    {
-        $environment = new Environment(loader: new ArrayLoader(['x.lua' => $code] + $files), limits: $limits === [] ? Limits::none() : new Limits(...$limits), allowLoad: $allowLoad);
+    function script(
+        string $code,
+        array $limits = LIMITS,
+        ?Closure $setup = null,
+        bool $allowLoad = false,
+        array $files = [],
+        ?Closure $prepare = null,
+    ): array {
+        $environment = new Environment(
+            loader: new ArrayLoader(['x.lua' => $code] + $files),
+            limits: $limits === [] ? Limits::none() : new Limits(...$limits),
+            allowLoad: $allowLoad,
+        );
         if ($prepare !== null) {
             $prepare($environment);
         }
@@ -111,38 +125,63 @@ const SCENARIOS = <<<'PHP'
         // 1. '__call' cycles
         'call-cycle' => static fn () => script('local t = {} setmetatable(t, {__call = t}) t() return 1'),
         'tail-call-cycle' => static fn () => script('local t = {} setmetatable(t, {__call = t}) return t()'),
-        'call-cycle-in-pcall' => static fn () => script('local t = {} setmetatable(t, {__call = t}) print(pcall(t)) return 1'),
-        'call-cycle-without-steps' => static fn () => script('local t = {} setmetatable(t, {__call = t}) t() return 1', ['seconds' => 60.0]),
+        'call-cycle-in-pcall' => static fn () => script(
+            'local t = {} setmetatable(t, {__call = t}) print(pcall(t)) return 1'
+        ),
+        'call-cycle-without-steps' => static fn () => script(
+            'local t = {} setmetatable(t, {__call = t}) t() return 1',
+            ['seconds' => 60.0],
+        ),
         // 2. host functions that catch what stopped the run
-        'host-maps-limit' => static fn () => script('pcall(host, function() while true do end end) print("AFTER LIMIT") return 42', ['steps' => 1000], static function ($sandbox): void {
-            $sandbox->setGlobal('host', static function (LuaFunction $f): void {
-                try {
-                    $f();
-                } catch (Throwable) {
-                    throw new ScriptError('mapped');
-                }
-            });
-        }),
-        'host-maps-seconds' => static fn () => script('local ok, e = pcall(sleeper) print("AFTER LIMIT") return ok, e', ['seconds' => 0.005], static function ($sandbox): void {
-            $sandbox->setGlobal('sleeper', static function (): void {
-                usleep(30000);
-                throw new ScriptError('nope');
-            });
-        }),
-        'host-maps-charge' => static fn () => script('local m = require("m") pcall(m.charge) print("AFTER LIMIT") return 42', ['steps' => 1000], null, false, [], static function (Environment $environment): void {
-            $environment->addModule('m', static fn (RunContext $context): array => ['charge' => static function () use ($context): void {
-                try {
-                    $context->chargeSteps(1_000_000);
-                } catch (Throwable) {
-                    throw new ScriptError('mapped');
-                }
-            }]);
-        }),
+        'host-maps-limit' => static fn () => script(
+            'pcall(host, function() while true do end end) print("AFTER LIMIT") return 42',
+            ['steps' => 1000],
+            static function ($sandbox): void {
+                $sandbox->setGlobal('host', static function (LuaFunction $f): void {
+                    try {
+                        $f();
+                    } catch (Throwable) {
+                        throw new ScriptError('mapped');
+                    }
+                });
+            },
+        ),
+        'host-maps-seconds' => static fn () => script(
+            'local ok, e = pcall(sleeper) print("AFTER LIMIT") return ok, e',
+            ['seconds' => 0.005],
+            static function ($sandbox): void {
+                $sandbox->setGlobal('sleeper', static function (): void {
+                    usleep(30000);
+                    throw new ScriptError('nope');
+                });
+            },
+        ),
+        'host-maps-charge' => static fn () => script(
+            'local m = require("m") pcall(m.charge) print("AFTER LIMIT") return 42',
+            ['steps' => 1000],
+            null,
+            false,
+            [],
+            static function (Environment $environment): void {
+                $environment->addModule('m', static fn (RunContext $context): array => [
+                    'charge' => static function () use ($context): void {
+                        try {
+                            $context->chargeSteps(1_000_000);
+                        } catch (Throwable) {
+                            throw new ScriptError('mapped');
+                        }
+                    },
+                ]);
+            },
+        ),
         // 3. converting values to PHP
         'result-dag' => static fn () => script(DAG . ' return t'),
         'error-dag' => static fn () => script(DAG . ' error(t)'),
         'result-dag-no-limits' => static fn () => script(DAG . ' return t', []),
-        'result-dag-17-small-budget' => static fn () => script('local t = {1} for i = 1, 17 do t = {t, t} end return t', ['memoryBytes' => 1 << 20]),
+        'result-dag-17-small-budget' => static fn () => script(
+            'local t = {1} for i = 1, 17 do t = {t, t} end return t',
+            ['memoryBytes' => 1 << 20],
+        ),
         'handle-to-array' => static fn () => withSandbox(LIMITS, static function ($sandbox): string {
             $sandbox->load(DAG . ' dag = t')->call();
             return 'converted ' . \count($sandbox->getGlobalHandle('dag')->toArray());
@@ -164,39 +203,100 @@ const SCENARIOS = <<<'PHP'
         'long-key-bad-value' => static fn () => script(LONG_KEY_CHAIN . 'c[1.5] = 1 return t'),
         // 4. library calls that copy big strings
         'require-long-name' => static fn () => script('pcall(require, string.rep("x", 16000000)) return 1'),
-        'unpack-c-host-data' => static fn () => script('return #(string.unpack("c70000000", data))', LIMITS, $hostData(str_repeat('x', 70 << 20))),
-        'unpack-s-host-data' => static fn () => script('return #(string.unpack("<s4", data))', LIMITS, $hostData(str_pad(pack('V', 70 << 20), (70 << 20) + 4, 'x'))),
-        'unpack-z-host-data' => static fn () => script('return #(string.unpack("z", data))', LIMITS, $hostData((static function (): string {
-            $data = str_repeat('x', (70 << 20) + 1);  // (in place: a concatenation would copy it)
-            $data[70 << 20] = "\0";
-            return $data;
-        })())),
-        'tostring-host-name' => static fn () => script('return #tostring(setmetatable({}, {__name = data}))', LIMITS, $hostData(str_repeat('x', 70 << 20))),
-        'type-error-host-name' => static fn () => script('return math.floor(setmetatable({}, {__name = data}))', LIMITS, $hostData(str_repeat('x', 70 << 20))),
-        'arithmetic-error-host-name' => static fn () => script('local x = setmetatable({}, {__name = data}) return x + 1', LIMITS, $hostData(str_repeat('x', 70 << 20))),
+        'unpack-c-host-data' => static fn () => script(
+            'return #(string.unpack("c70000000", data))',
+            LIMITS,
+            $hostData(str_repeat('x', 70 << 20)),
+        ),
+        'unpack-s-host-data' => static fn () => script(
+            'return #(string.unpack("<s4", data))',
+            LIMITS,
+            $hostData(str_pad(pack('V', 70 << 20), (70 << 20) + 4, 'x')),
+        ),
+        'unpack-z-host-data' => static fn () => script(
+            'return #(string.unpack("z", data))',
+            LIMITS,
+            $hostData((static function (): string {
+                $data = str_repeat('x', (70 << 20) + 1);  // (in place: a concatenation would copy it)
+                $data[70 << 20] = "\0";
+                return $data;
+            })()),
+        ),
+        'tostring-host-name' => static fn () => script(
+            'return #tostring(setmetatable({}, {__name = data}))',
+            LIMITS,
+            $hostData(str_repeat('x', 70 << 20)),
+        ),
+        'type-error-host-name' => static fn () => script(
+            'return math.floor(setmetatable({}, {__name = data}))',
+            LIMITS,
+            $hostData(str_repeat('x', 70 << 20)),
+        ),
+        'arithmetic-error-host-name' => static fn () => script(
+            'local x = setmetatable({}, {__name = data}) return x + 1',
+            LIMITS,
+            $hostData(str_repeat('x', 70 << 20)),
+        ),
         'error-host-data' => static fn () => script('error(data)', LIMITS, $hostData(str_repeat('x', 70 << 20))),
-        'wrap-error-host-data' => static fn () => script('coroutine.wrap(function () error(data, 0) end)()', LIMITS, $hostData(str_repeat('x', 70 << 20))),
-        'print-host-data' => static fn () => script('print(data)', ['memoryBytes' => 32 << 20], $hostData(str_repeat('x', 70 << 20))),
-        'traceback-module-name' => static fn () => script('local name = string.rep("x", 20000000) package.loaded[name] = {f = function (n) if n == 0 then error("deep") end return (package.loaded[name].f(n - 1)) end} package.loaded[name].f(15)'),
+        'wrap-error-host-data' => static fn () => script(
+            'coroutine.wrap(function () error(data, 0) end)()',
+            LIMITS,
+            $hostData(str_repeat('x', 70 << 20)),
+        ),
+        'print-host-data' => static fn () => script(
+            'print(data)',
+            ['memoryBytes' => 32 << 20],
+            $hostData(str_repeat('x', 70 << 20)),
+        ),
+        'traceback-module-name' => static fn () => script(
+            'local name = string.rep("x", 20000000)'
+            . ' package.loaded[name] = {f = function (n)'
+            . ' if n == 0 then error("deep") end return (package.loaded[name].f(n - 1)) end}'
+            . ' package.loaded[name].f(15)'
+        ),
         // 5. compiling big scripts
-        'compile-large' => static fn () => script(large(), ['steps' => 10_000_000, 'memoryBytes' => 1 << 20, 'seconds' => 0.5]),
+        'compile-large' => static fn () => script(
+            large(),
+            ['steps' => 10_000_000, 'memoryBytes' => 1 << 20, 'seconds' => 0.5],
+        ),
         'compile-large-host-room' => static fn () => script(large(), ['steps' => 10_000_000]),
-        'compile-small-small-budget' => static fn () => script('local t = {} for i = 1, 10 do t[i] = i * 2 end return t[10]', ['memoryBytes' => 1 << 20]),
+        'compile-small-small-budget' => static fn () => script(
+            'local t = {} for i = 1, 10 do t[i] = i * 2 end return t[10]',
+            ['memoryBytes' => 1 << 20],
+        ),
         'compile-medium' => static fn () => script(large(2000)),
         'compile-too-big' => static fn () => script(large(1_000_000)),
-        'load-large' => static fn () => script('local f, e = load(string.rep("a = 1;", 200000)) return f ~= nil, e', LIMITS, null, true),
+        'load-large' => static fn () => script(
+            'local f, e = load(string.rep("a = 1;", 200000)) return f ~= nil, e',
+            LIMITS,
+            null,
+            true,
+        ),
         'require-large' => static fn () => script('return require("big")', LIMITS, null, false, ['big.lua' => large()]),
         'compile-ahead-large' => static function (): array {
             $environment = new Environment(loader: new ArrayLoader(['x.lua' => large()]));
-            return outcome(static fn (): array => array_map(static fn ($error): string => $error->getMessage(), $environment->compile(['x.lua'])));
+            return outcome(static fn (): array => array_map(
+                static fn ($error): string => $error->getMessage(),
+                $environment->compile(['x.lua']),
+            ));
         },
         // 6. single calls with many results
         'unpack-results' => static fn () => script('return select("#", table.unpack({}, 1, 999900))'),
-        'byte-results' => static fn () => script('local s = string.rep("x", 999000) return select("#", string.byte(s, 1, -1))'),
-        'codepoint-results' => static fn () => script('local s = string.rep("x", 999000) return select("#", utf8.codepoint(s, 1, -1))'),
-        'tostring-lua-name' => static fn () => script('local n = string.rep("x", 20000000) return #tostring(setmetatable({}, {__name = n}))'),
+        'byte-results' => static fn () => script(
+            'local s = string.rep("x", 999000) return select("#", string.byte(s, 1, -1))'
+        ),
+        'codepoint-results' => static fn () => script(
+            'local s = string.rep("x", 999000) return select("#", utf8.codepoint(s, 1, -1))'
+        ),
+        'tostring-lua-name' => static fn () => script(
+            'local n = string.rep("x", 20000000) return #tostring(setmetatable({}, {__name = n}))'
+        ),
         'require-name-8m' => static fn () => script('pcall(require, string.rep("x", 8000000)) return 1'),
-        'vararg-copies' => static fn () => script('local big = {} for i = 1, 200000 do big[i] = i end local kept = {} local function keep(...) for i = 1, 1000 do kept[i] = {...} end end keep(table.unpack(big)) return #kept'),
+        'vararg-copies' => static fn () => script(
+            'local big = {} for i = 1, 200000 do big[i] = i end local kept = {}'
+            . ' local function keep(...) for i = 1, 1000 do kept[i] = {...} end end'
+            . ' keep(table.unpack(big)) return #kept'
+        ),
     ];
     echo json_encode(($scenarios[$argv[2]])(), JSON_INVALID_UTF8_SUBSTITUTE | JSON_PARTIAL_OUTPUT_ON_ERROR);
     PHP;

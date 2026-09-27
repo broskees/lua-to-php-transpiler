@@ -106,8 +106,13 @@ final class IoLib
     }
 
     // liolib.c: createstdfile
-    private static function createStdFile(Coroutine $L, LuaTable $io, CFile $file, ?string $registryKey, string $name): void
-    {
+    private static function createStdFile(
+        Coroutine $L,
+        LuaTable $io,
+        CFile $file,
+        ?string $registryKey,
+        string $name,
+    ): void {
         $handle = self::newPreFile($L);
         $handle->payload->file = $file;
         $handle->payload->closef = self::noClose(...);
@@ -121,7 +126,8 @@ final class IoLib
     private static function newPreFile(Coroutine $L): Userdata
     {
         $handle = new Userdata(new LuaStream());
-        Collector::setMetatable($L, $handle, $L->globalState->registry->hash[self::LUA_FILEHANDLE]);  // luaL_setmetatable
+        // luaL_setmetatable
+        Collector::setMetatable($L, $handle, $L->globalState->registry->hash[self::LUA_FILEHANDLE]);
         return $handle;
     }
 
@@ -136,8 +142,10 @@ final class IoLib
     /** lauxlib.c: luaL_testudata(L, arg, LUA_FILEHANDLE) */
     private static function testStream(Coroutine $L, mixed $value): ?LuaStream
     {
-        if ($value instanceof Userdata && $value->payload instanceof LuaStream
-            && $value->metatable !== null && $value->metatable === ($L->globalState->registry->hash[self::LUA_FILEHANDLE] ?? null)) {
+        if (
+            $value instanceof Userdata && $value->payload instanceof LuaStream && $value->metatable !== null
+            && $value->metatable === ($L->globalState->registry->hash[self::LUA_FILEHANDLE] ?? null)
+        ) {
             return $value->payload;
         }
         return null;
@@ -608,7 +616,8 @@ final class IoLib
         }
         // first result is false: EOF or error
         if (\count($results) > 1) {  // is there error information?
-            Auxiliary::error($L, DebugInfo::cString(LuaObject::toStringCoerced($results[1])));  // 2nd result is error message
+            // 2nd result is error message
+            Auxiliary::error($L, DebugInfo::cString(LuaObject::toStringCoerced($results[1])));
         }
         $toClose = $upvalues[2] ?? null;
         if ($toClose !== null && $toClose !== false) {  // generator created file?

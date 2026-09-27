@@ -1,3 +1,5 @@
 reference/*.tar.gz
 /var/
 *.luac
+/vendor/
+/composer.lock

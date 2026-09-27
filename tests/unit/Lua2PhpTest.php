@@ -43,14 +43,20 @@ function test_transpiled_diff_cases_behave_like_lua_in_tiny_segments(): void
 {
     // every function as segments of one instruction (see SegmentsTest),
     // transpiled and loaded so, with opcache optimizing the dispatchers
-    runTranspiledDiffCases('lua2php-tiny-segments', ['-d', 'auto_prepend_file=' . REPO_ROOT . '/tests/unit/tiny_segments.php']);
+    runTranspiledDiffCases(
+        'lua2php-tiny-segments',
+        ['-d', 'auto_prepend_file=' . REPO_ROOT . '/tests/unit/tiny_segments.php'],
+    );
 }
 
 function test_transpiled_diff_cases_behave_like_lua_compact_in_tiny_segments(): void
 {
     // every instruction that has a compact form in it (see CompactFormsTest),
     // every function as segments of one instruction
-    runTranspiledDiffCases('lua2php-compact-tiny-segments', ['-d', 'auto_prepend_file=' . REPO_ROOT . '/tests/unit/compact_tiny_segments.php']);
+    runTranspiledDiffCases(
+        'lua2php-compact-tiny-segments',
+        ['-d', 'auto_prepend_file=' . REPO_ROOT . '/tests/unit/compact_tiny_segments.php'],
+    );
 }
 
 function test_transpiled_diff_cases_behave_like_lua_on_a_shared_host(): void
@@ -81,11 +87,15 @@ function runTranspiledDiffCases(string $directoryName, array $phpOptions, array 
     $outputDirectory = scratchDirectory() . "/$directoryName";
     $cacheDirectory = scratchDirectory() . "/$directoryName-cache";
     mkdir($cacheDirectory, 0700);
-    [$status, , $errorOutput] = runCommand(['php', ...$phpOptions, REPO_ROOT . '/bin/lua2php', $diffDirectory, '-o', $outputDirectory]);
+    [$status, , $errorOutput] = runCommand(
+        ['php', ...$phpOptions, REPO_ROOT . '/bin/lua2php', $diffDirectory, '-o', $outputDirectory]
+    );
     assertSame(1, $status, 'modules/syntax_error.lua does not compile');
     assertSame(REPO_ROOT . "/bin/lua2php: modules/syntax_error.lua:1: unexpected symbol near '='\n", $errorOutput);
     // the project's other files (data the cases read) go along, as a deployment would copy them
-    $iterator = new \RecursiveIteratorIterator(new \RecursiveDirectoryIterator($diffDirectory, \FilesystemIterator::SKIP_DOTS));
+    $iterator = new \RecursiveIteratorIterator(
+        new \RecursiveDirectoryIterator($diffDirectory, \FilesystemIterator::SKIP_DOTS)
+    );
     foreach ($iterator as $file) {
         if (!str_ends_with($file->getFilename(), '.lua')) {
             $copy = $outputDirectory . substr($file->getPathname(), \strlen($diffDirectory));
@@ -96,7 +106,10 @@ function runTranspiledDiffCases(string $directoryName, array $phpOptions, array 
     $files = glob($diffDirectory . '/*.lua');
     sort($files);
     $arguments = ['first', 'second arg'];
-    $warmFiles = array_values(array_filter($files, static fn (string $file): bool => str_contains(file_get_contents($file), 'load')));
+    $warmFiles = array_values(array_filter(
+        $files,
+        static fn (string $file): bool => str_contains(file_get_contents($file), 'load'),
+    ));
     foreach (['cold' => $files, 'warm' => $warmFiles] as $cache => $caseFiles) {
         foreach (array_chunk($caseFiles, 8) as $batch) {
             $running = [];
@@ -105,7 +118,11 @@ function runTranspiledDiffCases(string $directoryName, array $phpOptions, array 
                 $outputFile = $outputDirectory . '/' . basename($name, '.lua') . '.php';
                 $running[$name] = [
                     startProcess([...$referencePrefix, 'lua5.4', $name, ...$arguments], $diffDirectory),
-                    startProcess(['env', "LUAPHP_CACHE_DIR=$cacheDirectory", 'php', ...OPCACHE_ON_NEW_FILES, ...$phpOptions, '-d', 'memory_limit=4G', $outputFile, ...$arguments], $outputDirectory),
+                    startProcess([
+                        'env', "LUAPHP_CACHE_DIR=$cacheDirectory",
+                        'php', ...OPCACHE_ON_NEW_FILES, ...$phpOptions, '-d', 'memory_limit=4G',
+                        $outputFile, ...$arguments,
+                    ], $outputDirectory),
                     $outputFile,
                 ];
             }
@@ -137,9 +154,16 @@ function test_transpiled_script_finds_its_runtime(): void
     assertSame(0, $status, $errorOutput);
     assertTrue(is_file("$directory/hello.php"), 'default output name is hello.php');
     // LUAPHP_AUTOLOAD overrides the recorded runtime path
-    $result = runCommand(['env', 'LUAPHP_AUTOLOAD=' . REPO_ROOT . '/src/autoload.php', 'php', ...OPCACHE_ON_NEW_FILES, "$directory/hello.php", 'x'], '', $directory);
+    $result = runCommand([
+        'env', 'LUAPHP_AUTOLOAD=' . REPO_ROOT . '/src/autoload.php',
+        'php', ...OPCACHE_ON_NEW_FILES, "$directory/hello.php", 'x',
+    ], '', $directory);
     assertSame([0, "hello from\thello.lua\tx\n", ''], $result);
-    $result = runCommand(['env', 'LUAPHP_AUTOLOAD=/nonexistent/autoload.php', 'php', ...OPCACHE_ON_NEW_FILES, "$directory/hello.php"], '', $directory);
+    $result = runCommand(
+        ['env', 'LUAPHP_AUTOLOAD=/nonexistent/autoload.php', 'php', ...OPCACHE_ON_NEW_FILES, "$directory/hello.php"],
+        '',
+        $directory,
+    );
     assertSame(1, $result[0]);
     assertTrue(str_contains($result[2], 'cannot find the LuaPhp runtime'), $result[2]);
 }
@@ -165,7 +189,12 @@ function writeDataModule(string $directory, int $rows): void
     $states = ['NY', 'CA', 'TX', 'FL', 'OH', 'PA', 'IL', 'GA'];
     $lines = ["return {\n"];
     for ($i = 0; $i < $rows; $i++) {
-        $lines[] = sprintf("  {zip = \"%05d\", city = \"%s\", state = \"%s\"},\n", $i, $cities[$i % 7], $states[$i % 8]);
+        $lines[] = sprintf(
+            "  {zip = \"%05d\", city = \"%s\", state = \"%s\"},\n",
+            $i,
+            $cities[$i % 7],
+            $states[$i % 8],
+        );
     }
     $lines[] = "}\n";
     @mkdir($directory, 0777, true);
@@ -188,12 +217,22 @@ function test_data_modules_transpile_small_and_load_with_opcache_at_small_stacks
         [$status, $expected] = runCommand(['lua5.4', 'main.lua'], '', $directory);
         assertSame(0, $status, "lua5.4 runs the $rows-row module");
         // folder mode within PHP's default memory_limit (the cap stops lua2php raising it)
-        $result = runCommand(['php', '-d', 'memory_limit=128M', '-d', 'max_memory_limit=128M', REPO_ROOT . '/bin/lua2php', $directory, '-o', "$directory/out"]);
+        $result = runCommand([
+            'php', '-d', 'memory_limit=128M', '-d', 'max_memory_limit=128M',
+            REPO_ROOT . '/bin/lua2php', $directory, '-o', "$directory/out",
+        ]);
         assertSame([0, '', ''], $result, "lua2php $rows rows");
         // (the guard: nothing is compiled at run time)
-        $php = ['php', ...OPCACHE_ON_NEW_FILES, '-d', 'memory_limit=1G', '-d', 'auto_prepend_file=' . REPO_ROOT . '/tests/aot/guard.php', 'main.php'];
+        $php = [
+            'php', ...OPCACHE_ON_NEW_FILES, '-d', 'memory_limit=1G',
+            '-d', 'auto_prepend_file=' . REPO_ROOT . '/tests/aot/guard.php', 'main.php',
+        ];
         foreach ([8192, 1024] as $stackKilobytes) {
-            $result = runCommand(['sh', '-c', "ulimit -s $stackKilobytes && exec \"\$@\"", 'sh', ...$php], '', "$directory/out");
+            $result = runCommand(
+                ['sh', '-c', "ulimit -s $stackKilobytes && exec \"\$@\"", 'sh', ...$php],
+                '',
+                "$directory/out",
+            );
             assertSame([0, $expected, ''], $result, "$rows rows with opcache, stack $stackKilobytes KB");
         }
         $size = filesize("$directory/out/zips.php");
@@ -211,10 +250,16 @@ function test_directory_mode_transpiles_the_other_files_when_one_fails(): void
     file_put_contents("$directory/in/sub/c.lua", "print('c')\n");
     file_put_contents("$directory/in/z.lua", "print('z')\n");
     file_put_contents("$directory/out/sub", 'a file where the directory for sub/c.php should go');
-    [$status, , $errorOutput] = runCommand(['php', REPO_ROOT . '/bin/lua2php', "$directory/in", '-o', "$directory/out"]);
+    [$status, , $errorOutput] = runCommand(
+        ['php', REPO_ROOT . '/bin/lua2php', "$directory/in", '-o', "$directory/out"]
+    );
     assertSame(1, $status, 'lua2php reports the failures');
     assertTrue(str_contains($errorOutput, "b.lua:1: unexpected symbol near '='"), $errorOutput);
     assertTrue(str_contains($errorOutput, "sub/c.lua: cannot create directory $directory/out/sub"), $errorOutput);
     assertSame([0, "a\n", ''], runCommand(['php', ...OPCACHE_ON_NEW_FILES, 'a.php'], '', "$directory/out"));
-    assertSame([0, "z\n", ''], runCommand(['php', ...OPCACHE_ON_NEW_FILES, 'z.php'], '', "$directory/out"), 'the file after the failures');
+    assertSame(
+        [0, "z\n", ''],
+        runCommand(['php', ...OPCACHE_ON_NEW_FILES, 'z.php'], '', "$directory/out"),
+        'the file after the failures',
+    );
 }

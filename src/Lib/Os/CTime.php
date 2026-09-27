@@ -114,7 +114,10 @@ final class CTime
         $days += 719468;
         $era = self::floorDiv($days, 146097);
         $dayOfEra = $days - $era * 146097;
-        $yearOfEra = intdiv($dayOfEra - intdiv($dayOfEra, 1460) + intdiv($dayOfEra, 36524) - intdiv($dayOfEra, 146096), 365);
+        $yearOfEra = intdiv(
+            $dayOfEra - intdiv($dayOfEra, 1460) + intdiv($dayOfEra, 36524) - intdiv($dayOfEra, 146096),
+            365,
+        );
         $dayOfYear = $dayOfEra - (365 * $yearOfEra + intdiv($yearOfEra, 4) - intdiv($yearOfEra, 100));
         $shiftedMonth = intdiv(5 * $dayOfYear + 2, 153);
         $day = $dayOfYear - intdiv(153 * $shiftedMonth + 2, 5) + 1;
@@ -309,7 +312,8 @@ final class CTime
                 return self::twoDigits($tm['mday']);
             case 'D':
             case 'x':
-                return self::twoDigits($tm['mon'] + 1) . '/' . self::twoDigits($tm['mday']) . '/' . self::strftime('%y', $tm);
+                return self::twoDigits($tm['mon'] + 1) . '/' . self::twoDigits($tm['mday'])
+                    . '/' . self::strftime('%y', $tm);
             case 'e':
                 return sprintf('%2d', $tm['mday']);
             case 'F':
@@ -343,7 +347,8 @@ final class CTime
                 return "\t";
             case 'T':
             case 'X':
-                return self::twoDigits($tm['hour']) . ':' . self::twoDigits($tm['min']) . ':' . self::twoDigits($tm['sec']);
+                return self::twoDigits($tm['hour']) . ':' . self::twoDigits($tm['min'])
+                    . ':' . self::twoDigits($tm['sec']);
             case 'u':
                 return (string) (($tm['wday'] + 6) % 7 + 1);
             case 'U':
@@ -360,7 +365,8 @@ final class CTime
                 return (string) $year;
             case 'z':
                 $minutes = intdiv(abs($tm['gmtoff']), 60);
-                return ($tm['gmtoff'] < 0 ? '-' : '+') . self::twoDigits(intdiv($minutes, 60)) . self::twoDigits($minutes % 60);
+                return ($tm['gmtoff'] < 0 ? '-' : '+')
+                    . self::twoDigits(intdiv($minutes, 60)) . self::twoDigits($minutes % 60);
             case 'Z':
                 return $tm['zone'];
             default:  // '%'

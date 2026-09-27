@@ -23,18 +23,24 @@ const DRIVER = <<<'PHP'
     require $argv[1] . '/src/autoload.php';
     [, , $root, $cacheDirectory, $mode] = $argv;
     $limits = $mode === 'unlimited' ? LuaPhp\Embed\Limits::none() : new LuaPhp\Embed\Limits();
-    $environment = new LuaPhp\Embed\Environment(loader: new LuaPhp\Embed\Loader\FilesystemLoader($root), cacheDir: $cacheDirectory, limits: $limits);
+    $environment = new LuaPhp\Embed\Environment(
+        loader: new LuaPhp\Embed\Loader\FilesystemLoader($root),
+        cacheDir: $cacheDirectory,
+        limits: $limits,
+    );
     $environment->addGlobal('record', static function (string $what) use ($root): void {
         file_put_contents("$root/ran.txt", "$what\n", FILE_APPEND);
     });
     if ($mode === 'compile') {
-        echo json_encode(array_map(static fn ($error) => $error->getMessage(), $environment->compile(array_slice($argv, 5))));
+        $errors = $environment->compile(array_slice($argv, 5));
+        echo json_encode(array_map(static fn ($error) => $error->getMessage(), $errors));
         exit(0);
     }
     echo json_encode($environment->run('main.lua')->values);
     $real = realpath($cacheDirectory);
     $cached = 0;
-    foreach (array_keys((function_exists('opcache_get_status') ? opcache_get_status(true) : false)['scripts'] ?? []) as $file) {
+    $status = function_exists('opcache_get_status') ? opcache_get_status(true) : false;
+    foreach (array_keys($status['scripts'] ?? []) as $file) {
         $cached += $real !== false && str_starts_with($file, "$real/") ? 1 : 0;
     }
     fwrite(STDERR, "opcache: $cached\n");
@@ -45,7 +51,11 @@ function project(string $name): string
     $directory = scratchDirectory() . "/embed-cache-$name";
     mkdir("$directory/root", 0700, true);
     file_put_contents("$directory/driver.php", DRIVER);
-    file_put_contents("$directory/root/main.lua", 'record("main") local long = string.rep("y", 50) return require("lib").value, require("dup1"), require("dup2"), long');
+    file_put_contents(
+        "$directory/root/main.lua",
+        'record("main") local long = string.rep("y", 50)'
+        . ' return require("lib").value, require("dup1"), require("dup2"), long',
+    );
     file_put_contents("$directory/root/lib.lua", 'return {value = 42}');
     file_put_contents("$directory/root/dup1.lua", 'return "same code"');
     file_put_contents("$directory/root/dup2.lua", 'return "same code"');
@@ -54,10 +64,18 @@ function project(string $name): string
 }
 
 /** @return array{int, string, string} */
-function drive(string $directory, string $cacheDirectory, bool $guarded = false, string $mode = 'run', array $names = []): array
-{
+function drive(
+    string $directory,
+    string $cacheDirectory,
+    bool $guarded = false,
+    string $mode = 'run',
+    array $names = [],
+): array {
     $options = $guarded ? ['-d', 'auto_prepend_file=' . GUARD] : [];
-    return runCommand(['php', ...OPCACHE_ON_NEW_FILES, ...$options, "$directory/driver.php", REPO_ROOT, "$directory/root", $cacheDirectory, $mode, ...$names], '', $directory);
+    return runCommand([
+        'php', ...OPCACHE_ON_NEW_FILES, ...$options,
+        "$directory/driver.php", REPO_ROOT, "$directory/root", $cacheDirectory, $mode, ...$names,
+    ], '', $directory);
 }
 
 /** @return list<string> */
@@ -100,7 +118,12 @@ function test_compiling_ahead_of_time(): void
 {
     $directory = project('compile');
     $cache = "$directory/cache";
-    [$status, $output, $errors] = drive($directory, $cache, mode: 'compile', names: ['main.lua', 'lib.lua', 'dup1.lua', 'dup2.lua', 'bad.lua']);
+    [$status, $output, $errors] = drive(
+        $directory,
+        $cache,
+        mode: 'compile',
+        names: ['main.lua', 'lib.lua', 'dup1.lua', 'dup2.lua', 'bad.lua'],
+    );
     assertSame([0, '{"bad.lua":"bad.lua:1: unexpected symbol near \'return\'"}'], [$status, $output], $errors);
     assertTrue(!file_exists("$directory/root/ran.txt"), 'nothing ran');
     assertSame(4, \count(entries($cache)), 'a script that does not compile is not cached');

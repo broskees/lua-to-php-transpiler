@@ -120,19 +120,19 @@ final class Listing
         $instructionCount = count($code);
         for ($pc = 0; $pc < $instructionCount; $pc++) {
             $i = $code[$pc];
-            $o = OpCodes::GET_OPCODE($i);
-            $a = OpCodes::GETARG_A($i);
-            $b = OpCodes::GETARG_B($i);
-            $c = OpCodes::GETARG_C($i);
-            $ax = OpCodes::GETARG_Ax($i);
-            $bx = OpCodes::GETARG_Bx($i);
-            $sb = OpCodes::GETARG_sB($i);
-            $sc = OpCodes::GETARG_sC($i);
-            $sbx = OpCodes::GETARG_sBx($i);
-            $isk = OpCodes::GETARG_k($i);
+            $o = OpCodes::getOpcode($i);
+            $a = OpCodes::getArgA($i);
+            $b = OpCodes::getArgB($i);
+            $c = OpCodes::getArgC($i);
+            $ax = OpCodes::getArgAx($i);
+            $bx = OpCodes::getArgBx($i);
+            $sb = OpCodes::getArgSB($i);
+            $sc = OpCodes::getArgSC($i);
+            $sbx = OpCodes::getArgSBx($i);
+            $isk = OpCodes::getArgK($i);
             $kSuffix = $isk !== 0 ? 'k' : '';  // luac.c: ISK
             // luac.c: EXTRAARG / EXTRAARGC (argument of the following OP_EXTRAARG)
-            $extraArg = OpCodes::GETARG_Ax($code[$pc + 1] ?? 0);
+            $extraArg = OpCodes::getArgAx($code[$pc + 1] ?? 0);
             $extraArgC = $extraArg * (OpCodes::MAXARG_C + 1);
             $line = self::getFuncLine($f, $pc);
 
@@ -276,7 +276,7 @@ final class Listing
                     $output .= "$a";
                     break;
                 case OpCodes::OP_JMP:
-                    $sj = OpCodes::GETARG_sJ($i);
+                    $sj = OpCodes::getArgSJ($i);
                     $output .= "$sj";
                     $output .= self::COMMENT . 'to ' . ($sj + $pc + 2);
                     break;
@@ -429,11 +429,23 @@ final class Listing
         }
         $output .= sprintf("locals (%d) for %s:\n", count($f->locvars), self::pointer($f));
         foreach ($f->locvars as $i => $locvar) {
-            $output .= sprintf("\t%d\t%s\t%d\t%d\n", $i, $locvar->varname ?? '', $locvar->startpc + 1, $locvar->endpc + 1);
+            $output .= sprintf(
+                "\t%d\t%s\t%d\t%d\n",
+                $i,
+                $locvar->varname ?? '',
+                $locvar->startpc + 1,
+                $locvar->endpc + 1,
+            );
         }
         $output .= sprintf("upvalues (%d) for %s:\n", count($f->upvalues), self::pointer($f));
         foreach ($f->upvalues as $i => $upvalue) {
-            $output .= sprintf("\t%d\t%s\t%d\t%d\n", $i, self::upvalueName($f, $i), $upvalue->instack ? 1 : 0, $upvalue->idx);
+            $output .= sprintf(
+                "\t%d\t%s\t%d\t%d\n",
+                $i,
+                self::upvalueName($f, $i),
+                $upvalue->instack ? 1 : 0,
+                $upvalue->idx,
+            );
         }
         return $output;
     }

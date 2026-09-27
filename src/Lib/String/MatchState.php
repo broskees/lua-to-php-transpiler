@@ -159,7 +159,9 @@ final class MatchState
         if ($this->regex !== null) {
             $start = $this->regexSearch($this->regex->search, $s);
             if ($start !== self::PCRE_FAILED) {
-                $this->budget?->chargeSteps(1 + intdiv(($start === -1 ? $this->srcEnd : $this->regexEnd) - $s, Budget::BYTES_PER_STEP));
+                $this->budget?->chargeSteps(
+                    1 + intdiv(($start === -1 ? $this->srcEnd : $this->regexEnd) - $s, Budget::BYTES_PER_STEP)
+                );
                 return $start;
             }
         }
@@ -167,7 +169,9 @@ final class MatchState
             return $s;
         }
         $candidate = strpos($this->src, $this->firstLiteral, $s);
-        $this->budget?->chargeSteps(1 + intdiv(($candidate === false ? $this->srcEnd : $candidate) - $s, Budget::BYTES_PER_STEP));
+        $this->budget?->chargeSteps(
+            1 + intdiv(($candidate === false ? $this->srcEnd : $candidate) - $s, Budget::BYTES_PER_STEP)
+        );
         return $candidate === false ? -1 : $candidate;
     }
 
@@ -183,7 +187,9 @@ final class MatchState
             }
             $start = $this->regexSearch($this->regex->anchored, $s);
             if ($start !== self::PCRE_FAILED) {
-                $this->budget?->chargeSteps(1 + intdiv($start === -1 ? 0 : $this->regexEnd - $s, Budget::BYTES_PER_STEP));
+                $this->budget?->chargeSteps(
+                    1 + intdiv($start === -1 ? 0 : $this->regexEnd - $s, Budget::BYTES_PER_STEP)
+                );
                 return $start === -1 ? -1 : $this->regexEnd;
             }
         }
@@ -455,7 +461,8 @@ final class MatchState
                 $first = \ord($pattern[$p - 2]);
                 $last = \ord($pattern[$p]);
                 if ($first <= $last) {  // (an inverted range accepts nothing)
-                    $acceptedByItem |= str_repeat("\0", $first) . str_repeat("\1", $last - $first + 1) . str_repeat("\0", 255 - $last);
+                    $acceptedByItem |= str_repeat("\0", $first) . str_repeat("\1", $last - $first + 1)
+                        . str_repeat("\0", 255 - $last);
                 }
             } else {
                 $acceptedByItem[\ord($pattern[$p])] = "\1";
@@ -561,8 +568,10 @@ final class MatchState
         $l = $this->checkCapture($l);
         $length = $this->captureLen[$l];
         // a position capture's length (CAP_POSITION) is a huge size_t in C: never matches
-        if ($length >= 0 && $this->srcEnd - $s >= $length
-            && substr($this->src, $s, $length) === substr($this->src, $this->captureInit[$l], $length)) {
+        if (
+            $length >= 0 && $this->srcEnd - $s >= $length
+            && substr($this->src, $s, $length) === substr($this->src, $this->captureInit[$l], $length)
+        ) {
             return $s + $length;
         }
         return -1;
@@ -619,8 +628,10 @@ final class MatchState
                     $ep = $this->classEnd($p);  // points to what is next
                     $previous = ($s === 0) ? 0 : \ord($this->src[$s - 1]);
                     $current = ($s < $this->srcEnd) ? \ord($this->src[$s]) : 0;
-                    if (!$this->matchBracketClass($previous, $p, $ep - 1)
-                        && $this->matchBracketClass($current, $p, $ep - 1)) {
+                    if (
+                        !$this->matchBracketClass($previous, $p, $ep - 1)
+                        && $this->matchBracketClass($current, $p, $ep - 1)
+                    ) {
                         $p = $ep;
                         continue;  // return match(ms, s, ep);
                     }

@@ -37,7 +37,10 @@ function test_dump_of_undump_is_identity_for_every_stripped_official_file(): voi
     foreach (officialTestFiles() as $luaFile) {
         $strippedBytes = luacOutput($luaFile, true);
         $proto = Undump::undump($strippedBytes, '@' . basename($luaFile));
-        assertTrue(Dump::dump($proto, true) === $strippedBytes, basename($luaFile) . ': stripped Dump(Undump(luac -s -o)) differs');
+        assertTrue(
+            Dump::dump($proto, true) === $strippedBytes,
+            basename($luaFile) . ': stripped Dump(Undump(luac -s -o)) differs',
+        );
     }
 }
 
@@ -57,14 +60,20 @@ function test_unstripped_dump_of_a_stripped_chunk_matches_the_reference(): void
     assertSame(0, $exitCode, $errorOutput);
 
     $proto = Undump::undump(file_get_contents($strippedFile), '=x');
-    assertTrue(Dump::dump($proto, false) === file_get_contents($redumpedFile), 'unstripped re-dump differs from string.dump');
+    assertTrue(
+        Dump::dump($proto, false) === file_get_contents($redumpedFile),
+        'unstripped re-dump differs from string.dump',
+    );
 }
 
 function test_dump_with_strip_matches_luac_s(): void
 {
     foreach (officialTestFiles() as $luaFile) {
         $proto = Undump::undump(luacOutput($luaFile, false), '@' . basename($luaFile));
-        assertTrue(Dump::dump($proto, true) === luacOutput($luaFile, true), basename($luaFile) . ': Dump(strip) differs from luac -s');
+        assertTrue(
+            Dump::dump($proto, true) === luacOutput($luaFile, true),
+            basename($luaFile) . ': Dump(strip) differs from luac -s',
+        );
     }
 }
 
@@ -85,7 +94,10 @@ function test_compile_then_dump_matches_luac_for_every_official_file(): void
 {
     foreach (officialTestFiles() as $luaFile) {
         $proto = Compiler::compile(sourceAsLoadfileReadsIt(file_get_contents($luaFile)), '@' . basename($luaFile));
-        assertTrue(Dump::dump($proto, false) === luacOutput($luaFile, false), basename($luaFile) . ': Dump(compile()) differs from luac -o');
+        assertTrue(
+            Dump::dump($proto, false) === luacOutput($luaFile, false),
+            basename($luaFile) . ': Dump(compile()) differs from luac -o',
+        );
     }
 }
 
@@ -112,7 +124,8 @@ function test_undumped_proto_has_the_expected_shape(): void
 function test_constants_keep_their_types_through_dump_and_undump(): void
 {
     $proto = Compiler::compile(
-        'local t = {nil, true, false, 1.5, 7, -0x8000000000000000, 1e300, "short", "' . str_repeat('x', 41) . '"} return t',
+        'local t = {nil, true, false, 1.5, 7, -0x8000000000000000, 1e300, "short", "' . str_repeat('x', 41) . '"}'
+            . ' return t',
         '=constants',
     );
     $reloaded = Undump::undump(Dump::dump($proto, false), '=constants');

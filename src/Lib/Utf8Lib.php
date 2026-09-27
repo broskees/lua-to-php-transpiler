@@ -46,14 +46,21 @@ final class Utf8Lib
     public static function open(Coroutine $L): LuaTable
     {
         $library = new LuaTable();
-        $strictIterator = new NativeFunction('iter_auxstrict', static fn (Coroutine $L, array $args): array => self::iterAux($L, $args, true));
-        $laxIterator = new NativeFunction('iter_auxlax', static fn (Coroutine $L, array $args): array => self::iterAux($L, $args, false));
+        $strictIterator = new NativeFunction(
+            'iter_auxstrict',
+            static fn (Coroutine $L, array $args): array => self::iterAux($L, $args, true),
+        );
+        $laxIterator = new NativeFunction(
+            'iter_auxlax',
+            static fn (Coroutine $L, array $args): array => self::iterAux($L, $args, false),
+        );
         Auxiliary::setFunctions($library, [
             'offset' => self::byteOffset(...),
             'codepoint' => self::codepoint(...),
             'char' => self::utfChar(...),
             'len' => self::utfLen(...),
-            'codes' => static fn (Coroutine $L, array $args): array => self::iterCodes($L, $args, $strictIterator, $laxIterator),
+            'codes' => static fn (Coroutine $L, array $args): array
+                => self::iterCodes($L, $args, $strictIterator, $laxIterator),
         ]);
         $library->hash['charpattern'] = self::UTF8PATT;
         return $library;
@@ -133,7 +140,8 @@ final class Utf8Lib
         $lax = ($args[3] ?? null) !== null && ($args[3] ?? null) !== false;
         Auxiliary::argCheck($L, 1 <= $start && --$start <= $length, 2, 'initial position out of bounds');
         Auxiliary::argCheck($L, --$end < $length, 3, 'final position out of bounds');
-        $L->globalState->budget?->chargeSteps(max(0, $end - $start + 1));  // (a step per byte: a decode is about an instruction's work)
+        // (a step per byte: a decode is about an instruction's work)
+        $L->globalState->budget?->chargeSteps(max(0, $end - $start + 1));
         while ($start <= $end) {
             $decoded = self::decode($s, $start, !$lax);
             if ($decoded === null) {  // conversion error?
@@ -165,7 +173,8 @@ final class Utf8Lib
             Auxiliary::error($L, 'string slice too long');
         }
         Auxiliary::checkStack($L, $end - $start + 1, 'string slice too long');
-        MemoryLimit::reserve(($end - $start + 1) * MemoryLimit::RESULT_BYTES, $L->globalState->budget);  // (at most a code per byte)
+        // (at most a code per byte)
+        MemoryLimit::reserve(($end - $start + 1) * MemoryLimit::RESULT_BYTES, $L->globalState->budget);
         $L->globalState->budget?->chargeSteps($end - $start + 1);
         $codes = [];
         for ($position = $start - 1; $position < $end;) {
@@ -198,7 +207,8 @@ final class Utf8Lib
     private static function utfCharOf(Coroutine $L, array $args, int $arg): string
     {
         $code = Auxiliary::checkInteger($L, $args, $arg);
-        Auxiliary::argCheck($L, $code >= 0 && $code <= self::MAXUTF, $arg, 'value out of range');  // (lua_Unsigned)code <= MAXUTF
+        // (lua_Unsigned)code <= MAXUTF
+        Auxiliary::argCheck($L, $code >= 0 && $code <= self::MAXUTF, $arg, 'value out of range');
         return self::utf8Escape($code);
     }
 
@@ -289,8 +299,12 @@ final class Utf8Lib
     }
 
     // lutf8lib.c: iter_codes
-    private static function iterCodes(Coroutine $L, array $args, NativeFunction $strictIterator, NativeFunction $laxIterator): array
-    {
+    private static function iterCodes(
+        Coroutine $L,
+        array $args,
+        NativeFunction $strictIterator,
+        NativeFunction $laxIterator,
+    ): array {
         $lax = ($args[1] ?? null) !== null && ($args[1] ?? null) !== false;
         $s = Auxiliary::checkString($L, $args, 1);
         Auxiliary::argCheck($L, !self::isContinuation($s, 0), 1, self::MSG_INVALID);

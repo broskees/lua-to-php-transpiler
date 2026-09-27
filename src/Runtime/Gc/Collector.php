@@ -148,9 +148,11 @@ final class Collector
     public static function checkFinalizer(GlobalState $G, LuaTable|Userdata $object, LuaTable $metatable): void
     {
         $id = spl_object_id($object);
-        if (isset($G->finobj[$id]) || isset($G->tobefnz[$id])  // obj. is already marked...
+        if (
+            isset($G->finobj[$id]) || isset($G->tobefnz[$id])  // obj. is already marked...
             || ($metatable->hash['__gc'] ?? null) === null      // or has no finalizer...
-            || ($G->gcstp & self::GCSTPCLS) !== 0) {            // or closing state?
+            || ($G->gcstp & self::GCSTPCLS) !== 0               // or closing state?
+        ) {
             return;  // nothing to be done
         }
         $G->finobj[$id] = $object;  // link it in 'finobj' list
@@ -725,9 +727,9 @@ final class Collector
         if ($instruction === null) {
             return -1;
         }
-        return match (OpCodes::GET_OPCODE($instruction)) {
-            OpCodes::OP_CALL, OpCodes::OP_TAILCALL => OpCodes::GETARG_A($instruction),
-            OpCodes::OP_TFORCALL => OpCodes::GETARG_A($instruction) + 4,
+        return match (OpCodes::getOpcode($instruction)) {
+            OpCodes::OP_CALL, OpCodes::OP_TAILCALL => OpCodes::getArgA($instruction),
+            OpCodes::OP_TFORCALL => OpCodes::getArgA($instruction) + 4,
             default => -1,
         };
     }

@@ -83,8 +83,13 @@ final class CallInfo
      * The prologue of every emitted Lua function does the same inline
      * (FunctionEmitter::emit), to save a PHP call per Lua call.
      */
-    public static function push(Coroutine $L, LuaClosure|NativeFunction|null $func, int $callstatus, int $frameSize, int $frameBytes): self
-    {
+    public static function push(
+        Coroutine $L,
+        LuaClosure|NativeFunction|null $func,
+        int $callstatus,
+        int $frameSize,
+        int $frameBytes,
+    ): self {
         $ci = new self();
         $ci->func = $func;
         $ci->callstatus = $callstatus;

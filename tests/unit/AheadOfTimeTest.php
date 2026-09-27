@@ -28,11 +28,10 @@ function lua2php(array $arguments, ?string $workingDirectory = null): array
  */
 function runGuarded(string $phpFile, string $workingDirectory, string $cacheDirectory, array $phpOptions = []): array
 {
-    return runCommand(
-        ['env', "LUAPHP_CACHE_DIR=$cacheDirectory", 'php', ...OPCACHE_ON_NEW_FILES, ...$phpOptions, '-d', 'auto_prepend_file=' . GUARD, $phpFile],
-        '',
-        $workingDirectory,
-    );
+    return runCommand([
+        'env', "LUAPHP_CACHE_DIR=$cacheDirectory",
+        'php', ...OPCACHE_ON_NEW_FILES, ...$phpOptions, '-d', 'auto_prepend_file=' . GUARD, $phpFile,
+    ], '', $workingDirectory);
 }
 
 function copyDirectory(string $from, string $to): void
@@ -45,7 +44,9 @@ function copyDirectory(string $from, string $to): void
 function luaFilesUnder(string $directory): array
 {
     $files = [];
-    $iterator = new \RecursiveIteratorIterator(new \RecursiveDirectoryIterator($directory, \FilesystemIterator::SKIP_DOTS));
+    $iterator = new \RecursiveIteratorIterator(
+        new \RecursiveDirectoryIterator($directory, \FilesystemIterator::SKIP_DOTS)
+    );
     foreach ($iterator as $file) {
         if (str_ends_with($file->getPathname(), '.lua')) {
             $files[] = substr($file->getPathname(), \strlen($directory) + 1);
@@ -58,7 +59,11 @@ function luaFilesUnder(string $directory): array
 /** [status, stdout, stderr] with the program name at the start of stderr lines normalized */
 function normalized(array $result, string $programName): array
 {
-    return [$result[0], normalizeDifferentialOutput($result[1], $programName), normalizeDifferentialOutput($result[2], $programName)];
+    return [
+        $result[0],
+        normalizeDifferentialOutput($result[1], $programName),
+        normalizeDifferentialOutput($result[2], $programName),
+    ];
 }
 
 function test_project_transpiled_to_another_directory_behaves_like_lua(): void
@@ -91,7 +96,10 @@ function test_project_transpiled_in_place_behaves_like_lua(): void
     assertSame(1, $status);
     assertSame(REPO_ROOT . "/bin/lua2php: broken.lua:2: unexpected symbol near '='\n", $stderr);
     foreach (luaFilesUnder(PROJECT) as $luaFile) {
-        assertTrue(is_file($directory . '/' . substr($luaFile, 0, -4) . '.php'), "$luaFile was transpiled next to itself");
+        assertTrue(
+            is_file($directory . '/' . substr($luaFile, 0, -4) . '.php'),
+            "$luaFile was transpiled next to itself",
+        );
     }
     $reference = normalized(runCommand(['lua5.4', 'main.lua'], '', PROJECT), 'lua5.4');
     $ours = normalized(runGuarded('main.php', $directory, scratchDirectory() . '/aot-in-place-cache'), 'main.php');
@@ -107,7 +115,10 @@ function test_project_transpiled_in_place_behaves_like_lua(): void
     );
     assertSame(
         normalized(runCommand(['lua5.4', 'lib/shapes/init.lua', 'a'], '', PROJECT), 'lua5.4'),
-        normalized(runCommand(['env', 'LUAPHP_CACHE_DIR=' . scratchDirectory() . '/aot-in-place-cache', 'php', ...OPCACHE_ON_NEW_FILES, 'lib/shapes/init.php', 'a'], '', $directory), 'lib/shapes/init.php'),
+        normalized(runCommand([
+            'env', 'LUAPHP_CACHE_DIR=' . scratchDirectory() . '/aot-in-place-cache',
+            'php', ...OPCACHE_ON_NEW_FILES, 'lib/shapes/init.php', 'a',
+        ], '', $directory), 'lib/shapes/init.php'),
     );
 }
 
@@ -171,7 +182,11 @@ function test_load_compiles_only_on_a_cache_miss(): void
     // a new string: load() needs the compiler (the one exception to ahead of time)
     [$status, $stdout, $stderr] = runGuarded('loader.php', $directory, $cacheDirectory);
     assertSame([97, '', "GUARD: LuaPhp\\Compiler\\Compiler loaded at run time\n"], [$status, $stdout, $stderr]);
-    assertSame([0, "42\n", ''], runCommand(['env', "LUAPHP_CACHE_DIR=$cacheDirectory", 'php', ...OPCACHE_ON_NEW_FILES, 'loader.php'], '', $directory));
+    assertSame([0, "42\n", ''], runCommand(
+        ['env', "LUAPHP_CACHE_DIR=$cacheDirectory", 'php', ...OPCACHE_ON_NEW_FILES, 'loader.php'],
+        '',
+        $directory,
+    ));
     // with the disk cache warm, the same load() compiles nothing
     assertSame([0, "42\n", ''], runGuarded('loader.php', $directory, $cacheDirectory));
 }
@@ -189,12 +204,14 @@ function test_lua_init_code_is_loaded_like_load(): void
     file_put_contents("$directory/init.lua", "print('init file')\n");
     lua2php([$directory]);
     $cacheDirectory = "$directory/cache";
-    $withInit = static fn (string $init, bool $guarded): array => runCommand(
-        ['env', "LUA_INIT=$init", "LUAPHP_CACHE_DIR=$cacheDirectory", 'php', ...OPCACHE_ON_NEW_FILES, ...($guarded ? ['-d', 'auto_prepend_file=' . GUARD] : []), 'hello.php'],
-        '',
-        $directory,
+    $withInit = static fn (string $init, bool $guarded): array => runCommand([
+        'env', "LUA_INIT=$init", "LUAPHP_CACHE_DIR=$cacheDirectory",
+        'php', ...OPCACHE_ON_NEW_FILES, ...($guarded ? ['-d', 'auto_prepend_file=' . GUARD] : []), 'hello.php',
+    ], '', $directory);
+    assertSame(
+        [97, '', "GUARD: LuaPhp\\Compiler\\Compiler loaded at run time\n"],
+        $withInit("print('init code')", true),
     );
-    assertSame([97, '', "GUARD: LuaPhp\\Compiler\\Compiler loaded at run time\n"], $withInit("print('init code')", true));
     assertSame([0, "init code\nhello\n", ''], $withInit("print('init code')", false));
     assertSame([0, "init code\nhello\n", ''], $withInit("print('init code')", true));
     assertSame([0, "init file\nhello\n", ''], $withInit('@init.lua', true));
@@ -214,12 +231,27 @@ function test_jit_is_switched_on_only_when_the_host_left_it_available(): void
     );
     $cases = [
         // [php options, the JIT's state at the end: opcache.jit, on]
-        [['-d', 'opcache.enable_cli=1', '-d', 'opcache.jit=off', '-d', 'opcache.jit_buffer_size=16M'], "jit tracing on\n"],
-        [['-d', 'opcache.enable_cli=1', '-d', 'opcache.jit=0', '-d', 'opcache.jit_buffer_size=16M'], "jit tracing on\n"],
-        [['-d', 'opcache.enable_cli=1', '-d', 'opcache.jit=disable', '-d', 'opcache.jit_buffer_size=16M'], "jit disable off\n"],
+        [
+            ['-d', 'opcache.enable_cli=1', '-d', 'opcache.jit=off', '-d', 'opcache.jit_buffer_size=16M'],
+            "jit tracing on\n",
+        ],
+        [
+            ['-d', 'opcache.enable_cli=1', '-d', 'opcache.jit=0', '-d', 'opcache.jit_buffer_size=16M'],
+            "jit tracing on\n",
+        ],
+        [
+            ['-d', 'opcache.enable_cli=1', '-d', 'opcache.jit=disable', '-d', 'opcache.jit_buffer_size=16M'],
+            "jit disable off\n",
+        ],
         [['-d', 'opcache.enable_cli=1', '-d', 'opcache.jit=off', '-d', 'opcache.jit_buffer_size=0'], "jit  off\n"],
-        [['-d', 'opcache.enable_cli=1', '-d', 'opcache.jit=function', '-d', 'opcache.jit_buffer_size=16M'], "jit function on\n"],
-        [['-d', 'opcache.enable_cli=1', '-d', 'opcache.jit=1205', '-d', 'opcache.jit_buffer_size=16M'], "jit 1205 on\n"],
+        [
+            ['-d', 'opcache.enable_cli=1', '-d', 'opcache.jit=function', '-d', 'opcache.jit_buffer_size=16M'],
+            "jit function on\n",
+        ],
+        [
+            ['-d', 'opcache.enable_cli=1', '-d', 'opcache.jit=1205', '-d', 'opcache.jit_buffer_size=16M'],
+            "jit 1205 on\n",
+        ],
         [['-d', 'opcache.enable_cli=0', '-d', 'opcache.jit=off', '-d', 'opcache.jit_buffer_size=16M'], "jit  off\n"],
     ];
     foreach ($cases as [$options, $expectedStatus]) {

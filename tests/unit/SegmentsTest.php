@@ -21,7 +21,7 @@ use LuaPhp\Emitter\FunctionEmitter;
  * main thread.
  */
 
-/** makes every function segments of one instruction (tiny_segments.php) */
+// makes every function segments of one instruction (tiny_segments.php)
 const TINY_SEGMENTS = ['-d', 'auto_prepend_file=' . REPO_ROOT . '/tests/unit/tiny_segments.php'];
 
 /** Lua source of a table of $rows rows {id = i, fmt = string.format}: 7 instructions a row, no constant constructor */
@@ -37,7 +37,11 @@ function mixedRows(int $rows): string
 /** [status, stdout, stderr] of $command run with $stackKilobytes of C stack */
 function runWithStack(int $stackKilobytes, array $command, string $workingDirectory): array
 {
-    return runCommand(['sh', '-c', "ulimit -s $stackKilobytes && exec \"\$@\"", 'sh', ...$command], '', $workingDirectory);
+    return runCommand(
+        ['sh', '-c', "ulimit -s $stackKilobytes && exec \"\$@\"", 'sh', ...$command],
+        '',
+        $workingDirectory,
+    );
 }
 
 function test_a_big_module_loads_in_a_coroutine_and_at_a_small_stack(): void
@@ -45,14 +49,28 @@ function test_a_big_module_loads_in_a_coroutine_and_at_a_small_stack(): void
     $directory = scratchDirectory() . '/segments-module';
     @mkdir($directory);
     file_put_contents("$directory/mixed.lua", 'return ' . mixedRows(3000) . "\n");
-    file_put_contents("$directory/main.lua", "local rows = require 'mixed'\nprint(#rows, rows[1].id, rows[#rows].id, rows[#rows].fmt == string.format)\n");
-    file_put_contents("$directory/coroutine.lua", "print(coroutine.wrap(function () local rows = require 'mixed'; return #rows, rows[#rows].id end)())\n");
+    file_put_contents(
+        "$directory/main.lua",
+        "local rows = require 'mixed'\nprint(#rows, rows[1].id, rows[#rows].id, rows[#rows].fmt == string.format)\n",
+    );
+    file_put_contents(
+        "$directory/coroutine.lua",
+        "print(coroutine.wrap(function () local rows = require 'mixed'; return #rows, rows[#rows].id end)())\n",
+    );
     assertSame([0, '', ''], runCommand(['php', REPO_ROOT . '/bin/lua2php', $directory, '-o', "$directory/out"]));
     $php = ['php', ...OPCACHE_ON_NEW_FILES];
     assertSame([0, "3000\t1\t3000\ttrue\n", ''], runCommand(['lua5.4', 'main.lua'], '', $directory));
-    assertSame([0, "3000\t1\t3000\ttrue\n", ''], runWithStack(1024, [...$php, 'main.php'], "$directory/out"), 'main thread, 1 MB stack');
+    assertSame(
+        [0, "3000\t1\t3000\ttrue\n", ''],
+        runWithStack(1024, [...$php, 'main.php'], "$directory/out"),
+        'main thread, 1 MB stack',
+    );
     assertSame([0, "3000\t3000\n", ''], runCommand(['lua5.4', 'coroutine.lua'], '', $directory));
-    assertSame([0, "3000\t3000\n", ''], runWithStack(8192, [...$php, 'coroutine.php'], "$directory/out"), 'in a coroutine');
+    assertSame(
+        [0, "3000\t3000\n", ''],
+        runWithStack(8192, [...$php, 'coroutine.php'], "$directory/out"),
+        'in a coroutine',
+    );
 }
 
 function test_load_in_a_coroutine_from_the_warm_disk_cache(): void
@@ -67,7 +85,11 @@ function test_load_in_a_coroutine_from_the_warm_disk_cache(): void
     assertSame([0, '', ''], runCommand(['php', REPO_ROOT . '/bin/lua2php', 'load.lua'], '', $directory));
     // the warm run includes the chunk's PHP from the disk cache, which opcache optimizes, in the coroutine
     foreach (['cold', 'warm'] as $cache) {
-        $result = runCommand(['env', "LUAPHP_CACHE_DIR=$directory/cache", 'php', ...OPCACHE_ON_NEW_FILES, 'load.php'], '', $directory);
+        $result = runCommand(
+            ['env', "LUAPHP_CACHE_DIR=$directory/cache", 'php', ...OPCACHE_ON_NEW_FILES, 'load.php'],
+            '',
+            $directory,
+        );
         assertSame([0, "3000\t3000\n", ''], $result, "$cache cache");
     }
 }
@@ -118,7 +140,10 @@ function test_big_functions_are_segments_that_no_goto_leaves(): void
     $segments = segmentsOf($code);
     foreach ($segments as $index => $segment) {
         $instructions = preg_match_all('/^        \/\/ \[\d+\] /m', $segment);
-        assertTrue($instructions <= FunctionEmitter::$maximumSegmentWeight, "segment $index: $instructions instructions");
+        assertTrue(
+            $instructions <= FunctionEmitter::$maximumSegmentWeight,
+            "segment $index: $instructions instructions",
+        );
         preg_match_all('/goto ([LT]\d+);/', $segment, $gotos);
         foreach ($gotos[1] as $label) {
             assertTrue(preg_match("/^    $label:\$/m", $segment) === 1, "segment $index: goto $label stays in it");
@@ -130,8 +155,9 @@ function test_big_functions_are_segments_that_no_goto_leaves(): void
         assertSame(1, substr_count($code, "case '$label':\n"), "entry $label");
     }
     // and the code runs
-    $result = runCommand(['php', REPO_ROOT . '/bin/lua', '-e', 'local f = load(io.read("a")); print(f(5, function (a, b) return a % 7 + b end))'], $source);
-    $expected = runCommand(['lua5.4', '-e', 'local f = load(io.read("a")); print(f(5, function (a, b) return a % 7 + b end))'], $source);
+    $runIt = 'local f = load(io.read("a")); print(f(5, function (a, b) return a % 7 + b end))';
+    $result = runCommand(['php', REPO_ROOT . '/bin/lua', '-e', $runIt], $source);
+    $expected = runCommand(['lua5.4', '-e', $runIt], $source);
     assertSame($expected, $result);
 }
 
@@ -148,18 +174,25 @@ function test_the_differential_cases_behave_like_lua_in_tiny_segments(): void
             $name = basename($file);
             $running[$name] = [
                 startProcess(['lua5.4', $name], $diffDirectory),
-                startProcess(['env', '-u', 'LUAPHP_CACHE_DIR', 'php', ...TINY_SEGMENTS, $ourProgram, $name], $diffDirectory),
+                startProcess(
+                    ['env', '-u', 'LUAPHP_CACHE_DIR', 'php', ...TINY_SEGMENTS, $ourProgram, $name],
+                    $diffDirectory,
+                ),
             ];
         }
         foreach ($running as $name => [$referenceProcess, $ourProcess]) {
             [$referenceStatus, $referenceStdout, $referenceStderr] = finishProcess($referenceProcess);
             [$ourStatus, $ourStdout, $ourStderr] = finishProcess($ourProcess);
+            $expectedStdout = normalizeDifferentialOutput($referenceStdout, 'lua5.4');
+            $actualStdout = normalizeDifferentialOutput($ourStdout, 'lua5.4');
+            $expectedStderr = normalizeDifferentialOutput($referenceStderr, 'lua5.4');
+            $actualStderr = normalizeDifferentialOutput($ourStderr, $ourProgram);
             if ($referenceStatus !== $ourStatus) {
                 $failures[] = "$name: exit status $ourStatus, expected $referenceStatus";
-            } elseif (normalizeDifferentialOutput($referenceStdout, 'lua5.4') !== normalizeDifferentialOutput($ourStdout, 'lua5.4')) {
-                $failures[] = "$name: stdout" . firstDifference(normalizeDifferentialOutput($referenceStdout, 'lua5.4'), normalizeDifferentialOutput($ourStdout, 'lua5.4'));
-            } elseif (normalizeDifferentialOutput($referenceStderr, 'lua5.4') !== normalizeDifferentialOutput($ourStderr, $ourProgram)) {
-                $failures[] = "$name: stderr" . firstDifference(normalizeDifferentialOutput($referenceStderr, 'lua5.4'), normalizeDifferentialOutput($ourStderr, $ourProgram));
+            } elseif ($expectedStdout !== $actualStdout) {
+                $failures[] = "$name: stdout" . firstDifference($expectedStdout, $actualStdout);
+            } elseif ($expectedStderr !== $actualStderr) {
+                $failures[] = "$name: stderr" . firstDifference($expectedStderr, $actualStderr);
             }
         }
     }

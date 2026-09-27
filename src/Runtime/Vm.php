@@ -21,10 +21,10 @@ namespace LuaPhp\Runtime;
  */
 final class Vm
 {
-    // lvm.h: F2Imod
-    public const F2Ieq = 0;
-    public const F2Ifloor = 1;
-    public const F2Iceil = 2;
+    // lvm.h: F2Imod (F2Ieq, F2Ifloor, F2Iceil)
+    public const F2IEQ = 0;
+    public const F2IFLOOR = 1;
+    public const F2ICEIL = 2;
 
     // lvm.c: MAXTAGLOOP
     public const MAXTAGLOOP = 2000;
@@ -230,10 +230,10 @@ final class Vm
     {
         $floor = floor($number);
         if ($number != $floor) {  // not an integral value?
-            if ($mode === self::F2Ieq) {
+            if ($mode === self::F2IEQ) {
                 return null;  // fails if mode demands integral value
             }
-            if ($mode === self::F2Iceil) {  // needs ceil?
+            if ($mode === self::F2ICEIL) {  // needs ceil?
                 $floor += 1;  // convert floor to ceil (remember: n != f)
             }
         }
@@ -245,7 +245,7 @@ final class Vm
     }
 
     /** lvm.c: luaV_tointegerns (no string coercion) */
-    public static function toIntegerNoString(mixed $value, int $mode = self::F2Ieq): ?int
+    public static function toIntegerNoString(mixed $value, int $mode = self::F2IEQ): ?int
     {
         if (\is_int($value)) {
             return $value;
@@ -257,7 +257,7 @@ final class Vm
     }
 
     /** lvm.c: luaV_tointeger (strings are coerced) */
-    public static function toInteger(mixed $value, int $mode = self::F2Ieq): ?int
+    public static function toInteger(mixed $value, int $mode = self::F2IEQ): ?int
     {
         if (\is_string($value)) {
             $value = StringToNumber::convert($value);
@@ -303,7 +303,9 @@ final class Vm
         // table of a table's metatable or of the string metatable is what
         // the first iteration below returns.
         if (\is_string($key)) {
-            $metatable = $t instanceof LuaTable ? $t->metatable : (\is_string($t) ? ($L->globalState->typeMetatables[Lua::LUA_TSTRING] ?? null) : null);
+            $metatable = $t instanceof LuaTable
+                ? $t->metatable
+                : (\is_string($t) ? ($L->globalState->typeMetatables[Lua::LUA_TSTRING] ?? null) : null);
             $tm = $metatable?->hash['__index'] ?? null;
             if ($tm instanceof LuaTable && isset($tm->hash[$key])) {
                 return $tm->hash[$key];
@@ -379,8 +381,13 @@ final class Vm
     }
 
     /** lvm.h: luaV_settable (lua_settable/lua_setfield/lua_seti) */
-    public static function setTable(Coroutine $L, mixed $t, mixed $key, mixed $value, int $slot = DebugInfo::NO_SLOT): void
-    {
+    public static function setTable(
+        Coroutine $L,
+        mixed $t,
+        mixed $key,
+        mixed $value,
+        int $slot = DebugInfo::NO_SLOT,
+    ): void {
         if ($t instanceof LuaTable && ($t->metatable === null || $t->get($key) !== null)) {
             self::rawSet($L, $t, $key, $value);
             return;
@@ -420,7 +427,7 @@ final class Vm
         if (self::intFitsFloat($i)) {
             return (float) $i < $f;  // compare them as floats
         }
-        $ceiling = self::floatToIntegerMode($f, self::F2Iceil);  // i < f <=> i < ceil(f)
+        $ceiling = self::floatToIntegerMode($f, self::F2ICEIL);  // i < f <=> i < ceil(f)
         if ($ceiling !== null) {
             return $i < $ceiling;
         }
@@ -433,7 +440,7 @@ final class Vm
         if (self::intFitsFloat($i)) {
             return (float) $i <= $f;
         }
-        $floor = self::floatToIntegerMode($f, self::F2Ifloor);  // i <= f <=> i <= floor(f)
+        $floor = self::floatToIntegerMode($f, self::F2IFLOOR);  // i <= f <=> i <= floor(f)
         if ($floor !== null) {
             return $i <= $floor;
         }
@@ -446,7 +453,7 @@ final class Vm
         if (self::intFitsFloat($i)) {
             return $f < (float) $i;
         }
-        $floor = self::floatToIntegerMode($f, self::F2Ifloor);  // f < i <=> floor(f) < i
+        $floor = self::floatToIntegerMode($f, self::F2IFLOOR);  // f < i <=> floor(f) < i
         if ($floor !== null) {
             return $floor < $i;
         }
@@ -459,7 +466,7 @@ final class Vm
         if (self::intFitsFloat($i)) {
             return $f <= (float) $i;
         }
-        $ceiling = self::floatToIntegerMode($f, self::F2Iceil);  // f <= i <=> ceil(f) <= i
+        $ceiling = self::floatToIntegerMode($f, self::F2ICEIL);  // f <= i <=> ceil(f) <= i
         if ($ceiling !== null) {
             return $ceiling <= $i;
         }
@@ -526,7 +533,10 @@ final class Vm
         if ($L === null) {
             return false;
         }
-        if (($t1 instanceof LuaTable && $t2 instanceof LuaTable) || ($t1 instanceof Userdata && $t2 instanceof Userdata)) {
+        if (
+            ($t1 instanceof LuaTable && $t2 instanceof LuaTable)
+            || ($t1 instanceof Userdata && $t2 instanceof Userdata)
+        ) {
             $tm = $t1->metatable?->hash['__eq'] ?? null;
             if ($tm === null) {
                 $tm = $t2->metatable?->hash['__eq'] ?? null;
@@ -570,11 +580,14 @@ final class Vm
             $handled = 2;  // number of elements handled in this pass (at least 2)
             $second = $values[$top - 1];
             $first = $values[$top - 2];
-            if (!(\is_string($first) || \is_int($first) || \is_float($first))
-                || !(\is_string($second) || \is_int($second) || \is_float($second))) {
+            if (
+                !(\is_string($first) || \is_int($first) || \is_float($first))
+                || !(\is_string($second) || \is_int($second) || \is_float($second))
+            ) {
                 // luaT_tryconcatTM
                 $slotFirst = $firstRegister === DebugInfo::NO_SLOT ? DebugInfo::NO_SLOT : $firstRegister + $top - 2;
-                $values[$top - 2] = MetaMethods::tryConcatTM($L, $first, $second, $slotFirst, $slotFirst === DebugInfo::NO_SLOT ? DebugInfo::NO_SLOT : $slotFirst + 1);
+                $slotSecond = $slotFirst === DebugInfo::NO_SLOT ? DebugInfo::NO_SLOT : $slotFirst + 1;
+                $values[$top - 2] = MetaMethods::tryConcatTM($L, $first, $second, $slotFirst, $slotSecond);
             } else {
                 if (!\is_string($second)) {
                     $second = $values[$top - 1] = LuaObject::numberToString($second);
@@ -644,7 +657,7 @@ final class Vm
      */
     private static function forLimit(Coroutine $L, int $init, mixed $limitValue, int $step): ?int
     {
-        $limit = self::toInteger($limitValue, $step < 0 ? self::F2Iceil : self::F2Ifloor);
+        $limit = self::toInteger($limitValue, $step < 0 ? self::F2ICEIL : self::F2IFLOOR);
         if ($limit === null) {  // not coercible to in integer
             $floatLimit = self::toFloat($limitValue);  // try to convert to float
             if ($floatLimit === null) {  // cannot convert to float?

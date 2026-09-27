@@ -28,28 +28,44 @@ const ALL_LUA_VIRTUAL_CAP_KB = 1536 * 1024;
 function test_bin_lua_and_a_lua2php_project_run_all_lua_under_the_virtual_memory_cap(): void
 {
     $project = scratchDirectory() . '/official-project';
-    exec('cp -R ' . escapeshellarg(OFFICIAL_TESTS_DIRECTORY) . ' ' . escapeshellarg($project) . ' && chmod -R u+w ' . escapeshellarg($project), $output, $copyStatus);
+    exec(
+        'cp -R ' . escapeshellarg(OFFICIAL_TESTS_DIRECTORY) . ' ' . escapeshellarg($project)
+            . ' && chmod -R u+w ' . escapeshellarg($project),
+        $output,
+        $copyStatus,
+    );
     assertSame(0, $copyStatus, 'copy of the official tests');
     [$status, , $errorOutput] = runCommand(['php', REPO_ROOT . '/bin/lua2php', $project]);
     assertSame(0, $status, "lua2php: $errorOutput");
     $cacheDirectory = scratchDirectory() . '/official-project-cache';
-    $underCap = static fn (array $command): array => ['sh', '-c', 'ulimit -v ' . ALL_LUA_VIRTUAL_CAP_KB . ' && exec "$@"', 'sh', ...$command];
+    $underCap = static fn (array $command): array
+        => ['sh', '-c', 'ulimit -v ' . ALL_LUA_VIRTUAL_CAP_KB . ' && exec "$@"', 'sh', ...$command];
     $running = [
-        'bin/lua' => startProcess($underCap(['php', REPO_ROOT . '/bin/lua', '-e_U=true', 'all.lua']), OFFICIAL_TESTS_DIRECTORY),
+        'bin/lua' => startProcess(
+            $underCap(['php', REPO_ROOT . '/bin/lua', '-e_U=true', 'all.lua']),
+            OFFICIAL_TESTS_DIRECTORY,
+        ),
         // a lua2php script takes no -e: LUA_INIT sets _U before the script runs
-        'lua2php' => startProcess($underCap(['env', 'LUA_INIT=_U=true', "LUAPHP_CACHE_DIR=$cacheDirectory", 'php', ...OPCACHE_ON_NEW_FILES, '-d', 'memory_limit=4G', 'all.php']), $project),
+        'lua2php' => startProcess($underCap([
+            'env', 'LUA_INIT=_U=true', "LUAPHP_CACHE_DIR=$cacheDirectory",
+            'php', ...OPCACHE_ON_NEW_FILES, '-d', 'memory_limit=4G', 'all.php',
+        ]), $project),
     ];
     [$status, $standardOutput, $errorOutput] = finishProcess($running['bin/lua']);
     assertTrue(
         $status === 0 && str_contains($standardOutput, 'final OK !!!'),
-        'bin/lua all.lua under ulimit -v ' . ALL_LUA_VIRTUAL_CAP_KB . ": exit status $status: " . substr($errorOutput, 0, 500),
+        'bin/lua all.lua under ulimit -v ' . ALL_LUA_VIRTUAL_CAP_KB
+            . ": exit status $status: " . substr($errorOutput, 0, 500),
     );
     [$status, $standardOutput, $errorOutput] = finishProcess($running['lua2php']);
     // (the dots are progress output some tests write to stderr, as under lua5.4)
-    $expectedError = "~\\A\\.*all\\.php: files\\.lua:202: cannot load (/\\S+): not transpiled ahead of time \\(no \\1\\.php\\)\n~";
+    $expectedError = "~\\A\\.*all\\.php: files\\.lua:202: cannot load (/\\S+): "
+        . "not transpiled ahead of time \\(no \\1\\.php\\)\n~";
     assertTrue(
-        $status === 1 && str_contains($standardOutput, "***** FILE 'files.lua'*****") && preg_match($expectedError, $errorOutput) === 1,
-        'lua2php all.lua under ulimit -v ' . ALL_LUA_VIRTUAL_CAP_KB . ": exit status $status: " . substr($errorOutput, 0, 500),
+        $status === 1 && str_contains($standardOutput, "***** FILE 'files.lua'*****")
+            && preg_match($expectedError, $errorOutput) === 1,
+        'lua2php all.lua under ulimit -v ' . ALL_LUA_VIRTUAL_CAP_KB
+            . ": exit status $status: " . substr($errorOutput, 0, 500),
     );
 }
 
@@ -87,7 +103,10 @@ function test_a_fiber_stack_that_cannot_be_mapped_is_not_enough_memory(): void
     $hostSettings = ['-d', 'disable_functions=ini_set', '-d', 'fiber.stack_size=64M'];
     $expected = [0, "true\tnot enough memory\tdead\nfalse\tnot enough memory\ntrue\tworks again\n", ''];
     foreach ([[REPO_ROOT . '/bin/lua', 'fiber_stacks.lua'], ['fiber_stacks.php']] as $arguments) {
-        $command = ['sh', '-c', 'ulimit -v ' . (1024 * 1024) . ' && exec "$@"', 'sh', 'php', ...OPCACHE_ON_NEW_FILES, ...$hostSettings, ...$arguments];
+        $command = [
+            'sh', '-c', 'ulimit -v ' . (1024 * 1024) . ' && exec "$@"', 'sh',
+            'php', ...OPCACHE_ON_NEW_FILES, ...$hostSettings, ...$arguments,
+        ];
         assertSame($expected, runCommand($command, '', $directory), basename($arguments[0]));
     }
 }

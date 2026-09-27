@@ -12,6 +12,11 @@ use LuaPhp\Runtime\StringToNumber;
  * a chunk (current FuncState, Dyndata, the scanner table used as constant
  * cache, the C-call depth used by enterlevel).
  *
+ * Functions keep their C names, in camelCase: luaX_lookahead is lookahead
+ * (the luaX_ prefix is this class), read_numeral is readNumeral. Two would
+ * clash: luaX_next is nextToken (next is llex.c's next macro), and
+ * lobject.c's luaO_utf8esc is encodeUtf8 (utf8esc is llex.c's).
+ *
  * Characters are ints (0..255) like C's 'current'; EOZ (-1) marks the end
  * of input. The token buffer is a byte string; error messages quote it as C
  * does, so an embedded '\0' ends the quoted text.
@@ -225,7 +230,7 @@ final class Lexer
     }
 
     // llex.c: save_and_next
-    private function save_and_next(): void
+    private function saveAndNext(): void
     {
         $this->save($this->current);
         $this->next();
@@ -238,7 +243,7 @@ final class Lexer
     }
 
     // llex.c: luaX_token2str
-    public function luaX_token2str(int $token): string
+    public function token2str(int $token): string
     {
         if ($token < self::FIRST_RESERVED) {  // single-byte symbols?
             if (self::lisprint($token)) {
@@ -263,7 +268,7 @@ final class Lexer
             case self::TK_INT:
                 return "'" . self::asCString($this->buffer) . "'";
             default:
-                return $this->luaX_token2str($token);
+                return $this->token2str($token);
         }
     }
 
@@ -278,7 +283,7 @@ final class Lexer
     }
 
     // llex.c: luaX_syntaxerror
-    public function luaX_syntaxerror(string $message): never
+    public function syntaxerror(string $message): never
     {
         $this->lexerror($message, $this->t->token);
     }
@@ -297,7 +302,7 @@ final class Lexer
     }
 
     // llex.c: check_next1
-    private function check_next1(int $c): bool
+    private function checkNext1(int $c): bool
     {
         if ($this->current === $c) {
             $this->next();
@@ -307,10 +312,10 @@ final class Lexer
     }
 
     // llex.c: check_next2 (current char in a two-char set? save it)
-    private function check_next2(string $set): bool
+    private function checkNext2(string $set): bool
     {
         if ($this->current === ord($set[0]) || $this->current === ord($set[1])) {
-            $this->save_and_next();
+            $this->saveAndNext();
             return true;
         }
         return false;
@@ -321,25 +326,25 @@ final class Lexer
      * %d(%x|%.|([Ee][+-]?))* | 0[Xx](%x|%.|([Pp][+-]?))*
      * and lets luaO_str2num reject ill-formed numerals.
      */
-    private function read_numeral(Token $token): int
+    private function readNumeral(Token $token): int
     {
         $exponentMarks = 'Ee';
         $first = $this->current;
-        $this->save_and_next();
-        if ($first === 48 && $this->check_next2('xX')) {  // hexadecimal?
+        $this->saveAndNext();
+        if ($first === 48 && $this->checkNext2('xX')) {  // hexadecimal?
             $exponentMarks = 'Pp';
         }
         for (;;) {
-            if ($this->check_next2($exponentMarks)) {  // exponent mark?
-                $this->check_next2('-+');  // optional exponent sign
+            if ($this->checkNext2($exponentMarks)) {  // exponent mark?
+                $this->checkNext2('-+');  // optional exponent sign
             } elseif (self::lisxdigit($this->current) || $this->current === 46) {  // '%x|%.'
-                $this->save_and_next();
+                $this->saveAndNext();
             } else {
                 break;
             }
         }
         if (self::lislalpha($this->current)) {  // is numeral touching a letter?
-            $this->save_and_next();  // force an error
+            $this->saveAndNext();  // force an error
         }
         $number = StringToNumber::convert($this->buffer);
         if ($number === null) {  // format error?
@@ -354,13 +359,13 @@ final class Lexer
      * Returns the number of '='s + 2 if well formed; 1 for a single bracket;
      * 0 for an unfinished '[==...'.
      */
-    private function skip_sep(): int
+    private function skipSep(): int
     {
         $count = 0;
         $bracket = $this->current;
-        $this->save_and_next();
+        $this->saveAndNext();
         while ($this->current === 61) {  // '='
-            $this->save_and_next();
+            $this->saveAndNext();
             $count++;
         }
         if ($this->current === $bracket) {
@@ -370,10 +375,10 @@ final class Lexer
     }
 
     // llex.c: read_long_string ($token null means a comment)
-    private function read_long_string(?Token $token, int $sep): void
+    private function readLongString(?Token $token, int $sep): void
     {
         $line = $this->linenumber;  // initial line (for error message)
-        $this->save_and_next();  // skip 2nd '['
+        $this->saveAndNext();  // skip 2nd '['
         if ($this->currIsNewline()) {  // string starts with a newline?
             $this->inclinenumber();  // skip it
         }
@@ -384,8 +389,8 @@ final class Lexer
                     $this->lexerror("unfinished long $what (starting at line $line)", self::TK_EOS);
                     // no break: lexerror does not return
                 case 93:  // ']'
-                    if ($this->skip_sep() === $sep) {
-                        $this->save_and_next();  // skip 2nd ']'
+                    if ($this->skipSep() === $sep) {
+                        $this->saveAndNext();  // skip 2nd ']'
                         break 2;
                     }
                     break;
@@ -399,7 +404,7 @@ final class Lexer
                     break;
                 default:
                     if ($token !== null) {
-                        $this->save_and_next();
+                        $this->saveAndNext();
                     } else {
                         $this->next();
                     }
@@ -415,7 +420,7 @@ final class Lexer
     {
         if (!$condition) {
             if ($this->current !== self::EOZ) {
-                $this->save_and_next();  // add current to buffer for error message
+                $this->saveAndNext();  // add current to buffer for error message
             }
             $this->lexerror($message, self::TK_STRING);
         }
@@ -424,9 +429,9 @@ final class Lexer
     // llex.c: gethexa
     private function gethexa(): int
     {
-        $this->save_and_next();
+        $this->saveAndNext();
         $this->esccheck(self::lisxdigit($this->current), 'hexadecimal digit expected');
-        return self::luaO_hexavalue($this->current);
+        return self::hexavalue($this->current);
     }
 
     // llex.c: readhexaesc
@@ -442,17 +447,17 @@ final class Lexer
     private function readutf8esc(): int
     {
         $removeCount = 4;  // chars to be removed: '\', 'u', '{', and first digit
-        $this->save_and_next();  // skip 'u'
+        $this->saveAndNext();  // skip 'u'
         $this->esccheck($this->current === 123, "missing '{'");  // '{'
         $value = $this->gethexa();  // must have at least one digit
         for (;;) {
-            $this->save_and_next();
+            $this->saveAndNext();
             if (!self::lisxdigit($this->current)) {
                 break;
             }
             $removeCount++;
             $this->esccheck($value <= (0x7FFFFFFF >> 4), 'UTF-8 value too large');
-            $value = ($value << 4) + self::luaO_hexavalue($this->current);
+            $value = ($value << 4) + self::hexavalue($this->current);
         }
         $this->esccheck($this->current === 125, "missing '}'");  // '}'
         $this->next();  // skip '}'
@@ -461,7 +466,7 @@ final class Lexer
     }
 
     // lobject.c: luaO_utf8esc (UTF-8 sequence for values up to 0x7FFFFFFF)
-    public static function luaO_utf8esc(int $value): string
+    public static function encodeUtf8(int $value): string
     {
         if ($value < 0x80) {  // ascii?
             return chr($value);
@@ -479,7 +484,7 @@ final class Lexer
     // llex.c: utf8esc
     private function utf8esc(): void
     {
-        $this->buffer .= self::luaO_utf8esc($this->readutf8esc());
+        $this->buffer .= self::encodeUtf8($this->readutf8esc());
     }
 
     // llex.c: readdecesc
@@ -488,7 +493,7 @@ final class Lexer
         $value = 0;
         for ($digitCount = 0; $digitCount < 3 && self::lisdigit($this->current); $digitCount++) {  // up to 3 digits
             $value = 10 * $value + $this->current - 48;
-            $this->save_and_next();
+            $this->saveAndNext();
         }
         $this->esccheck($value <= 255, 'decimal escape too large');
         $this->buffremove($digitCount);  // remove read digits from buffer
@@ -496,9 +501,9 @@ final class Lexer
     }
 
     // llex.c: read_string
-    private function read_string(int $delimiter, Token $token): void
+    private function readString(int $delimiter, Token $token): void
     {
-        $this->save_and_next();  // keep delimiter (for error messages)
+        $this->saveAndNext();  // keep delimiter (for error messages)
         while ($this->current !== $delimiter) {
             switch ($this->current) {
                 case self::EOZ:
@@ -509,17 +514,31 @@ final class Lexer
                     $this->lexerror('unfinished string', self::TK_STRING);
                     // no break: lexerror does not return
                 case 92:  // '\\': escape sequences
-                    $this->save_and_next();  // keep '\\' for error messages
+                    $this->saveAndNext();  // keep '\\' for error messages
                     $escapedValue = null;  // final character to be saved
                     $readNext = true;  // C label 'read_save' (else 'only_save')
                     switch ($this->current) {
-                        case 97: $escapedValue = 7; break;    // '\a'
-                        case 98: $escapedValue = 8; break;    // '\b'
-                        case 102: $escapedValue = 12; break;  // '\f'
-                        case 110: $escapedValue = 10; break;  // '\n'
-                        case 114: $escapedValue = 13; break;  // '\r'
-                        case 116: $escapedValue = 9; break;   // '\t'
-                        case 118: $escapedValue = 11; break;  // '\v'
+                        case 97:  // '\a'
+                            $escapedValue = 7;
+                            break;
+                        case 98:  // '\b'
+                            $escapedValue = 8;
+                            break;
+                        case 102:  // '\f'
+                            $escapedValue = 12;
+                            break;
+                        case 110:  // '\n'
+                            $escapedValue = 10;
+                            break;
+                        case 114:  // '\r'
+                            $escapedValue = 13;
+                            break;
+                        case 116:  // '\t'
+                            $escapedValue = 9;
+                            break;
+                        case 118:  // '\v'
+                            $escapedValue = 11;
+                            break;
                         case 120:  // 'x'
                             $escapedValue = $this->readhexaesc();
                             break;
@@ -564,10 +583,10 @@ final class Lexer
                     $this->save($escapedValue);
                     break;
                 default:
-                    $this->save_and_next();
+                    $this->saveAndNext();
             }
         }
-        $this->save_and_next();  // skip delimiter
+        $this->saveAndNext();  // skip delimiter
         $token->seminfo = $this->newString(substr($this->buffer, 1, strlen($this->buffer) - 2));
     }
 
@@ -595,10 +614,10 @@ final class Lexer
                     // else is a comment
                     $this->next();
                     if ($this->current === 91) {  // long comment?
-                        $sep = $this->skip_sep();
+                        $sep = $this->skipSep();
                         $this->buffer = '';  // 'skip_sep' may dirty the buffer
                         if ($sep >= 2) {
-                            $this->read_long_string(null, $sep);  // skip long comment
+                            $this->readLongString(null, $sep);  // skip long comment
                             $this->buffer = '';  // previous call may dirty the buff.
                             break;
                         }
@@ -609,9 +628,9 @@ final class Lexer
                     }
                     break;
                 case 91:  // '[': long string or simply '['
-                    $sep = $this->skip_sep();
+                    $sep = $this->skipSep();
                     if ($sep >= 2) {
-                        $this->read_long_string($token, $sep);
+                        $this->readLongString($token, $sep);
                         return self::TK_STRING;
                     }
                     if ($sep === 0) {  // '[=...' missing second bracket?
@@ -620,42 +639,42 @@ final class Lexer
                     return 91;
                 case 61:  // '='
                     $this->next();
-                    return $this->check_next1(61) ? self::TK_EQ : 61;  // '==' or '='
+                    return $this->checkNext1(61) ? self::TK_EQ : 61;  // '==' or '='
                 case 60:  // '<'
                     $this->next();
-                    if ($this->check_next1(61)) {
+                    if ($this->checkNext1(61)) {
                         return self::TK_LE;  // '<='
                     }
-                    if ($this->check_next1(60)) {
+                    if ($this->checkNext1(60)) {
                         return self::TK_SHL;  // '<<'
                     }
                     return 60;
                 case 62:  // '>'
                     $this->next();
-                    if ($this->check_next1(61)) {
+                    if ($this->checkNext1(61)) {
                         return self::TK_GE;  // '>='
                     }
-                    if ($this->check_next1(62)) {
+                    if ($this->checkNext1(62)) {
                         return self::TK_SHR;  // '>>'
                     }
                     return 62;
                 case 47:  // '/'
                     $this->next();
-                    return $this->check_next1(47) ? self::TK_IDIV : 47;  // '//' or '/'
+                    return $this->checkNext1(47) ? self::TK_IDIV : 47;  // '//' or '/'
                 case 126:  // '~'
                     $this->next();
-                    return $this->check_next1(61) ? self::TK_NE : 126;  // '~=' or '~'
+                    return $this->checkNext1(61) ? self::TK_NE : 126;  // '~=' or '~'
                 case 58:  // ':'
                     $this->next();
-                    return $this->check_next1(58) ? self::TK_DBCOLON : 58;  // '::' or ':'
+                    return $this->checkNext1(58) ? self::TK_DBCOLON : 58;  // '::' or ':'
                 case 34:  // '"'
                 case 39:  // '\'': short literal strings
-                    $this->read_string($this->current, $token);
+                    $this->readString($this->current, $token);
                     return self::TK_STRING;
                 case 46:  // '.': '.', '..', '...', or number
-                    $this->save_and_next();
-                    if ($this->check_next1(46)) {
-                        if ($this->check_next1(46)) {
+                    $this->saveAndNext();
+                    if ($this->checkNext1(46)) {
+                        if ($this->checkNext1(46)) {
                             return self::TK_DOTS;  // '...'
                         }
                         return self::TK_CONCAT;  // '..'
@@ -663,16 +682,24 @@ final class Lexer
                     if (!self::lisdigit($this->current)) {
                         return 46;
                     }
-                    return $this->read_numeral($token);
-                case 48: case 49: case 50: case 51: case 52:
-                case 53: case 54: case 55: case 56: case 57:  // '0'..'9'
-                    return $this->read_numeral($token);
+                    return $this->readNumeral($token);
+                case 48:
+                case 49:
+                case 50:
+                case 51:
+                case 52:
+                case 53:
+                case 54:
+                case 55:
+                case 56:
+                case 57:  // '0'..'9'
+                    return $this->readNumeral($token);
                 case self::EOZ:
                     return self::TK_EOS;
                 default:
                     if (self::lislalpha($this->current)) {  // identifier or reserved word?
                         do {
-                            $this->save_and_next();
+                            $this->saveAndNext();
                         } while (self::lislalnum($this->current));
                         $name = $this->newString($this->buffer);
                         $token->seminfo = $name;
@@ -687,7 +714,7 @@ final class Lexer
     }
 
     // llex.c: luaX_next
-    public function luaX_next(): void
+    public function nextToken(): void
     {
         if ($this->inputPosition >= $this->nextMemoryCheck && $this->reserveMemory !== null) {
             $ahead = min(self::MEMORY_CHECK_BYTES, $this->inputLength - $this->inputPosition + 1);
@@ -706,7 +733,7 @@ final class Lexer
     }
 
     // llex.c: luaX_lookahead
-    public function luaX_lookahead(): int
+    public function lookahead(): int
     {
         $this->lookahead->seminfo = null;
         $this->lookahead->token = $this->llex($this->lookahead);
@@ -750,7 +777,7 @@ final class Lexer
     }
 
     // lobject.c: luaO_hexavalue
-    private static function luaO_hexavalue(int $c): int
+    private static function hexavalue(int $c): int
     {
         if (self::lisdigit($c)) {
             return $c - 48;

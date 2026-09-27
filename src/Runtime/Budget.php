@@ -182,7 +182,9 @@ final class Budget
             throw new LimitReached('steps');  // (the counter stays negative: the next check throws again)
         }
         $this->stepsBefore = $used;
-        $this->allowance = $this->steps === null ? self::STEPS_PER_CHECK : min(self::STEPS_PER_CHECK, $this->steps - $used);
+        $this->allowance = $this->steps === null
+            ? self::STEPS_PER_CHECK
+            : min(self::STEPS_PER_CHECK, $this->steps - $used);
         $this->stepsLeft = $this->allowance;
         $this->checkLimits();
     }

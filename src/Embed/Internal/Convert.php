@@ -121,7 +121,12 @@ final class Convert
         }
         if ($value instanceof LuaValue) {
             if ($value->sandboxState !== $state) {
-                throw new ConversionError($state === null ? 'cannot register a value of a sandbox in an Environment' : 'cannot pass a value of another sandbox to Lua', $path);
+                throw new ConversionError(
+                    $state === null
+                        ? 'cannot register a value of a sandbox in an Environment'
+                        : 'cannot pass a value of another sandbox to Lua',
+                    $path,
+                );
             }
             return $value->luaValue;
         }
@@ -135,16 +140,25 @@ final class Convert
      * @param array<mixed> $array
      * @param list<int|string> $keys the PHP keys from the root to $array
      */
-    private static function arrayToLua(array $array, string $path, ?State $state, array &$keys, int &$bytes): RuntimeTable
-    {
+    private static function arrayToLua(
+        array $array,
+        string $path,
+        ?State $state,
+        array &$keys,
+        int &$bytes,
+    ): RuntimeTable {
         if (\count($keys) >= self::MAX_DEPTH) {
-            throw new ConversionError('array nested deeper than ' . self::MAX_DEPTH . ' levels', self::phpPath($path, $keys));
+            throw new ConversionError(
+                'array nested deeper than ' . self::MAX_DEPTH . ' levels',
+                self::phpPath($path, $keys),
+            );
         }
         if ($state !== null) {
             self::charge($state, $bytes, \count($array));
         }
         $isList = array_is_list($array);
-        $table = $isList ? new RuntimeTable(\count($array)) : new RuntimeTable();  // (a list as a constructor sizes it: lua_createtable)
+        // (a list as a constructor sizes it: lua_createtable)
+        $table = $isList ? new RuntimeTable(\count($array)) : new RuntimeTable();
         foreach ($array as $key => $item) {
             if (\is_array($item)) {
                 $keys[] = $key;
@@ -173,14 +187,23 @@ final class Convert
      * @param array<int, true> $tablesOnPath
      * @param list<int|string> $keys the Lua keys from the root to $table
      */
-    private static function tableToPhp(RuntimeTable $table, string $path, State $state, array &$tablesOnPath, array &$keys, int &$bytes): array
-    {
+    private static function tableToPhp(
+        RuntimeTable $table,
+        string $path,
+        State $state,
+        array &$tablesOnPath,
+        array &$keys,
+        int &$bytes,
+    ): array {
         $id = spl_object_id($table);
         if (isset($tablesOnPath[$id])) {
             throw new ConversionError('table contains a cycle', self::luaPath($path, $keys));
         }
         if (\count($keys) >= self::MAX_DEPTH) {
-            throw new ConversionError('table nested deeper than ' . self::MAX_DEPTH . ' levels', self::luaPath($path, $keys));
+            throw new ConversionError(
+                'table nested deeper than ' . self::MAX_DEPTH . ' levels',
+                self::luaPath($path, $keys),
+            );
         }
         $otherKeys = $table->extra?->otherKeys ?? [];
         if ($otherKeys !== []) {
@@ -190,7 +213,10 @@ final class Convert
                 \is_bool($key) => 'table key ' . ($key ? 'true' : 'false'),
                 default => 'a table key of type ' . LuaObject::typeName($key),
             };
-            throw new ConversionError("cannot convert $name to PHP (keys must be integers or strings)", self::luaPath($path, $keys));
+            throw new ConversionError(
+                "cannot convert $name to PHP (keys must be integers or strings)",
+                self::luaPath($path, $keys),
+            );
         }
         $arr = $table->arr;
         $hash = $table->hash;
@@ -205,18 +231,24 @@ final class Convert
         if ($isList) {
             for ($key = 1; $key <= $count; $key++) {
                 $item = $arr[$key];
-                $result[] = \is_object($item) ? self::elementToPhp($item, $key, $path, $state, $tablesOnPath, $keys, $bytes) : $item;
+                $result[] = \is_object($item)
+                    ? self::elementToPhp($item, $key, $path, $state, $tablesOnPath, $keys, $bytes)
+                    : $item;
             }
         } else {
             foreach ($arr as $key => $item) {
-                $result[$key] = \is_object($item) ? self::elementToPhp($item, $key, $path, $state, $tablesOnPath, $keys, $bytes) : $item;
+                $result[$key] = \is_object($item)
+                    ? self::elementToPhp($item, $key, $path, $state, $tablesOnPath, $keys, $bytes)
+                    : $item;
             }
             foreach ($hash as $key => $item) {
                 $key = (string) $key;  // (PHP keeps "10" as 10: still a Lua string)
                 if (\array_key_exists($key, $arr)) {
                     throw new ConversionError("table has both $key and \"$key\" as keys", self::luaPath($path, $keys));
                 }
-                $result[$key] = \is_object($item) ? self::elementToPhp($item, $key, $path, $state, $tablesOnPath, $keys, $bytes) : $item;
+                $result[$key] = \is_object($item)
+                    ? self::elementToPhp($item, $key, $path, $state, $tablesOnPath, $keys, $bytes)
+                    : $item;
             }
         }
         unset($tablesOnPath[$id]);
@@ -227,8 +259,15 @@ final class Convert
      * @param array<int, true> $tablesOnPath
      * @param list<int|string> $keys
      */
-    private static function elementToPhp(object $item, int|string $key, string $path, State $state, array &$tablesOnPath, array &$keys, int &$bytes): mixed
-    {
+    private static function elementToPhp(
+        object $item,
+        int|string $key,
+        string $path,
+        State $state,
+        array &$tablesOnPath,
+        array &$keys,
+        int &$bytes,
+    ): mixed {
         if (!($item instanceof RuntimeTable)) {
             return self::toHandle($item, $state);
         }

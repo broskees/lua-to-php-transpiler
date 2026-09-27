@@ -1,0 +1,345 @@
+<?php
+
+declare(strict_types=1);
+
+namespace LuaPhp\Cli;
+
+use LuaPhp\Lib\BaseLib;
+use LuaPhp\Lib\StandardLibraries;
+use LuaPhp\Runtime\Auxiliary;
+use LuaPhp\Runtime\Calls;
+use LuaPhp\Runtime\ChunkLoader;
+use LuaPhp\Runtime\Coroutine;
+use LuaPhp\Runtime\Gc\Collector;
+use LuaPhp\Runtime\LoadCache;
+use LuaPhp\Runtime\Lua;
+use LuaPhp\Runtime\LuaError;
+use LuaPhp\Runtime\LuaObject;
+use LuaPhp\Runtime\NativeFunction;
+use LuaPhp\Runtime\Standalone;
+
+/**
+ * bin/lua: port of lua.c (Lua 5.4.9), the stand-alone interpreter: options
+ * -e, -l, -i, -v, -E, -W, --, -, script and its arguments, the 'arg' table,
+ * error messages with tracebacks on stderr and exit status 1 on errors. The
+ * program name in messages is argv[0], as in lua.c.
+ *
+ * @internal
+ */
+final class LuaCommand
+{
+    // lua.c: bits of various argument indicators in 'args'
+    private const HAS_ERROR = 1;  // bad option
+    private const HAS_I = 2;      // -i
+    private const HAS_V = 4;      // -v
+    private const HAS_E = 8;      // -e
+    private const HAS_CAPITAL_E = 16;  // -E
+
+    /**
+     * lua.c: main. Also sets PHP up for the command line
+     * (Standalone::configurePhp) and load()'s disk cache.
+     *
+     * @param list<string> $argv
+     */
+    public static function main(array $argv): int
+    {
+        Standalone::configurePhp();
+        Standalone::raiseMemoryLimit();
+
+        // load() caches compiled chunks on disk only when asked to (tests never
+        // depend on what earlier runs left there); in memory it always does
+        $cacheDirectory = getenv('LUAPHP_CACHE_DIR');
+        LoadCache::useDirectory(is_string($cacheDirectory) && $cacheDirectory !== '' ? $cacheDirectory : null);
+
+        $programName = (isset($argv[0]) && $argv[0] !== '') ? $argv[0] : 'lua';  // lua.c: progname
+
+        $L = Coroutine::newState();
+        $L->globalState->gcstp = Collector::GCSTPUSR;  // lua_gc(L, LUA_GCSTOP): stop GC while building state
+        $pmain = new NativeFunction(
+            'pmain',
+            static fn (Coroutine $L, array $args): array => [self::pmain($L, $programName, $argv)],
+        );
+        [$status, $result] = Calls::protectedCall($L, $pmain, []);  // do the call
+        Standalone::report($programName, $status, $result);
+        Collector::closeState($L);  // lua_close
+        Standalone::flushStdout();
+        return $status === Lua::LUA_OK && $result[0] ? 0 : 1;
+    }
+
+    // lua.c: print_usage
+    private static function printUsage(string $programName, string $badOption): void
+    {
+        Standalone::flushStdout();
+        fwrite(STDERR, "$programName: ");
+        if (($badOption[1] ?? '') === 'e' || ($badOption[1] ?? '') === 'l') {
+            fwrite(STDERR, "'$badOption' needs argument\n");
+        } else {
+            fwrite(STDERR, "unrecognized option '$badOption'\n");
+        }
+        fwrite(STDERR, "usage: $programName [options] [script [args]]\n"
+            . "Available options are:\n"
+            . "  -e stat   execute string 'stat'\n"
+            . "  -i        enter interactive mode after executing 'script'\n"
+            . "  -l mod    require library 'mod' into global 'mod'\n"
+            . "  -l g=mod  require library 'mod' into global 'g'\n"
+            . "  -v        show version information\n"
+            . "  -E        ignore environment variables\n"
+            . "  -W        turn warnings on\n"
+            . "  --        stop handling options\n"
+            . "  -         stop handling options and execute stdin\n");
+    }
+
+    /**
+     * lua.c: collectargs. Returns [args mask, first]: 'first' is the index of
+     * the script name, 0 if there is none, or the bad argument on error.
+     *
+     * @param list<string> $argv
+     * @return array{int, int}
+     */
+    private static function collectArgs(array $argv): array
+    {
+        $args = 0;
+        $count = count($argv);
+        for ($i = 1; $i < $count; $i++) {
+            $first = $i;
+            $argument = $argv[$i];
+            if (($argument[0] ?? '') !== '-') {  // not an option?
+                return [$args, $first];  // stop handling options
+            }
+            switch ($argument[1] ?? '') {  // else check option
+                case '-':  // '--'
+                    if (strlen($argument) !== 2) {  // extra characters after '--'?
+                        return [self::HAS_ERROR, $first];  // invalid option
+                    }
+                    // if there is a script name, it comes after '--'
+                    return [$args, ($i + 1 < $count) ? $i + 1 : 0];
+                case '':  // '-'
+                    return [$args, $first];  // script "name" is '-'
+                case 'E':
+                    if (strlen($argument) !== 2) {
+                        return [self::HAS_ERROR, $first];
+                    }
+                    $args |= self::HAS_CAPITAL_E;
+                    break;
+                case 'W':
+                    if (strlen($argument) !== 2) {
+                        return [self::HAS_ERROR, $first];
+                    }
+                    break;
+                case 'i':
+                    $args |= self::HAS_I;  // (-i implies -v)
+                    // fall through
+                case 'v':
+                    if (strlen($argument) !== 2) {
+                        return [self::HAS_ERROR, $first];
+                    }
+                    $args |= self::HAS_V;
+                    break;
+                case 'e':
+                    $args |= self::HAS_E;
+                    // fall through
+                case 'l':  // both options need an argument
+                    if (strlen($argument) === 2) {  // no concatenated argument?
+                        $i++;  // try next 'argv'
+                        if ($i >= $count || ($argv[$i][0] ?? '') === '-') {
+                            return [self::HAS_ERROR, $first];  // no next argument or it is another option
+                        }
+                    }
+                    break;
+                default:  // invalid option
+                    return [self::HAS_ERROR, $first];
+            }
+        }
+        return [$args, 0];  // no script name
+    }
+
+    // lua.c: dochunk / dostring / dofile
+    private static function doChunk(Coroutine $L, string $programName, \Closure $loader): int
+    {
+        return Standalone::doChunk($L, $programName, $loader);
+    }
+
+    // lua.c: dolibrary: globname[=modname] -> globname = require(modname)
+    private static function doLibrary(Coroutine $L, string $programName, string $globalName): int
+    {
+        $equalsPosition = strpos($globalName, '=');
+        if ($equalsPosition === false) {  // no explicit name?
+            $moduleName = $globalName;  // module name is equal to global name
+            $suffixPosition = strpos($moduleName, '-');  // look for a suffix mark (LUA_IGMARK)
+        } else {
+            $moduleName = substr($globalName, $equalsPosition + 1);  // module name starts after the '='
+            $globalName = substr($globalName, 0, $equalsPosition);  // global name ends here
+            $suffixPosition = false;
+        }
+        $require = $L->globalState->globals->hash['require'] ?? null;
+        [$status, $result] = Standalone::docall($L, $require, [$moduleName]);  // call 'require(modname)'
+        if ($status === Lua::LUA_OK) {
+            if ($suffixPosition !== false) {  // is there a suffix mark?
+                $globalName = substr($globalName, 0, $suffixPosition);  // remove suffix from global name
+            }
+            $L->globalState->globals->set($globalName, $result[0] ?? null);  // globname = require(modname)
+        }
+        return Standalone::report($programName, $status, $result);
+    }
+
+    // lua.c: handle_script
+    private static function handleScript(Coroutine $L, string $programName, array $argv, int $script): int
+    {
+        $filename = $argv[$script];
+        if ($filename === '-' && ($argv[$script - 1] ?? '') !== '--') {
+            $filename = null;  // stdin
+        }
+        return Standalone::handleScript($L, $programName, static fn () => ChunkLoader::loadFile($L, $filename, null));
+    }
+
+    // lua.c: runargs: options -e, -l and -W, in order
+    private static function runArgs(Coroutine $L, string $programName, array $argv, int $optionLimit): bool
+    {
+        for ($i = 1; $i < $optionLimit; $i++) {
+            $option = $argv[$i][1] ?? '';
+            switch ($option) {
+                case 'e':
+                case 'l':
+                    $extra = substr($argv[$i], 2);  // both options need an argument
+                    if ($extra === '') {
+                        $extra = $argv[++$i];
+                    }
+                    $status = $option === 'e'
+                        ? self::doChunk(
+                            $L,
+                            $programName,
+                            static fn () => ChunkLoader::load($L, $extra, '=(command line)', null),
+                        )
+                        : self::doLibrary($L, $programName, $extra);
+                    if ($status !== Lua::LUA_OK) {
+                        return false;
+                    }
+                    break;
+                case 'W':
+                    BaseLib::warning($L, '@on', false);  // warnings on
+                    break;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * lua.c: doREPL (with loadline/addreturn/multiline): read a line, try it
+     * as 'return <line>', else as a statement, reading more lines while the
+     * statement is incomplete; print results.
+     */
+    private static function doRepl(Coroutine $L): void
+    {
+        $globals = $L->globalState->globals;
+        while (true) {
+            $prompt = $globals->hash['_PROMPT'] ?? null;
+            $line = self::readInputLine($prompt === null ? '> ' : Auxiliary::toLString($L, $prompt));
+            if ($line === null) {
+                break;
+            }
+            if (str_starts_with($line, '=')) {  // for compatibility with 5.2
+                $line = 'return ' . substr($line, 1);
+            }
+            try {
+                $function = ChunkLoader::load($L, "return $line;", '=stdin', null);
+            } catch (LuaError) {
+                $function = null;
+            }
+            $status = Lua::LUA_OK;
+            $value = null;
+            while ($function === null) {  // lua.c: multiline
+                try {
+                    $function = ChunkLoader::load($L, $line, '=stdin', null);
+                } catch (LuaError $error) {
+                    if (
+                        $error->status === Lua::LUA_ERRSYNTAX && is_string($error->value)
+                        && str_ends_with($error->value, '<eof>')
+                    ) {
+                        $prompt2 = $globals->hash['_PROMPT2'] ?? null;
+                        $more = self::readInputLine($prompt2 === null ? '>> ' : Auxiliary::toLString($L, $prompt2));
+                        if ($more !== null) {
+                            $line .= "\n" . $more;
+                            continue;
+                        }
+                    }
+                    $status = $error->status;
+                    $value = $error->value;
+                    break;
+                }
+            }
+            if ($function !== null) {
+                [$status, $value] = Standalone::docall($L, $function, []);
+            }
+            if ($status === Lua::LUA_OK) {
+                if ($value !== []) {  // lua.c: l_print
+                    $print = $globals->hash['print'] ?? null;
+                    [$printStatus, $printError] = Calls::protectedCall($L, $print, $value);
+                    if ($printStatus !== Lua::LUA_OK) {
+                        $printErrorMessage = LuaObject::toStringCoerced($printError) ?? '';
+                        Standalone::message(null, "error calling 'print' ($printErrorMessage)");
+                    }
+                }
+            } else {
+                Standalone::report(null, $status, $value);  // no 'progname' on errors in interactive mode
+            }
+        }
+        echo "\n";
+    }
+
+    private static function readInputLine(string $prompt): ?string
+    {
+        echo $prompt;
+        Standalone::flushStdout();
+        $line = fgets(STDIN);
+        if ($line === false) {
+            return null;
+        }
+        return rtrim($line, "\n");
+    }
+
+    // lua.c: pmain (runs as a C function in protected mode, as in lua.c)
+    private static function pmain(Coroutine $L, string $programName, array $argv): bool
+    {
+        [$args, $script] = self::collectArgs($argv);
+        $optionLimit = ($script > 0) ? $script : count($argv);  // first argv not an option
+        if ($args === self::HAS_ERROR) {  // bad arg?
+            self::printUsage($programName, $argv[$script]);  // 'script' has index of bad arg.
+            return false;
+        }
+        if ($args & self::HAS_V) {  // option '-v'?
+            echo Lua::LUA_COPYRIGHT, "\n";
+        }
+        if ($args & self::HAS_CAPITAL_E) {  // option '-E'?
+            $L->globalState->registry->hash['LUA_NOENV'] = true;  // signal for libraries to ignore env. vars.
+        }
+        StandardLibraries::openAll($L);  // open standard libraries
+        Standalone::createArgTable($L, $argv, $script);  // create table 'arg'
+        Collector::restart($L->globalState);  // lua.c: lua_gc(L, LUA_GCRESTART): start GC...
+        Collector::changeMode($L, Collector::KGC_GEN);  // ...in generational mode
+        if (!($args & self::HAS_CAPITAL_E)) {  // no option '-E'?
+            if (Standalone::handleLuaInit($L, $programName) !== Lua::LUA_OK) {  // run LUA_INIT
+                return false;  // error running LUA_INIT
+            }
+        }
+        if (!self::runArgs($L, $programName, $argv, $optionLimit)) {  // execute arguments -e and -l
+            return false;  // something failed
+        }
+        if ($script > 0) {  // execute main script (if there is one)
+            if (self::handleScript($L, $programName, $argv, $script) !== Lua::LUA_OK) {
+                return false;  // interrupt in case of error
+            }
+        }
+        if ($args & self::HAS_I) {  // -i option?
+            self::doRepl($L);  // do read-eval-print loop
+        } elseif ($script < 1 && !($args & (self::HAS_E | self::HAS_V))) {  // no active option?
+            if (stream_isatty(STDIN)) {  // running in interactive mode?
+                echo Lua::LUA_COPYRIGHT, "\n";
+                self::doRepl($L);  // do read-eval-print loop
+            } else {
+                // executes stdin as a file
+                self::doChunk($L, $programName, static fn () => ChunkLoader::loadFile($L, null, null));
+            }
+        }
+        return true;
+    }
+}

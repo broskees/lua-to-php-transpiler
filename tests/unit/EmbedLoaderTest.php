@@ -50,11 +50,15 @@ function test_the_filesystem_loader_stays_inside_its_root(): void
     }
     $outside = [
         '../secret.lua', 'sub/../a.lua', '..', "$directory/secret.lua", '/etc/passwd', "$directory/root/a.lua",
-        'link-out.lua', 'linkdir/x.lua', 'sub/relative-out.lua', 'sub/up/../secret.lua', 'sub', '', "a.lua\0.txt", 'missing.lua',
+        'link-out.lua', 'linkdir/x.lua', 'sub/relative-out.lua', 'sub/up/../secret.lua', 'sub', '', "a.lua\0.txt",
+        'missing.lua',
     ];
     foreach ($outside as $name) {
         assertTrue(!$loader->exists($name), var_export($name, true) . ' is not found');
-        assertSame("Lua script not found: $name", assertThrows(\InvalidArgumentException::class, static fn () => $loader->getSource($name)));
+        assertSame(
+            "Lua script not found: $name",
+            assertThrows(\InvalidArgumentException::class, static fn () => $loader->getSource($name)),
+        );
     }
     $source = $loader->getSource('sub/b.lua');
     assertSame('return "b"', $source->code);
@@ -77,18 +81,31 @@ function test_require_cannot_leave_the_root(): void
         $leaked[] = $what;
     });
     $sandbox = $environment->newSandbox();
-    assertSame(['a', 'b', 'sub', 'a'], $sandbox->load('return require("a"), require("sub.b"), require("sub"), (require("link-in"))')->call());
-    $attempts = ['../secret', '..secret', '/etc/passwd', 'link-out', 'linkdir.x', 'sub.relative-out', 'sub.up..secret', "$directory/secret"];
+    assertSame(
+        ['a', 'b', 'sub', 'a'],
+        $sandbox->load('return require("a"), require("sub.b"), require("sub"), (require("link-in"))')->call(),
+    );
+    $attempts = [
+        '../secret', '..secret', '/etc/passwd', 'link-out', 'linkdir.x', 'sub.relative-out', 'sub.up..secret',
+        "$directory/secret",
+    ];
     foreach ($attempts as $name) {
         $escaped = str_replace('.', '/', $name);
         [$ok, $message] = $sandbox->load('return pcall(require, ...)')->call($name);
         assertSame(false, $ok, $name);
-        assertSame("module '$name' not found:\n\tno host module '$name'\n\tno file '$escaped.lua'\n\tno file '$escaped/init.lua'", $message);
+        assertSame(
+            "module '$name' not found:\n\tno host module '$name'\n\tno file '$escaped.lua'"
+                . "\n\tno file '$escaped/init.lua'",
+            $message,
+        );
     }
     assertSame([], $leaked);
     // scripts by name, with '@' and the name as chunk name
     file_put_contents("$directory/root/sub/fails.lua", 'error("x")');
-    assertSame('sub/fails.lua:1: x', assertThrows(\LuaPhp\Embed\RuntimeError::class, static fn () => $environment->run('sub/fails.lua')));
+    assertSame(
+        'sub/fails.lua:1: x',
+        assertThrows(\LuaPhp\Embed\RuntimeError::class, static fn () => $environment->run('sub/fails.lua')),
+    );
     assertThrows(\InvalidArgumentException::class, static fn () => $environment->run('../secret.lua'));
     assertSame([], $leaked);
 }
@@ -102,7 +119,10 @@ function test_the_array_loader(): void
     $source = $loader->getSource('a/b.lua');
     assertTrue($source instanceof Source);
     assertSame(['return ...', '@a/b.lua'], [$source->code, $source->chunkName]);
-    assertSame('Lua script not found: other.lua', assertThrows(\InvalidArgumentException::class, static fn () => $loader->getSource('other.lua')));
+    assertSame(
+        'Lua script not found: other.lua',
+        assertThrows(\InvalidArgumentException::class, static fn () => $loader->getSource('other.lua')),
+    );
     assertSame([[3], ['a.b', 'a/b.lua']], [
         (new Environment(loader: $loader))->run('a/b.lua', [3])->values,
         (new Environment(loader: $loader))->newSandbox()->load('return require("a.b")')->call(),

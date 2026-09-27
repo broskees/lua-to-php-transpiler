@@ -33,9 +33,9 @@ function baseChunk(): string
     $proto->is_vararg = true;
     $proto->maxstacksize = 2;
     $proto->code = [
-        OpCodes::CREATE_ABCk(OpCodes::OP_VARARGPREP, 0, 0, 0, 0),
-        OpCodes::CREATE_ABx(OpCodes::OP_LOADK, 0, 0),
-        OpCodes::CREATE_ABCk(OpCodes::OP_RETURN, 0, 2, 1, 0),
+        OpCodes::createABCk(OpCodes::OP_VARARGPREP, 0, 0, 0, 0),
+        OpCodes::createABx(OpCodes::OP_LOADK, 0, 0),
+        OpCodes::createABCk(OpCodes::OP_RETURN, 0, 2, 1, 0),
     ];
     $proto->k = ['hello'];
     $proto->upvalues = [new UpvalDesc('_ENV', true, 0, 0)];
@@ -107,7 +107,10 @@ function test_body_checks_report_what_is_wrong(): void
     // the "hello" constant (tag 4, size 6) replaced by a NULL string (size 0)
     $constantOffset = strpos($chunk, "\x04\x86hello");
     $nullConstant = substr($chunk, 0, $constantOffset + 1) . "\x80" . substr($chunk, $constantOffset + 7);
-    assertSame('binary string: bad binary format (bad format for constant string)', undumpError($nullConstant, $nullConstant));
+    assertSame(
+        'binary string: bad binary format (bad format for constant string)',
+        undumpError($nullConstant, $nullConstant),
+    );
 }
 
 function test_error_prefix_comes_from_the_chunk_name(): void

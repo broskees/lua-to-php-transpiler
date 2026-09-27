@@ -316,7 +316,8 @@ final class Auxiliary
         if ($name === null) {
             return null;
         }
-        MemoryLimit::reserve(3 * \strlen($name), $L->globalState->budget);  // (a module's name, any size: messages copy it)
+        // (a module's name, any size: messages copy it)
+        MemoryLimit::reserve(3 * \strlen($name), $L->globalState->budget);
         if (str_starts_with($name, Lua::LUA_GNAME . '.')) {  // name start with '_G.'?
             return substr($name, 3);  // push name without prefix
         }

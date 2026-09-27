@@ -11,8 +11,10 @@ use LuaPhp\Compiler\OpCodes as O;
 
 /**
  * Port of lparser.c (Lua 5.4.9): the recursive-descent parser. Every
- * function keeps its C name. C's 'ls' is $this->ls; C pointer arguments
- * that the callee assigns are PHP references.
+ * function keeps its C name, in camelCase: luaY_nvarstack is nvarstack
+ * (the luaY_ prefix is this class), new_localvar is newLocalvar; the
+ * entry point luaY_parser is parse. C's 'ls' is $this->ls; C pointer
+ * arguments that the callee assigns are PHP references.
  *
  * @internal
  */
@@ -63,8 +65,13 @@ final class Parser
      *
      * @throws CompileError
      */
-    public static function luaY_parser(string $input, string $chunkname, int $nCcallsAtEntry, ?int &$nesting = null, ?\Closure $reserveMemory = null): Proto
-    {
+    public static function parse(
+        string $input,
+        string $chunkname,
+        int $nCcallsAtEntry,
+        ?int &$nesting = null,
+        ?\Closure $reserveMemory = null,
+    ): Proto {
         $chunkname = Lexer::asCString($chunkname);  // C receives the name as a 'const char *'
         $mainProto = new Proto();
         $mainProto->source = $chunkname;
@@ -80,9 +87,9 @@ final class Parser
     }
 
     // lparser.c: error_expected
-    private function error_expected(int $token): never
+    private function errorExpected(int $token): never
     {
-        $this->ls->luaX_syntaxerror($this->ls->luaX_token2str($token) . ' expected');
+        $this->ls->syntaxerror($this->ls->token2str($token) . ' expected');
     }
 
     // lparser.c: errorlimit
@@ -90,7 +97,7 @@ final class Parser
     {
         $line = $fs->f->linedefined;
         $where = ($line === 0) ? 'main function' : "function at line $line";
-        $this->ls->luaX_syntaxerror("too many $what (limit is $limit) in $where");
+        $this->ls->syntaxerror("too many $what (limit is $limit) in $where");
     }
 
     // lparser.c: checklimit
@@ -105,7 +112,7 @@ final class Parser
     private function testnext(int $c): bool
     {
         if ($this->ls->t->token === $c) {
-            $this->ls->luaX_next();
+            $this->ls->nextToken();
             return true;
         }
         return false;
@@ -115,7 +122,7 @@ final class Parser
     private function check(int $c): void
     {
         if ($this->ls->t->token !== $c) {
-            $this->error_expected($c);
+            $this->errorExpected($c);
         }
     }
 
@@ -123,40 +130,40 @@ final class Parser
     private function checknext(int $c): void
     {
         $this->check($c);
-        $this->ls->luaX_next();
+        $this->ls->nextToken();
     }
 
     // lparser.c: check_condition
-    private function check_condition(bool $condition, string $message): void
+    private function checkCondition(bool $condition, string $message): void
     {
         if (!$condition) {
-            $this->ls->luaX_syntaxerror($message);
+            $this->ls->syntaxerror($message);
         }
     }
 
     // lparser.c: check_match
-    private function check_match(int $what, int $who, int $where): void
+    private function checkMatch(int $what, int $who, int $where): void
     {
         if (!$this->testnext($what)) {
             if ($where === $this->ls->linenumber) {  // all in the same line?
-                $this->error_expected($what);  // do not need a complex message
+                $this->errorExpected($what);  // do not need a complex message
             }
-            $this->ls->luaX_syntaxerror($this->ls->luaX_token2str($what) . ' expected (to close '
-                . $this->ls->luaX_token2str($who) . " at line $where)");
+            $this->ls->syntaxerror($this->ls->token2str($what) . ' expected (to close '
+                . $this->ls->token2str($who) . " at line $where)");
         }
     }
 
     // lparser.c: str_checkname
-    private function str_checkname(): string
+    private function strCheckname(): string
     {
         $this->check(X::TK_NAME);
         $name = $this->ls->t->seminfo;
-        $this->ls->luaX_next();
+        $this->ls->nextToken();
         return $name;
     }
 
     // lparser.c: init_exp
-    private static function init_exp(E $e, int $k, int $info): void
+    private static function initExp(E $e, int $k, int $info): void
     {
         $e->f = $e->t = K::NO_JUMP;
         $e->k = $k;
@@ -174,7 +181,7 @@ final class Parser
     // lparser.c: codename
     private function codename(E $e): void
     {
-        self::codestring($e, $this->str_checkname());
+        self::codestring($e, $this->strCheckname());
     }
 
     // lparser.c: registerlocalvar (debug information)
@@ -186,7 +193,7 @@ final class Parser
     }
 
     // lparser.c: new_localvar (returns its index in the function)
-    private function new_localvar(string $name): int
+    private function newLocalvar(string $name): int
     {
         $fs = $this->ls->fs;
         $dyd = $this->ls->dyd;
@@ -226,7 +233,7 @@ final class Parser
     }
 
     // lparser.c: luaY_nvarstack (number of variables in the register stack)
-    public static function luaY_nvarstack(FuncState $fs): int
+    public static function nvarstack(FuncState $fs): int
     {
         return self::reglevel($fs, $fs->nactvar);
     }
@@ -242,7 +249,7 @@ final class Parser
     }
 
     // lparser.c: init_var
-    private static function init_var(FuncState $fs, E $e, int $vidx): void
+    private static function initVar(FuncState $fs, E $e, int $vidx): void
     {
         $e->f = $e->t = K::NO_JUMP;
         $e->k = E::VLOCAL;
@@ -251,7 +258,7 @@ final class Parser
     }
 
     // lparser.c: check_readonly
-    private function check_readonly(E $e): void
+    private function checkReadonly(E $e): void
     {
         $fs = $this->ls->fs;
         $varname = null;  // to be set if variable is const
@@ -275,7 +282,7 @@ final class Parser
                 return;  // other cases cannot be read-only
         }
         if ($varname !== null) {
-            K::luaK_semerror($this->ls, "attempt to assign to const variable '$varname'");
+            K::semerror($this->ls, "attempt to assign to const variable '$varname'");
         }
     }
 
@@ -283,7 +290,7 @@ final class Parser
     private function adjustlocalvars(int $nvars): void
     {
         $fs = $this->ls->fs;
-        $reglevel = self::luaY_nvarstack($fs);
+        $reglevel = self::nvarstack($fs);
         for ($i = 0; $i < $nvars; $i++) {
             $vidx = $fs->nactvar++;
             $var = self::getlocalvardesc($fs, $vidx);
@@ -353,9 +360,9 @@ final class Parser
             $vd = self::getlocalvardesc($fs, $i);
             if ($n === $vd->name) {  // found?
                 if ($vd->kind === Vardesc::RDKCTC) {  // compile-time constant?
-                    self::init_exp($var, E::VCONST, $fs->firstlocal + $i);
+                    self::initExp($var, E::VCONST, $fs->firstlocal + $i);
                 } else {  // real variable
-                    self::init_var($fs, $var, $i);
+                    self::initVar($fs, $var, $i);
                 }
                 return $var->k;
             }
@@ -391,7 +398,7 @@ final class Parser
     private function singlevaraux(?FuncState $fs, string $n, E $var, bool $base): void
     {
         if ($fs === null) {  // no more levels?
-            self::init_exp($var, E::VVOID, 0);  // default is global
+            self::initExp($var, E::VVOID, 0);  // default is global
             return;
         }
         $kind = self::searchvar($fs, $n, $var);  // look up locals at current level
@@ -410,21 +417,21 @@ final class Parser
             }
             $idx = $this->newupvalue($fs, $n, $var);  // will be a new upvalue
         }
-        self::init_exp($var, E::VUPVAL, $idx);  // new or old upvalue
+        self::initExp($var, E::VUPVAL, $idx);  // new or old upvalue
     }
 
     // lparser.c: singlevar (find a variable, handling global variables too)
     private function singlevar(E $var): void
     {
-        $varname = $this->str_checkname();
+        $varname = $this->strCheckname();
         $fs = $this->ls->fs;
         $this->singlevaraux($fs, $varname, $var, true);
         if ($var->k === E::VVOID) {  // global name?
             $key = new E();
             $this->singlevaraux($fs, $this->ls->envn, $var, true);  // get environment variable
-            K::luaK_exp2anyregup($fs, $var);  // but could be a constant
+            K::exp2anyregup($fs, $var);  // but could be a constant
             self::codestring($key, $varname);  // key is variable name
-            K::luaK_indexed($fs, $var, $key);  // env[varname]
+            K::indexed($fs, $var, $key);  // env[varname]
         }
     }
 
@@ -435,7 +442,7 @@ final class Parser
     }
 
     // lparser.c: adjust_assign (adjust 'nexps' expressions, the last one 'e', to 'nvars' values)
-    private function adjust_assign(int $nvars, int $nexps, E $e): void
+    private function adjustAssign(int $nvars, int $nexps, E $e): void
     {
         $fs = $this->ls->fs;
         $needed = $nvars - $nexps;  // extra values needed
@@ -444,17 +451,17 @@ final class Parser
             if ($extra < 0) {
                 $extra = 0;
             }
-            K::luaK_setreturns($fs, $e, $extra);  // last exp. provides the difference
+            K::setreturns($fs, $e, $extra);  // last exp. provides the difference
         } else {
             if ($e->k !== E::VVOID) {  // at least one expression?
-                K::luaK_exp2nextreg($fs, $e);  // close last expression
+                K::exp2nextreg($fs, $e);  // close last expression
             }
             if ($needed > 0) {  // missing values?
-                K::luaK_nil($fs, $fs->freereg, $needed);  // complete with nils
+                K::nil($fs, $fs->freereg, $needed);  // complete with nils
             }
         }
         if ($needed > 0) {
-            K::luaK_reserveregs($fs, $needed);  // registers for extra values
+            K::reserveregs($fs, $needed);  // registers for extra values
         } else {  // adding 'needed' is actually a subtraction
             $fs->freereg += $needed;  // remove extra values
         }
@@ -493,7 +500,7 @@ final class Parser
     private function jumpscopeerror(Labeldesc $gt): never
     {
         $varname = self::getlocalvardesc($this->ls->fs, $gt->nactvar)->name;
-        K::luaK_semerror($this->ls, "<goto {$gt->name}> at line {$gt->line} jumps into the scope of local '$varname'");
+        K::semerror($this->ls, "<goto {$gt->name}> at line {$gt->line} jumps into the scope of local '$varname'");
     }
 
     // lparser.c: solvegoto (solve pending goto 'g' to 'label' and remove it)
@@ -504,7 +511,7 @@ final class Parser
         if ($gt->nactvar < $label->nactvar) {  // enter some scope?
             $this->jumpscopeerror($gt);
         }
-        K::luaK_patchlist($this->ls->fs, $gt->pc, $label->pc);
+        K::patchlist($this->ls->fs, $gt->pc, $label->pc);
         array_splice($gotoList, $g, 1);  // remove goto from pending list
     }
 
@@ -568,14 +575,14 @@ final class Parser
     private function createlabel(string $name, int $line, bool $last): bool
     {
         $fs = $this->ls->fs;
-        $l = $this->newlabelentry($this->ls->dyd->label, $name, $line, K::luaK_getlabel($fs));
+        $l = $this->newlabelentry($this->ls->dyd->label, $name, $line, K::getlabel($fs));
         $label = $this->ls->dyd->label[$l];
         if ($last) {  // label is last no-op statement in the block?
             // assume that locals are already out of scope
             $label->nactvar = $fs->bl->nactvar;
         }
         if ($this->solvegotos($label)) {  // need close?
-            K::luaK_codeABC($fs, O::OP_CLOSE, self::luaY_nvarstack($fs), 0, 0);
+            K::codeABC($fs, O::OP_CLOSE, self::nvarstack($fs), 0, 0);
             return true;
         }
         return false;
@@ -618,7 +625,7 @@ final class Parser
         } else {
             $message = "no visible label '{$gt->name}' for <goto> at line {$gt->line}";
         }
-        K::luaK_semerror($this->ls, $message);
+        K::semerror($this->ls, $message);
     }
 
     // lparser.c: leaveblock
@@ -633,7 +640,7 @@ final class Parser
             $hasclose = $this->createlabel('break', 0, false);
         }
         if (!$hasclose && $bl->previous !== null && $bl->upval) {  // still need a 'close'?
-            K::luaK_codeABC($fs, O::OP_CLOSE, $stklevel, 0, 0);
+            K::codeABC($fs, O::OP_CLOSE, $stklevel, 0, 0);
         }
         $fs->freereg = $stklevel;  // free registers
         array_splice($ls->dyd->label, $bl->firstlabel);  // remove local labels
@@ -649,7 +656,7 @@ final class Parser
     private function addprototype(): Proto
     {
         $fs = $this->ls->fs;
-        K::checkVectorLimit($fs->np, O::MAXARG_Bx, 'functions');
+        K::checkVectorLimit($fs->np, O::MAXARG_BX, 'functions');
         $clp = new Proto();
         $fs->f->p[$fs->np++] = $clp;
         return $clp;
@@ -662,12 +669,12 @@ final class Parser
     private function codeclosure(E $v): void
     {
         $fs = $this->ls->fs->prev;
-        self::init_exp($v, E::VRELOC, K::luaK_codeABx($fs, O::OP_CLOSURE, 0, $fs->np - 1));
-        K::luaK_exp2nextreg($fs, $v);  // fix it at the last register
+        self::initExp($v, E::VRELOC, K::codeABx($fs, O::OP_CLOSURE, 0, $fs->np - 1));
+        K::exp2nextreg($fs, $v);  // fix it at the last register
     }
 
     // lparser.c: open_func
-    private function open_func(FuncState $fs, BlockCnt $bl): void
+    private function openFunc(FuncState $fs, BlockCnt $bl): void
     {
         $f = $fs->f;
         $fs->prev = $this->ls->fs;  // linked list of funcstates
@@ -693,13 +700,13 @@ final class Parser
     }
 
     // lparser.c: close_func
-    private function close_func(): void
+    private function closeFunc(): void
     {
         $fs = $this->ls->fs;
         $f = $fs->f;
-        K::luaK_ret($fs, self::luaY_nvarstack($fs), 0);  // final return
+        K::ret($fs, self::nvarstack($fs), 0);  // final return
         $this->leaveblock($fs);
-        K::luaK_finish($fs);
+        K::finish($fs);
         // luaM_shrinkvector: keep only the used part of each vector
         $f->code = array_slice($f->code, 0, $fs->pc);
         $f->lineinfo = array_slice($f->lineinfo, 0, $fs->pc);
@@ -719,7 +726,7 @@ final class Parser
      * lparser.c: block_follow. 'until' closes syntactical blocks, but do
      * not close scope, so it is handled in separate.
      */
-    private function block_follow(bool $withuntil): bool
+    private function blockFollow(bool $withuntil): bool
     {
         switch ($this->ls->t->token) {
             case X::TK_ELSE:
@@ -738,7 +745,7 @@ final class Parser
     private function statlist(): void
     {
         // statlist -> { stat [';'] }
-        while (!$this->block_follow(true)) {
+        while (!$this->blockFollow(true)) {
             if ($this->ls->t->token === X::TK_RETURN) {
                 $this->statement();
                 return;  // 'return' must be last statement
@@ -753,19 +760,19 @@ final class Parser
         // fieldsel -> ['.' | ':'] NAME
         $fs = $this->ls->fs;
         $key = new E();
-        K::luaK_exp2anyregup($fs, $v);
-        $this->ls->luaX_next();  // skip the dot or colon
+        K::exp2anyregup($fs, $v);
+        $this->ls->nextToken();  // skip the dot or colon
         $this->codename($key);
-        K::luaK_indexed($fs, $v, $key);
+        K::indexed($fs, $v, $key);
     }
 
     // lparser.c: yindex
     private function yindex(E $v): void
     {
         // index -> '[' expr ']'
-        $this->ls->luaX_next();  // skip the '['
+        $this->ls->nextToken();  // skip the '['
         $this->expr($v);
-        K::luaK_exp2val($this->ls->fs, $v);
+        K::exp2val($this->ls->fs, $v);
         $this->checknext(93);  // ']'
     }
 
@@ -793,9 +800,9 @@ final class Parser
         $cc->nh++;
         $this->checknext(61);  // '='
         $tab->copyFrom($cc->t);
-        K::luaK_indexed($fs, $tab, $key);
+        K::indexed($fs, $tab, $key);
         $this->expr($val);
-        K::luaK_storevar($fs, $tab, $val);
+        K::storevar($fs, $tab, $val);
         $fs->freereg = $reg;  // free registers
     }
 
@@ -805,10 +812,10 @@ final class Parser
         if ($cc->v->k === E::VVOID) {
             return;  // there is no list item
         }
-        K::luaK_exp2nextreg($fs, $cc->v);
+        K::exp2nextreg($fs, $cc->v);
         $cc->v->k = E::VVOID;
         if ($cc->tostore === O::LFIELDS_PER_FLUSH) {
-            K::luaK_setlist($fs, $cc->t->info, $cc->na, $cc->tostore);  // flush
+            K::setlist($fs, $cc->t->info, $cc->na, $cc->tostore);  // flush
             $cc->na += $cc->tostore;
             $cc->tostore = 0;  // no more items pending
         }
@@ -821,14 +828,14 @@ final class Parser
             return;
         }
         if (self::hasmultret($cc->v->k)) {
-            K::luaK_setmultret($fs, $cc->v);
-            K::luaK_setlist($fs, $cc->t->info, $cc->na, K::LUA_MULTRET);
+            K::setmultret($fs, $cc->v);
+            K::setlist($fs, $cc->t->info, $cc->na, K::LUA_MULTRET);
             $cc->na--;  // do not count last expression (unknown number of elements)
         } else {
             if ($cc->v->k !== E::VVOID) {
-                K::luaK_exp2nextreg($fs, $cc->v);
+                K::exp2nextreg($fs, $cc->v);
             }
-            K::luaK_setlist($fs, $cc->t->info, $cc->na, $cc->tostore);
+            K::setlist($fs, $cc->t->info, $cc->na, $cc->tostore);
         }
         $cc->na += $cc->tostore;
     }
@@ -847,7 +854,7 @@ final class Parser
         // field -> listfield | recfield
         switch ($this->ls->t->token) {
             case X::TK_NAME:  // may be 'listfield' or 'recfield'
-                if ($this->ls->luaX_lookahead() !== 61) {  // expression?
+                if ($this->ls->lookahead() !== 61) {  // expression?
                     $this->listfield($cc);
                 } else {
                     $this->recfield($cc);
@@ -869,12 +876,12 @@ final class Parser
         // sep -> ',' | ';'
         $fs = $this->ls->fs;
         $line = $this->ls->linenumber;
-        $pc = K::luaK_codeABC($fs, O::OP_NEWTABLE, 0, 0, 0);
-        K::luaK_code($fs, 0);  // space for extra arg.
+        $pc = K::codeABC($fs, O::OP_NEWTABLE, 0, 0, 0);
+        K::code($fs, 0);  // space for extra arg.
         $cc = new ConsControl($t);
-        self::init_exp($t, E::VNONRELOC, $fs->freereg);  // table will be at stack top
-        K::luaK_reserveregs($fs, 1);
-        self::init_exp($cc->v, E::VVOID, 0);  // no value (yet)
+        self::initExp($t, E::VNONRELOC, $fs->freereg);  // table will be at stack top
+        K::reserveregs($fs, 1);
+        self::initExp($cc->v, E::VVOID, 0);  // no value (yet)
         $this->checknext(123);  // '{'
         do {
             if ($this->ls->t->token === 125) {  // '}'
@@ -882,11 +889,12 @@ final class Parser
             }
             self::closelistfield($fs, $cc);
             $this->field($cc);
-            $this->checklimit($fs, $cc->tostore + $cc->na + $cc->nh, intdiv(self::INT_MAX, 2), 'items in a constructor');
+            $items = $cc->tostore + $cc->na + $cc->nh;
+            $this->checklimit($fs, $items, intdiv(self::INT_MAX, 2), 'items in a constructor');
         } while ($this->testnext(44) || $this->testnext(59));  // ',' or ';'
-        $this->check_match(125, 123, $line);  // '}' to close '{'
+        $this->checkMatch(125, 123, $line);  // '}' to close '{'
         self::lastlistfield($fs, $cc);
-        K::luaK_settablesize($fs, $pc, $t->info, $cc->na, $cc->nh);
+        K::settablesize($fs, $pc, $t->info, $cc->na, $cc->nh);
     }
 
     /* }====================================================================== */
@@ -895,7 +903,7 @@ final class Parser
     private static function setvararg(FuncState $fs, int $nparams): void
     {
         $fs->f->is_vararg = true;
-        K::luaK_codeABC($fs, O::OP_VARARGPREP, $nparams, 0, 0);
+        K::codeABC($fs, O::OP_VARARGPREP, $nparams, 0, 0);
     }
 
     // lparser.c: parlist
@@ -910,15 +918,15 @@ final class Parser
             do {
                 switch ($this->ls->t->token) {
                     case X::TK_NAME:
-                        $this->new_localvar($this->str_checkname());
+                        $this->newLocalvar($this->strCheckname());
                         $nparams++;
                         break;
                     case X::TK_DOTS:
-                        $this->ls->luaX_next();
+                        $this->ls->nextToken();
                         $isvararg = true;
                         break;
                     default:
-                        $this->ls->luaX_syntaxerror("<name> or '...' expected");
+                        $this->ls->syntaxerror("<name> or '...' expected");
                 }
             } while (!$isvararg && $this->testnext(44));  // ','
         }
@@ -927,7 +935,7 @@ final class Parser
         if ($isvararg) {
             self::setvararg($fs, $f->numparams);  // declared vararg
         }
-        K::luaK_reserveregs($fs, $fs->nactvar);  // reserve registers for parameters
+        K::reserveregs($fs, $fs->nactvar);  // reserve registers for parameters
     }
 
     // lparser.c: body
@@ -936,19 +944,19 @@ final class Parser
         // body ->  '(' parlist ')' block END
         $newFs = new FuncState($this->addprototype(), $this->ls);
         $newFs->f->linedefined = $line;
-        $this->open_func($newFs, new BlockCnt());
+        $this->openFunc($newFs, new BlockCnt());
         $this->checknext(40);  // '('
         if ($ismethod) {
-            $this->new_localvar('self');  // create 'self' parameter
+            $this->newLocalvar('self');  // create 'self' parameter
             $this->adjustlocalvars(1);
         }
         $this->parlist();
         $this->checknext(41);  // ')'
         $this->statlist();
         $newFs->f->lastlinedefined = $this->ls->linenumber;
-        $this->check_match(X::TK_END, X::TK_FUNCTION, $line);
+        $this->checkMatch(X::TK_END, X::TK_FUNCTION, $line);
         $this->codeclosure($e);
-        $this->close_func();
+        $this->closeFunc();
     }
 
     // lparser.c: explist
@@ -958,7 +966,7 @@ final class Parser
         $n = 1;  // at least one expression
         $this->expr($v);
         while ($this->testnext(44)) {  // ','
-            K::luaK_exp2nextreg($this->ls->fs, $v);
+            K::exp2nextreg($this->ls->fs, $v);
             $this->expr($v);
             $n++;
         }
@@ -973,38 +981,38 @@ final class Parser
         $line = $this->ls->linenumber;
         switch ($this->ls->t->token) {
             case 40:  // funcargs -> '(' [ explist ] ')'
-                $this->ls->luaX_next();
+                $this->ls->nextToken();
                 if ($this->ls->t->token === 41) {  // arg list is empty?
                     $args->k = E::VVOID;
                 } else {
                     $this->explist($args);
                     if (self::hasmultret($args->k)) {
-                        K::luaK_setmultret($fs, $args);
+                        K::setmultret($fs, $args);
                     }
                 }
-                $this->check_match(41, 40, $line);
+                $this->checkMatch(41, 40, $line);
                 break;
             case 123:  // funcargs -> constructor
                 $this->constructor($args);
                 break;
             case X::TK_STRING:  // funcargs -> STRING
                 self::codestring($args, $this->ls->t->seminfo);
-                $this->ls->luaX_next();  // must use 'seminfo' before 'next'
+                $this->ls->nextToken();  // must use 'seminfo' before 'next'
                 break;
             default:
-                $this->ls->luaX_syntaxerror('function arguments expected');
+                $this->ls->syntaxerror('function arguments expected');
         }
         $base = $f->info;  // base register for call
         if (self::hasmultret($args->k)) {
             $nparams = K::LUA_MULTRET;  // open call
         } else {
             if ($args->k !== E::VVOID) {
-                K::luaK_exp2nextreg($fs, $args);  // close last argument
+                K::exp2nextreg($fs, $args);  // close last argument
             }
             $nparams = $fs->freereg - ($base + 1);
         }
-        self::init_exp($f, E::VCALL, K::luaK_codeABC($fs, O::OP_CALL, $base, $nparams + 1, 2));
-        K::luaK_fixline($fs, $line);
+        self::initExp($f, E::VCALL, K::codeABC($fs, O::OP_CALL, $base, $nparams + 1, 2));
+        K::fixline($fs, $line);
         // call removes function and arguments and leaves one result (unless changed later)
         $fs->freereg = $base + 1;
     }
@@ -1022,16 +1030,16 @@ final class Parser
         switch ($this->ls->t->token) {
             case 40:  // '('
                 $line = $this->ls->linenumber;
-                $this->ls->luaX_next();
+                $this->ls->nextToken();
                 $this->expr($v);
-                $this->check_match(41, 40, $line);
-                K::luaK_dischargevars($this->ls->fs, $v);
+                $this->checkMatch(41, 40, $line);
+                K::dischargevars($this->ls->fs, $v);
                 return;
             case X::TK_NAME:
                 $this->singlevar($v);
                 return;
             default:
-                $this->ls->luaX_syntaxerror('unexpected symbol');
+                $this->ls->syntaxerror('unexpected symbol');
         }
     }
 
@@ -1049,21 +1057,21 @@ final class Parser
                     break;
                 case 91:  // '[' exp ']'
                     $key = new E();
-                    K::luaK_exp2anyregup($fs, $v);
+                    K::exp2anyregup($fs, $v);
                     $this->yindex($key);
-                    K::luaK_indexed($fs, $v, $key);
+                    K::indexed($fs, $v, $key);
                     break;
                 case 58:  // ':' NAME funcargs
                     $key = new E();
-                    $this->ls->luaX_next();
+                    $this->ls->nextToken();
                     $this->codename($key);
-                    K::luaK_self($fs, $v, $key);
+                    K::self($fs, $v, $key);
                     $this->funcargs($v);
                     break;
                 case 40:  // '('
                 case X::TK_STRING:
                 case 123:  // '{': funcargs
-                    K::luaK_exp2nextreg($fs, $v);
+                    K::exp2nextreg($fs, $v);
                     $this->funcargs($v);
                     break;
                 default:
@@ -1079,42 +1087,42 @@ final class Parser
         //              constructor | FUNCTION body | suffixedexp
         switch ($this->ls->t->token) {
             case X::TK_FLT:
-                self::init_exp($v, E::VKFLT, 0);
+                self::initExp($v, E::VKFLT, 0);
                 $v->nval = $this->ls->t->seminfo;
                 break;
             case X::TK_INT:
-                self::init_exp($v, E::VKINT, 0);
+                self::initExp($v, E::VKINT, 0);
                 $v->ival = $this->ls->t->seminfo;
                 break;
             case X::TK_STRING:
                 self::codestring($v, $this->ls->t->seminfo);
                 break;
             case X::TK_NIL:
-                self::init_exp($v, E::VNIL, 0);
+                self::initExp($v, E::VNIL, 0);
                 break;
             case X::TK_TRUE:
-                self::init_exp($v, E::VTRUE, 0);
+                self::initExp($v, E::VTRUE, 0);
                 break;
             case X::TK_FALSE:
-                self::init_exp($v, E::VFALSE, 0);
+                self::initExp($v, E::VFALSE, 0);
                 break;
             case X::TK_DOTS:  // vararg
                 $fs = $this->ls->fs;
-                $this->check_condition($fs->f->is_vararg, "cannot use '...' outside a vararg function");
-                self::init_exp($v, E::VVARARG, K::luaK_codeABC($fs, O::OP_VARARG, 0, 0, 1));
+                $this->checkCondition($fs->f->is_vararg, "cannot use '...' outside a vararg function");
+                self::initExp($v, E::VVARARG, K::codeABC($fs, O::OP_VARARG, 0, 0, 1));
                 break;
             case 123:  // '{': constructor
                 $this->constructor($v);
                 return;
             case X::TK_FUNCTION:
-                $this->ls->luaX_next();
+                $this->ls->nextToken();
                 $this->body($v, false, $this->ls->linenumber);
                 return;
             default:
                 $this->suffixedexp($v);
                 return;
         }
-        $this->ls->luaX_next();
+        $this->ls->nextToken();
     }
 
     // lparser.c: getunopr
@@ -1169,9 +1177,9 @@ final class Parser
         $uop = self::getunopr($this->ls->t->token);
         if ($uop !== K::OPR_NOUNOPR) {  // prefix (unary) operator?
             $line = $this->ls->linenumber;
-            $this->ls->luaX_next();  // skip operator
+            $this->ls->nextToken();  // skip operator
             $this->subexpr($v, self::UNARY_PRIORITY);
-            K::luaK_prefix($this->ls->fs, $uop, $v, $line);
+            K::prefix($this->ls->fs, $uop, $v, $line);
         } else {
             $this->simpleexp($v);
         }
@@ -1180,11 +1188,11 @@ final class Parser
         while ($op !== K::OPR_NOBINOPR && self::PRIORITY[$op][0] > $limit) {
             $v2 = new E();
             $line = $this->ls->linenumber;
-            $this->ls->luaX_next();  // skip operator
-            K::luaK_infix($this->ls->fs, $op, $v);
+            $this->ls->nextToken();  // skip operator
+            K::infix($this->ls->fs, $op, $v);
             // read sub-expression with higher priority
             $nextop = $this->subexpr($v2, self::PRIORITY[$op][1]);
-            K::luaK_posfix($this->ls->fs, $op, $v, $v2, $line);
+            K::posfix($this->ls->fs, $op, $v, $v2, $line);
             $op = $nextop;
         }
         $this->leavelevel();
@@ -1222,7 +1230,7 @@ final class Parser
      * of the list, save its original value in a safe place and use the
      * copy there.
      */
-    private function check_conflict(?LhsAssign $lh, E $v): void
+    private function checkConflict(?LhsAssign $lh, E $v): void
     {
         $fs = $this->ls->fs;
         $extra = $fs->freereg;  // eventual position to save local variable
@@ -1253,11 +1261,11 @@ final class Parser
         if ($conflict) {
             // copy upvalue/local value to a temporary (in position 'extra')
             if ($v->k === E::VLOCAL) {
-                K::luaK_codeABC($fs, O::OP_MOVE, $extra, $v->varRidx, 0);
+                K::codeABC($fs, O::OP_MOVE, $extra, $v->varRidx, 0);
             } else {
-                K::luaK_codeABC($fs, O::OP_GETUPVAL, $extra, $v->info, 0);
+                K::codeABC($fs, O::OP_GETUPVAL, $extra, $v->info, 0);
             }
-            K::luaK_reserveregs($fs, 1);
+            K::reserveregs($fs, 1);
         }
     }
 
@@ -1271,13 +1279,13 @@ final class Parser
     private function restassign(LhsAssign $lh, int $nvars): void
     {
         $e = new E();
-        $this->check_condition(E::vkisvar($lh->v->k), 'syntax error');
-        $this->check_readonly($lh->v);
+        $this->checkCondition(E::vkisvar($lh->v->k), 'syntax error');
+        $this->checkReadonly($lh->v);
         if ($this->testnext(44)) {  // restassign -> ',' suffixedexp restassign
             $nv = new LhsAssign($lh);
             $this->suffixedexp($nv->v);
             if (!E::vkisindexed($nv->v->k)) {
-                $this->check_conflict($lh, $nv->v);
+                $this->checkConflict($lh, $nv->v);
             }
             $this->enterlevel();  // control recursion depth
             $this->restassign($nv, $nvars + 1);
@@ -1286,15 +1294,15 @@ final class Parser
             $this->checknext(61);  // '='
             $nexps = $this->explist($e);
             if ($nexps !== $nvars) {
-                $this->adjust_assign($nvars, $nexps, $e);
+                $this->adjustAssign($nvars, $nexps, $e);
             } else {
-                K::luaK_setoneret($this->ls->fs, $e);  // close last expression
-                K::luaK_storevar($this->ls->fs, $lh->v, $e);
+                K::setoneret($this->ls->fs, $e);  // close last expression
+                K::storevar($this->ls->fs, $lh->v, $e);
                 return;  // avoid default
             }
         }
-        self::init_exp($e, E::VNONRELOC, $this->ls->fs->freereg - 1);  // default assignment
-        K::luaK_storevar($this->ls->fs, $lh->v, $e);
+        self::initExp($e, E::VNONRELOC, $this->ls->fs->freereg - 1);  // default assignment
+        K::storevar($this->ls->fs, $lh->v, $e);
     }
 
     // lparser.c: cond
@@ -1306,7 +1314,7 @@ final class Parser
         if ($v->k === E::VNIL) {
             $v->k = E::VFALSE;  // 'falses' are all equal here
         }
-        K::luaK_goiftrue($this->ls->fs, $v);
+        K::goiftrue($this->ls->fs, $v);
         return $v->f;
     }
 
@@ -1315,28 +1323,28 @@ final class Parser
     {
         $fs = $this->ls->fs;
         $line = $this->ls->linenumber;
-        $name = $this->str_checkname();  // label's name
+        $name = $this->strCheckname();  // label's name
         $lb = $this->findlabel($name);
         if ($lb === null) {  // no label?
             // forward jump; will be resolved when the label is declared
-            $this->newgotoentry($name, $line, K::luaK_jump($fs));
+            $this->newgotoentry($name, $line, K::jump($fs));
             return;
         }
         // found a label: backward jump; will be resolved here
         $lblevel = self::reglevel($fs, $lb->nactvar);  // label level
-        if (self::luaY_nvarstack($fs) > $lblevel) {  // leaving the scope of a variable?
-            K::luaK_codeABC($fs, O::OP_CLOSE, $lblevel, 0, 0);
+        if (self::nvarstack($fs) > $lblevel) {  // leaving the scope of a variable?
+            K::codeABC($fs, O::OP_CLOSE, $lblevel, 0, 0);
         }
         // create jump and link it to the label
-        K::luaK_patchlist($fs, K::luaK_jump($fs), $lb->pc);
+        K::patchlist($fs, K::jump($fs), $lb->pc);
     }
 
     // lparser.c: breakstat (semantically equivalent to "goto break")
     private function breakstat(): void
     {
         $line = $this->ls->linenumber;
-        $this->ls->luaX_next();  // skip break
-        $this->newgotoentry('break', $line, K::luaK_jump($this->ls->fs));
+        $this->ls->nextToken();  // skip break
+        $this->newgotoentry('break', $line, K::jump($this->ls->fs));
     }
 
     // lparser.c: checkrepeated (check whether there is already a label with the given 'name')
@@ -1344,7 +1352,7 @@ final class Parser
     {
         $lb = $this->findlabel($name);
         if ($lb !== null) {  // already defined?
-            K::luaK_semerror($this->ls, "label '$name' already defined on line {$lb->line}");
+            K::semerror($this->ls, "label '$name' already defined on line {$lb->line}");
         }
     }
 
@@ -1357,7 +1365,7 @@ final class Parser
             $this->statement();  // skip other no-op statements
         }
         $this->checkrepeated($name);  // check for repeated labels
-        $this->createlabel($name, $line, $this->block_follow(false));
+        $this->createlabel($name, $line, $this->blockFollow(false));
     }
 
     // lparser.c: whilestat
@@ -1366,16 +1374,16 @@ final class Parser
         // whilestat -> WHILE cond DO block END
         $fs = $this->ls->fs;
         $bl = new BlockCnt();
-        $this->ls->luaX_next();  // skip WHILE
-        $whileinit = K::luaK_getlabel($fs);
+        $this->ls->nextToken();  // skip WHILE
+        $whileinit = K::getlabel($fs);
         $condexit = $this->cond();
         self::enterblock($fs, $bl, true);
         $this->checknext(X::TK_DO);
         $this->block();
-        K::luaK_jumpto($fs, $whileinit);
-        $this->check_match(X::TK_END, X::TK_WHILE, $line);
+        K::jumpto($fs, $whileinit);
+        $this->checkMatch(X::TK_END, X::TK_WHILE, $line);
         $this->leaveblock($fs);
-        K::luaK_patchtohere($fs, $condexit);  // false conditions finish the loop
+        K::patchtohere($fs, $condexit);  // false conditions finish the loop
     }
 
     // lparser.c: repeatstat
@@ -1383,24 +1391,24 @@ final class Parser
     {
         // repeatstat -> REPEAT block UNTIL cond
         $fs = $this->ls->fs;
-        $repeatInit = K::luaK_getlabel($fs);
+        $repeatInit = K::getlabel($fs);
         $bl1 = new BlockCnt();
         $bl2 = new BlockCnt();
         self::enterblock($fs, $bl1, true);  // loop block
         self::enterblock($fs, $bl2, false);  // scope block
-        $this->ls->luaX_next();  // skip REPEAT
+        $this->ls->nextToken();  // skip REPEAT
         $this->statlist();
-        $this->check_match(X::TK_UNTIL, X::TK_REPEAT, $line);
+        $this->checkMatch(X::TK_UNTIL, X::TK_REPEAT, $line);
         $condexit = $this->cond();  // read condition (inside scope block)
         $this->leaveblock($fs);  // finish scope
         if ($bl2->upval) {  // upvalues?
-            $exit = K::luaK_jump($fs);  // normal exit must jump over fix
-            K::luaK_patchtohere($fs, $condexit);  // repetition must close upvalues
-            K::luaK_codeABC($fs, O::OP_CLOSE, self::reglevel($fs, $bl2->nactvar), 0, 0);
-            $condexit = K::luaK_jump($fs);  // repeat after closing upvalues
-            K::luaK_patchtohere($fs, $exit);  // normal exit comes to here
+            $exit = K::jump($fs);  // normal exit must jump over fix
+            K::patchtohere($fs, $condexit);  // repetition must close upvalues
+            K::codeABC($fs, O::OP_CLOSE, self::reglevel($fs, $bl2->nactvar), 0, 0);
+            $condexit = K::jump($fs);  // repeat after closing upvalues
+            K::patchtohere($fs, $exit);  // normal exit comes to here
         }
-        K::luaK_patchlist($fs, $condexit, $repeatInit);  // close the loop
+        K::patchlist($fs, $condexit, $repeatInit);  // close the loop
         $this->leaveblock($fs);  // finish loop
     }
 
@@ -1409,7 +1417,7 @@ final class Parser
     {
         $e = new E();
         $this->expr($e);
-        K::luaK_exp2nextreg($this->ls->fs, $e);
+        K::exp2nextreg($this->ls->fs, $e);
     }
 
     /**
@@ -1422,10 +1430,10 @@ final class Parser
         if ($back) {
             $offset = -$offset;
         }
-        if ($offset > O::MAXARG_Bx) {
-            $this->ls->luaX_syntaxerror('control structure too long');
+        if ($offset > O::MAXARG_BX) {
+            $this->ls->syntaxerror('control structure too long');
         }
-        $fs->f->code[$pc] = O::SETARG_Bx($fs->f->code[$pc], $offset);
+        $fs->f->code[$pc] = O::setArgBx($fs->f->code[$pc], $offset);
     }
 
     // lparser.c: forbody (generate code for a 'for' loop)
@@ -1435,20 +1443,20 @@ final class Parser
         $bl = new BlockCnt();
         $fs = $this->ls->fs;
         $this->checknext(X::TK_DO);
-        $prep = K::luaK_codeABx($fs, $isgen ? O::OP_TFORPREP : O::OP_FORPREP, $base, 0);
+        $prep = K::codeABx($fs, $isgen ? O::OP_TFORPREP : O::OP_FORPREP, $base, 0);
         self::enterblock($fs, $bl, false);  // scope for declared variables
         $this->adjustlocalvars($nvars);
-        K::luaK_reserveregs($fs, $nvars);
+        K::reserveregs($fs, $nvars);
         $this->block();
         $this->leaveblock($fs);  // end of scope for declared variables
-        $this->fixforjump($fs, $prep, K::luaK_getlabel($fs), false);
+        $this->fixforjump($fs, $prep, K::getlabel($fs), false);
         if ($isgen) {  // generic for?
-            K::luaK_codeABC($fs, O::OP_TFORCALL, $base, 0, $nvars);
-            K::luaK_fixline($fs, $line);
+            K::codeABC($fs, O::OP_TFORCALL, $base, 0, $nvars);
+            K::fixline($fs, $line);
         }
-        $endfor = K::luaK_codeABx($fs, $isgen ? O::OP_TFORLOOP : O::OP_FORLOOP, $base, 0);
+        $endfor = K::codeABx($fs, $isgen ? O::OP_TFORLOOP : O::OP_FORLOOP, $base, 0);
         $this->fixforjump($fs, $endfor, $prep + 1, true);
-        K::luaK_fixline($fs, $line);
+        K::fixline($fs, $line);
     }
 
     // lparser.c: fornum
@@ -1457,10 +1465,10 @@ final class Parser
         // fornum -> NAME = exp,exp[,exp] forbody
         $fs = $this->ls->fs;
         $base = $fs->freereg;
-        $this->new_localvar('(for state)');
-        $this->new_localvar('(for state)');
-        $this->new_localvar('(for state)');
-        $this->new_localvar($varname);
+        $this->newLocalvar('(for state)');
+        $this->newLocalvar('(for state)');
+        $this->newLocalvar('(for state)');
+        $this->newLocalvar($varname);
         $this->checknext(61);  // '='
         $this->exp1();  // initial value
         $this->checknext(44);  // ','
@@ -1468,8 +1476,8 @@ final class Parser
         if ($this->testnext(44)) {
             $this->exp1();  // optional step
         } else {  // default step = 1
-            K::luaK_int($fs, $fs->freereg, 1);
-            K::luaK_reserveregs($fs, 1);
+            K::int($fs, $fs->freereg, 1);
+            K::reserveregs($fs, 1);
         }
         $this->adjustlocalvars(3);  // control variables
         $this->forbody($base, $line, 1, false);
@@ -1484,22 +1492,22 @@ final class Parser
         $nvars = 5;  // gen, state, control, toclose, 'indexname'
         $base = $fs->freereg;
         // create control variables
-        $this->new_localvar('(for state)');
-        $this->new_localvar('(for state)');
-        $this->new_localvar('(for state)');
-        $this->new_localvar('(for state)');
+        $this->newLocalvar('(for state)');
+        $this->newLocalvar('(for state)');
+        $this->newLocalvar('(for state)');
+        $this->newLocalvar('(for state)');
         // create declared variables
-        $this->new_localvar($indexname);
+        $this->newLocalvar($indexname);
         while ($this->testnext(44)) {  // ','
-            $this->new_localvar($this->str_checkname());
+            $this->newLocalvar($this->strCheckname());
             $nvars++;
         }
         $this->checknext(X::TK_IN);
         $line = $this->ls->linenumber;
-        $this->adjust_assign(4, $this->explist($e), $e);
+        $this->adjustAssign(4, $this->explist($e), $e);
         $this->adjustlocalvars(4);  // control variables
         self::marktobeclosed($fs);  // last control var. must be closed
-        K::luaK_checkstack($fs, 3);  // extra space to call generator
+        K::checkstack($fs, 3);  // extra space to call generator
         $this->forbody($base, $line, $nvars - 4, true);
     }
 
@@ -1510,8 +1518,8 @@ final class Parser
         $fs = $this->ls->fs;
         $bl = new BlockCnt();
         self::enterblock($fs, $bl, true);  // scope for loop and control variables
-        $this->ls->luaX_next();  // skip 'for'
-        $varname = $this->str_checkname();  // first variable name
+        $this->ls->nextToken();  // skip 'for'
+        $varname = $this->strCheckname();  // first variable name
         switch ($this->ls->t->token) {
             case 61:  // '='
                 $this->fornum($varname, $line);
@@ -1521,47 +1529,48 @@ final class Parser
                 $this->forlist($varname);
                 break;
             default:
-                $this->ls->luaX_syntaxerror("'=' or 'in' expected");
+                $this->ls->syntaxerror("'=' or 'in' expected");
         }
-        $this->check_match(X::TK_END, X::TK_FOR, $line);
+        $this->checkMatch(X::TK_END, X::TK_FOR, $line);
         $this->leaveblock($fs);  // loop scope ('break' jumps to this point)
     }
 
     // lparser.c: test_then_block
-    private function test_then_block(int &$escapelist): void
+    private function testThenBlock(int &$escapelist): void
     {
         // test_then_block -> [IF | ELSEIF] cond THEN block
         $bl = new BlockCnt();
         $fs = $this->ls->fs;
         $v = new E();
-        $this->ls->luaX_next();  // skip IF or ELSEIF
+        $this->ls->nextToken();  // skip IF or ELSEIF
         $this->expr($v);  // read condition
         $this->checknext(X::TK_THEN);
         if ($this->ls->t->token === X::TK_BREAK) {  // 'if x then break' ?
             $line = $this->ls->linenumber;
-            K::luaK_goiffalse($this->ls->fs, $v);  // will jump if condition is true
-            $this->ls->luaX_next();  // skip 'break'
+            K::goiffalse($this->ls->fs, $v);  // will jump if condition is true
+            $this->ls->nextToken();  // skip 'break'
             self::enterblock($fs, $bl, false);  // must enter block before 'goto'
             $this->newgotoentry('break', $line, $v->t);
             while ($this->testnext(59)) {  // skip semicolons
             }
-            if ($this->block_follow(false)) {  // jump is the entire block?
+            if ($this->blockFollow(false)) {  // jump is the entire block?
                 $this->leaveblock($fs);
                 return;  // and that is it
             }
             // else must skip over 'then' part if condition is false
-            $jf = K::luaK_jump($fs);
+            $jf = K::jump($fs);
         } else {  // regular case (not a break)
-            K::luaK_goiftrue($this->ls->fs, $v);  // skip over block if condition is false
+            K::goiftrue($this->ls->fs, $v);  // skip over block if condition is false
             self::enterblock($fs, $bl, false);
             $jf = $v->f;
         }
         $this->statlist();  // 'then' part
         $this->leaveblock($fs);
-        if ($this->ls->t->token === X::TK_ELSE || $this->ls->t->token === X::TK_ELSEIF) {  // followed by 'else'/'elseif'?
-            K::luaK_concat($fs, $escapelist, K::luaK_jump($fs));  // must jump over it
+        if ($this->ls->t->token === X::TK_ELSE || $this->ls->t->token === X::TK_ELSEIF) {
+            // followed by 'else'/'elseif'?
+            K::concat($fs, $escapelist, K::jump($fs));  // must jump over it
         }
-        K::luaK_patchtohere($fs, $jf);
+        K::patchtohere($fs, $jf);
     }
 
     // lparser.c: ifstat
@@ -1570,15 +1579,15 @@ final class Parser
         // ifstat -> IF cond THEN block {ELSEIF cond THEN block} [ELSE block] END
         $fs = $this->ls->fs;
         $escapelist = K::NO_JUMP;  // exit list for finished parts
-        $this->test_then_block($escapelist);  // IF cond THEN block
+        $this->testThenBlock($escapelist);  // IF cond THEN block
         while ($this->ls->t->token === X::TK_ELSEIF) {
-            $this->test_then_block($escapelist);  // ELSEIF cond THEN block
+            $this->testThenBlock($escapelist);  // ELSEIF cond THEN block
         }
         if ($this->testnext(X::TK_ELSE)) {
             $this->block();  // 'else' part
         }
-        $this->check_match(X::TK_END, X::TK_IF, $line);
-        K::luaK_patchtohere($fs, $escapelist);  // patch escape list to 'if' end
+        $this->checkMatch(X::TK_END, X::TK_IF, $line);
+        K::patchtohere($fs, $escapelist);  // patch escape list to 'if' end
     }
 
     // lparser.c: localfunc
@@ -1587,7 +1596,7 @@ final class Parser
         $b = new E();
         $fs = $this->ls->fs;
         $fvar = $fs->nactvar;  // function's variable index
-        $this->new_localvar($this->str_checkname());  // new local variable
+        $this->newLocalvar($this->strCheckname());  // new local variable
         $this->adjustlocalvars(1);  // enter its scope
         $this->body($b, false, $this->ls->linenumber);  // function created in next register
         // debug information will only see the variable after this point!
@@ -1599,7 +1608,7 @@ final class Parser
     {
         // ATTRIB -> ['<' Name '>']
         if ($this->testnext(60)) {  // '<'
-            $attribute = $this->str_checkname();
+            $attribute = $this->strCheckname();
             $this->checknext(62);  // '>'
             if ($attribute === 'const') {
                 return Vardesc::RDKCONST;  // read-only variable
@@ -1607,7 +1616,7 @@ final class Parser
             if ($attribute === 'close') {
                 return Vardesc::RDKTOCLOSE;  // to-be-closed variable
             }
-            K::luaK_semerror($this->ls, "unknown attribute '$attribute'");
+            K::semerror($this->ls, "unknown attribute '$attribute'");
         }
         return Vardesc::VDKREG;  // regular variable
     }
@@ -1617,7 +1626,7 @@ final class Parser
     {
         if ($level !== -1) {  // is there a to-be-closed variable?
             self::marktobeclosed($fs);
-            K::luaK_codeABC($fs, O::OP_TBC, self::reglevel($fs, $level), 0, 0);
+            K::codeABC($fs, O::OP_TBC, self::reglevel($fs, $level), 0, 0);
         }
     }
 
@@ -1630,12 +1639,12 @@ final class Parser
         $nvars = 0;
         $e = new E();
         do {
-            $vidx = $this->new_localvar($this->str_checkname());
+            $vidx = $this->newLocalvar($this->strCheckname());
             $kind = $this->getlocalattribute();
             self::getlocalvardesc($fs, $vidx)->kind = $kind;
             if ($kind === Vardesc::RDKTOCLOSE) {  // to-be-closed?
                 if ($toclose !== -1) {  // one already present?
-                    K::luaK_semerror($this->ls, 'multiple to-be-closed variables in local list');
+                    K::semerror($this->ls, 'multiple to-be-closed variables in local list');
                 }
                 $toclose = $fs->nactvar + $nvars;
             }
@@ -1648,14 +1657,16 @@ final class Parser
             $nexps = 0;
         }
         $var = self::getlocalvardesc($fs, $vidx);  // get last variable
-        if ($nvars === $nexps  // no adjustments?
+        if (
+            $nvars === $nexps  // no adjustments?
             && $var->kind === Vardesc::RDKCONST  // last variable is const?
-            && K::luaK_exp2const($fs, $e, $var->k)) {  // compile-time constant?
+            && K::exp2const($fs, $e, $var->k)  // compile-time constant?
+        ) {
             $var->kind = Vardesc::RDKCTC;  // variable is a compile-time constant
             $this->adjustlocalvars($nvars - 1);  // exclude last variable
             $fs->nactvar++;  // but count it
         } else {
-            $this->adjust_assign($nvars, $nexps, $e);
+            $this->adjustAssign($nvars, $nexps, $e);
             $this->adjustlocalvars($nvars);
         }
         self::checktoclose($fs, $toclose);
@@ -1683,12 +1694,12 @@ final class Parser
         // funcstat -> FUNCTION funcname body
         $v = new E();
         $b = new E();
-        $this->ls->luaX_next();  // skip FUNCTION
+        $this->ls->nextToken();  // skip FUNCTION
         $ismethod = $this->funcname($v);
         $this->body($b, $ismethod, $line);
-        $this->check_readonly($v);
-        K::luaK_storevar($this->ls->fs, $v, $b);
-        K::luaK_fixline($this->ls->fs, $line);  // definition "happens" in the first line
+        $this->checkReadonly($v);
+        K::storevar($this->ls->fs, $v, $b);
+        K::fixline($this->ls->fs, $line);  // definition "happens" in the first line
     }
 
     // lparser.c: exprstat
@@ -1703,8 +1714,8 @@ final class Parser
             return;
         }
         // stat -> func
-        $this->check_condition($v->v->k === E::VCALL, 'syntax error');
-        $fs->f->code[$v->v->info] = O::SETARG_C($fs->f->code[$v->v->info], 1);  // call statement uses no results
+        $this->checkCondition($v->v->k === E::VCALL, 'syntax error');
+        $fs->f->code[$v->v->info] = O::setArgC($fs->f->code[$v->v->info], 1);  // call statement uses no results
     }
 
     // lparser.c: retstat
@@ -1713,24 +1724,24 @@ final class Parser
         // stat -> RETURN [explist] [';']
         $fs = $this->ls->fs;
         $e = new E();
-        $first = self::luaY_nvarstack($fs);  // first slot to be returned
-        if ($this->block_follow(true) || $this->ls->t->token === 59) {  // ';'
+        $first = self::nvarstack($fs);  // first slot to be returned
+        if ($this->blockFollow(true) || $this->ls->t->token === 59) {  // ';'
             $nret = 0;  // return no values
         } else {
             $nret = $this->explist($e);  // optional return values
             if (self::hasmultret($e->k)) {
-                K::luaK_setmultret($fs, $e);
+                K::setmultret($fs, $e);
                 if ($e->k === E::VCALL && $nret === 1 && !$fs->bl->insidetbc) {  // tail call?
-                    $fs->f->code[$e->info] = O::SET_OPCODE($fs->f->code[$e->info], O::OP_TAILCALL);
+                    $fs->f->code[$e->info] = O::setOpcode($fs->f->code[$e->info], O::OP_TAILCALL);
                 }
                 $nret = K::LUA_MULTRET;  // return all values
             } elseif ($nret === 1) {  // only one single value?
-                $first = K::luaK_exp2anyreg($fs, $e);  // can use original slot
+                $first = K::exp2anyreg($fs, $e);  // can use original slot
             } else {  // values must go to the top of the stack
-                K::luaK_exp2nextreg($fs, $e);
+                K::exp2nextreg($fs, $e);
             }
         }
-        K::luaK_ret($fs, $first, $nret);
+        K::ret($fs, $first, $nret);
         $this->testnext(59);  // skip optional semicolon
     }
 
@@ -1741,7 +1752,7 @@ final class Parser
         $this->enterlevel();
         switch ($this->ls->t->token) {
             case 59:  // stat -> ';' (empty statement)
-                $this->ls->luaX_next();  // skip ';'
+                $this->ls->nextToken();  // skip ';'
                 break;
             case X::TK_IF:  // stat -> ifstat
                 $this->ifstat($line);
@@ -1750,9 +1761,9 @@ final class Parser
                 $this->whilestat($line);
                 break;
             case X::TK_DO:  // stat -> DO block END
-                $this->ls->luaX_next();  // skip DO
+                $this->ls->nextToken();  // skip DO
                 $this->block();
-                $this->check_match(X::TK_END, X::TK_DO, $line);
+                $this->checkMatch(X::TK_END, X::TK_DO, $line);
                 break;
             case X::TK_FOR:  // stat -> forstat
                 $this->forstat($line);
@@ -1764,7 +1775,7 @@ final class Parser
                 $this->funcstat($line);
                 break;
             case X::TK_LOCAL:  // stat -> localstat
-                $this->ls->luaX_next();  // skip LOCAL
+                $this->ls->nextToken();  // skip LOCAL
                 if ($this->testnext(X::TK_FUNCTION)) {  // local function?
                     $this->localfunc();
                 } else {
@@ -1772,25 +1783,25 @@ final class Parser
                 }
                 break;
             case X::TK_DBCOLON:  // stat -> label
-                $this->ls->luaX_next();  // skip double colon
-                $this->labelstat($this->str_checkname(), $line);
+                $this->ls->nextToken();  // skip double colon
+                $this->labelstat($this->strCheckname(), $line);
                 break;
             case X::TK_RETURN:  // stat -> retstat
-                $this->ls->luaX_next();  // skip RETURN
+                $this->ls->nextToken();  // skip RETURN
                 $this->retstat();
                 break;
             case X::TK_BREAK:  // stat -> breakstat
                 $this->breakstat();
                 break;
             case X::TK_GOTO:  // stat -> 'goto' NAME
-                $this->ls->luaX_next();  // skip 'goto'
+                $this->ls->nextToken();  // skip 'goto'
                 $this->gotostat();
                 break;
             default:  // stat -> func | assignment
                 $this->exprstat();
                 break;
         }
-        $this->ls->fs->freereg = self::luaY_nvarstack($this->ls->fs);  // free registers
+        $this->ls->fs->freereg = self::nvarstack($this->ls->fs);  // free registers
         $this->leavelevel();
     }
 
@@ -1799,16 +1810,16 @@ final class Parser
     // lparser.c: mainfunc
     private function mainfunc(FuncState $fs): void
     {
-        $this->open_func($fs, new BlockCnt());
+        $this->openFunc($fs, new BlockCnt());
         self::setvararg($fs, 0);  // main function is always declared vararg
         $env = $this->allocupvalue($fs);  // ...set environment upvalue
         $env->instack = true;
         $env->idx = 0;
         $env->kind = Vardesc::VDKREG;
         $env->name = $this->ls->envn;
-        $this->ls->luaX_next();  // read first token
+        $this->ls->nextToken();  // read first token
         $this->statlist();  // parse main body
         $this->check(X::TK_EOS);
-        $this->close_func();
+        $this->closeFunc();
     }
 }

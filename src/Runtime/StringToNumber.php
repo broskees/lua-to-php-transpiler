@@ -30,8 +30,10 @@ final class StringToNumber
     private const MAXLASTD = 7;
 
     // strtod's decimal and hexadecimal numeral syntax, surrounded by isspace characters
-    private const DECIMAL_NUMERAL = '/^[\x09-\x0D ]*([+-]?)((?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?)[\x09-\x0D ]*$/D';
-    private const HEXADECIMAL_NUMERAL = '/^[\x09-\x0D ]*([+-]?)0[xX]([0-9a-fA-F]*)(?:\.([0-9a-fA-F]*))?(?:[pP]([+-]?[0-9]+))?[\x09-\x0D ]*$/D';
+    private const DECIMAL_NUMERAL = '/^[\x09-\x0D ]*([+-]?)'
+        . '((?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?)[\x09-\x0D ]*$/D';
+    private const HEXADECIMAL_NUMERAL = '/^[\x09-\x0D ]*([+-]?)'
+        . '0[xX]([0-9a-fA-F]*)(?:\.([0-9a-fA-F]*))?(?:[pP]([+-]?[0-9]+))?[\x09-\x0D ]*$/D';
 
     // lobject.c: luaO_str2num
     public static function convert(string $s): int|float|null
@@ -45,15 +47,15 @@ final class StringToNumber
         if (str_contains($s, "\0")) {
             return null;  // the C string would end early; callers require the whole length
         }
-        $integer = self::l_str2int($s);
+        $integer = self::str2int($s);
         if ($integer !== null) {  // try as an integer
             return $integer;
         }
-        return self::l_str2d($s);  // else try as a float
+        return self::str2d($s);  // else try as a float
     }
 
     // lobject.c: l_str2int (decimal overflow fails; hexadecimal wraps around)
-    private static function l_str2int(string $s): ?int
+    private static function str2int(string $s): ?int
     {
         $length = strlen($s);
         $position = strspn($s, self::SPACE_CHARACTERS);  // skip initial spaces
@@ -78,8 +80,10 @@ final class StringToNumber
         } else {
             while ($position < $length && ctype_digit($s[$position])) {
                 $digit = ord($s[$position]) - 48;
-                if ($accumulator >= self::MAXBY10
-                    && ($accumulator > self::MAXBY10 || $digit > self::MAXLASTD + ($negative ? 1 : 0))) {
+                if (
+                    $accumulator >= self::MAXBY10
+                    && ($accumulator > self::MAXBY10 || $digit > self::MAXLASTD + ($negative ? 1 : 0))
+                ) {
                     return null;  // overflow: do not accept it (as integer)
                 }
                 // only "-9223372036854775808" reaches 2^63, whose bit pattern is PHP_INT_MIN
@@ -101,7 +105,7 @@ final class StringToNumber
     }
 
     // lobject.c: l_str2d (strtod; 'inf' and 'nan' are rejected)
-    private static function l_str2d(string $s): ?float
+    private static function str2d(string $s): ?float
     {
         $specialPosition = strcspn($s, '.xXnN');  // strpbrk(s, ".xXnN")
         if ($specialPosition < strlen($s) && ($s[$specialPosition] === 'n' || $s[$specialPosition] === 'N')) {
@@ -121,8 +125,12 @@ final class StringToNumber
      * strtod for "0x<integerDigits>.<fractionDigits>p<exponent>", rounded to
      * nearest, ties to even, with gradual underflow and overflow to infinity.
      */
-    private static function hexadecimalToFloat(bool $negative, string $integerDigits, string $fractionDigits, string $exponentText): ?float
-    {
+    private static function hexadecimalToFloat(
+        bool $negative,
+        string $integerDigits,
+        string $fractionDigits,
+        string $exponentText,
+    ): ?float {
         $allDigits = $integerDigits . $fractionDigits;
         if ($allDigits === '') {
             return null;  // "0x" or "0x." has no digits

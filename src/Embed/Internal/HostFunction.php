@@ -65,7 +65,8 @@ final class HostFunction
     private static ?\WeakMap $signatures = null;
 
     /**
-     * @param list<array{int, bool, bool, mixed}> $parameters [kind, takes nil (nullable or with a default), has a default, default]
+     * @param list<array{int, bool, bool, mixed}> $parameters [kind, takes nil (nullable or with a default),
+     *     has a default, default]
      */
     private function __construct(
         private readonly \Closure $closure,
@@ -89,22 +90,33 @@ final class HostFunction
         $variadic = false;
         foreach ($function->getParameters() as $parameter) {
             $type = $parameter->getType();
-            $typeName = $type === null ? 'mixed' : ($type instanceof \ReflectionNamedType ? $type->getName() : (string) $type);
+            $typeName = match (true) {
+                $type === null => 'mixed',
+                $type instanceof \ReflectionNamedType => $type->getName(),
+                default => (string) $type,
+            };
             $kind = self::KINDS[$typeName] ?? null;
             if ($kind === null || $parameter->isPassedByReference()) {
                 $what = $parameter->isPassedByReference() ? 'by-reference parameter' : "parameter of type $typeName";
-                throw new ConversionError("cannot pass a Closure with a $what (\$" . $parameter->getName() . ') to Lua', $path);
+                throw new ConversionError(
+                    "cannot pass a Closure with a $what (\$" . $parameter->getName() . ') to Lua',
+                    $path,
+                );
             }
             $hasDefault = $parameter->isDefaultValueAvailable();
             if ($parameter->isOptional() && !$hasDefault && !$parameter->isVariadic()) {
-                throw new ConversionError('cannot pass a Closure whose default for $' . $parameter->getName() . ' is unknown to Lua', $path);
+                throw new ConversionError(
+                    'cannot pass a Closure whose default for $' . $parameter->getName() . ' is unknown to Lua',
+                    $path,
+                );
             }
             $takesNil = $hasDefault || ($type !== null && $type->allowsNull());
             $parameters[] = [$kind, $takesNil, $hasDefault, $hasDefault ? $parameter->getDefaultValue() : null];
             $variadic = $parameter->isVariadic();
         }
         $returnType = $function->getReturnType();
-        $returnsNothing = $returnType instanceof \ReflectionNamedType && \in_array($returnType->getName(), ['void', 'never'], true);
+        $returnsNothing = $returnType instanceof \ReflectionNamedType
+            && \in_array($returnType->getName(), ['void', 'never'], true);
         return new self($closure, $parameters, $variadic, $returnsNothing);
     }
 

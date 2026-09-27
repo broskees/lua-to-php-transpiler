@@ -9,9 +9,11 @@ use LuaPhp\Compiler\OpCodes as O;
 
 /**
  * Port of lcode.c (Lua 5.4.9): the code generator. Every function keeps
- * its C name; C pointer arguments that the callee assigns ('int *l1',
- * 'int *pi') are PHP references, and C pointers to instructions are
- * indices into $fs->f->code.
+ * its C name, in camelCase: luaK_exp2anyreg is exp2anyreg (the luaK_
+ * prefix is this class), code_loadbool is codeLoadbool, lobject.c's
+ * luaO_ceillog2 is ceillog2. C pointer arguments that the callee assigns
+ * ('int *l1', 'int *pi') are PHP references, and C pointers to
+ * instructions are indices into $fs->f->code.
  *
  * @internal
  */
@@ -83,10 +85,10 @@ final class CodeGen
     }
 
     // lcode.c: luaK_semerror
-    public static function luaK_semerror(Lexer $ls, string $message): never
+    public static function semerror(Lexer $ls, string $message): never
     {
         $ls->t->token = 0;  // remove "near <token>" from final message
-        $ls->luaX_syntaxerror($message);
+        $ls->syntaxerror($message);
     }
 
     /**
@@ -124,7 +126,7 @@ final class CodeGen
     }
 
     // lcode.c: luaK_exp2const (fills $value and returns true for a constant)
-    public static function luaK_exp2const(FuncState $fs, E $e, null|bool|int|float|string &$value): bool
+    public static function exp2const(FuncState $fs, E $e, null|bool|int|float|string &$value): bool
     {
         if (self::hasjumps($e)) {
             return false;  // not a constant
@@ -174,34 +176,36 @@ final class CodeGen
     }
 
     // lcode.c: luaK_nil
-    public static function luaK_nil(FuncState $fs, int $from, int $n): void
+    public static function nil(FuncState $fs, int $from, int $n): void
     {
         $last = $from + $n - 1;  // last register to set nil
         $previousIndex = self::previousinstruction($fs);
         $previous = self::instructionAt($fs, $previousIndex);
-        if (O::GET_OPCODE($previous) === O::OP_LOADNIL) {  // previous is LOADNIL?
-            $previousFrom = O::GETARG_A($previous);  // get previous range
-            $previousLast = $previousFrom + O::GETARG_B($previous);
-            if (($previousFrom <= $from && $from <= $previousLast + 1)
-                || ($from <= $previousFrom && $previousFrom <= $last + 1)) {  // can connect both?
+        if (O::getOpcode($previous) === O::OP_LOADNIL) {  // previous is LOADNIL?
+            $previousFrom = O::getArgA($previous);  // get previous range
+            $previousLast = $previousFrom + O::getArgB($previous);
+            if (
+                ($previousFrom <= $from && $from <= $previousLast + 1)
+                || ($from <= $previousFrom && $previousFrom <= $last + 1)  // can connect both?
+            ) {
                 if ($previousFrom < $from) {
                     $from = $previousFrom;  // from = min(from, pfrom)
                 }
                 if ($previousLast > $last) {
                     $last = $previousLast;  // l = max(l, pl)
                 }
-                $previous = O::SETARG_A($previous, $from);
-                $fs->f->code[$previousIndex] = O::SETARG_B($previous, $last - $from);
+                $previous = O::setArgA($previous, $from);
+                $fs->f->code[$previousIndex] = O::setArgB($previous, $last - $from);
                 return;
             }  // else go through
         }
-        self::luaK_codeABC($fs, O::OP_LOADNIL, $from, $n - 1, 0);  // else no optimization
+        self::codeABC($fs, O::OP_LOADNIL, $from, $n - 1, 0);  // else no optimization
     }
 
     // lcode.c: getjump
     private static function getjump(FuncState $fs, int $pc): int
     {
-        $offset = O::GETARG_sJ($fs->f->code[$pc]);
+        $offset = O::getArgSJ($fs->f->code[$pc]);
         if ($offset === self::NO_JUMP) {  // point to itself represents end of list
             return self::NO_JUMP;  // end of list
         }
@@ -212,14 +216,14 @@ final class CodeGen
     private static function fixjump(FuncState $fs, int $pc, int $dest): void
     {
         $offset = $dest - ($pc + 1);
-        if (!(-O::OFFSET_sJ <= $offset && $offset <= O::MAXARG_sJ - O::OFFSET_sJ)) {
-            $fs->ls->luaX_syntaxerror('control structure too long');
+        if (!(-O::OFFSET_SJ <= $offset && $offset <= O::MAXARG_SJ - O::OFFSET_SJ)) {
+            $fs->ls->syntaxerror('control structure too long');
         }
-        $fs->f->code[$pc] = O::SETARG_sJ($fs->f->code[$pc], $offset);
+        $fs->f->code[$pc] = O::setArgSJ($fs->f->code[$pc], $offset);
     }
 
     // lcode.c: luaK_concat (concatenate jump-list 'l2' into jump-list 'l1')
-    public static function luaK_concat(FuncState $fs, int &$l1, int $l2): void
+    public static function concat(FuncState $fs, int &$l1, int $l2): void
     {
         if ($l2 === self::NO_JUMP) {
             return;  // nothing to concatenate?
@@ -236,31 +240,31 @@ final class CodeGen
     }
 
     // lcode.c: luaK_jump
-    public static function luaK_jump(FuncState $fs): int
+    public static function jump(FuncState $fs): int
     {
         return self::codesJ($fs, O::OP_JMP, self::NO_JUMP, 0);
     }
 
     // lcode.c: luaK_ret
-    public static function luaK_ret(FuncState $fs, int $first, int $nret): void
+    public static function ret(FuncState $fs, int $first, int $nret): void
     {
         $op = match ($nret) {
             0 => O::OP_RETURN0,
             1 => O::OP_RETURN1,
             default => O::OP_RETURN,
         };
-        self::luaK_codeABC($fs, $op, $first, $nret + 1, 0);
+        self::codeABC($fs, $op, $first, $nret + 1, 0);
     }
 
     // lcode.c: condjump
     private static function condjump(FuncState $fs, int $op, int $a, int $b, int $c, int $k): int
     {
-        self::luaK_codeABCk($fs, $op, $a, $b, $c, $k);
-        return self::luaK_jump($fs);
+        self::codeABCk($fs, $op, $a, $b, $c, $k);
+        return self::jump($fs);
     }
 
     // lcode.c: luaK_getlabel
-    public static function luaK_getlabel(FuncState $fs): int
+    public static function getlabel(FuncState $fs): int
     {
         $fs->lasttarget = $fs->pc;
         return $fs->pc;
@@ -269,7 +273,7 @@ final class CodeGen
     // lcode.c: getjumpcontrol (index of the instruction controlling a jump)
     private static function getjumpcontrol(FuncState $fs, int $pc): int
     {
-        if ($pc >= 1 && O::testTMode(O::GET_OPCODE($fs->f->code[$pc - 1]))) {
+        if ($pc >= 1 && O::testTMode(O::getOpcode($fs->f->code[$pc - 1]))) {
             return $pc - 1;
         }
         return $pc;
@@ -280,15 +284,15 @@ final class CodeGen
     {
         $index = self::getjumpcontrol($fs, $node);
         $instruction = $fs->f->code[$index];
-        if (O::GET_OPCODE($instruction) !== O::OP_TESTSET) {
+        if (O::getOpcode($instruction) !== O::OP_TESTSET) {
             return false;  // cannot patch other instructions
         }
-        if ($reg !== O::NO_REG && $reg !== O::GETARG_B($instruction)) {
-            $fs->f->code[$index] = O::SETARG_A($instruction, $reg);
+        if ($reg !== O::NO_REG && $reg !== O::getArgB($instruction)) {
+            $fs->f->code[$index] = O::setArgA($instruction, $reg);
         } else {
             // no register to put value or register already has the value;
             // change instruction to simple test
-            $fs->f->code[$index] = O::CREATE_ABCk(O::OP_TEST, O::GETARG_B($instruction), 0, 0, O::GETARG_k($instruction));
+            $fs->f->code[$index] = O::createABCk(O::OP_TEST, O::getArgB($instruction), 0, 0, O::getArgK($instruction));
         }
         return true;
     }
@@ -316,22 +320,22 @@ final class CodeGen
     }
 
     // lcode.c: luaK_patchlist
-    public static function luaK_patchlist(FuncState $fs, int $list, int $target): void
+    public static function patchlist(FuncState $fs, int $list, int $target): void
     {
         self::patchlistaux($fs, $list, $target, O::NO_REG, $target);
     }
 
     // lcode.c: luaK_patchtohere
-    public static function luaK_patchtohere(FuncState $fs, int $list): void
+    public static function patchtohere(FuncState $fs, int $list): void
     {
-        $here = self::luaK_getlabel($fs);  // mark "here" as a jump target
-        self::luaK_patchlist($fs, $list, $here);
+        $here = self::getlabel($fs);  // mark "here" as a jump target
+        self::patchlist($fs, $list, $here);
     }
 
     // lcode.c: luaK_jumpto (lcode.h macro)
-    public static function luaK_jumpto(FuncState $fs, int $target): void
+    public static function jumpto(FuncState $fs, int $target): void
     {
-        self::luaK_patchlist($fs, self::luaK_jump($fs), $target);
+        self::patchlist($fs, self::jump($fs), $target);
     }
 
     // lcode.c: savelineinfo
@@ -370,7 +374,7 @@ final class CodeGen
     }
 
     // lcode.c: luaK_code
-    public static function luaK_code(FuncState $fs, int $instruction): int
+    public static function code(FuncState $fs, int $instruction): int
     {
         $f = $fs->f;
         $f->code[$fs->pc++] = $instruction;  // put new instruction in code array
@@ -379,75 +383,75 @@ final class CodeGen
     }
 
     // lcode.c: luaK_codeABCk
-    public static function luaK_codeABCk(FuncState $fs, int $op, int $a, int $b, int $c, int $k): int
+    public static function codeABCk(FuncState $fs, int $op, int $a, int $b, int $c, int $k): int
     {
-        return self::luaK_code($fs, O::CREATE_ABCk($op, $a, $b, $c, $k));
+        return self::code($fs, O::createABCk($op, $a, $b, $c, $k));
     }
 
     // lcode.h: luaK_codeABC
-    public static function luaK_codeABC(FuncState $fs, int $op, int $a, int $b, int $c): int
+    public static function codeABC(FuncState $fs, int $op, int $a, int $b, int $c): int
     {
-        return self::luaK_code($fs, O::CREATE_ABCk($op, $a, $b, $c, 0));
+        return self::code($fs, O::createABCk($op, $a, $b, $c, 0));
     }
 
     // lcode.c: luaK_codeABx
-    public static function luaK_codeABx(FuncState $fs, int $op, int $a, int $bc): int
+    public static function codeABx(FuncState $fs, int $op, int $a, int $bc): int
     {
-        return self::luaK_code($fs, O::CREATE_ABx($op, $a, $bc));
+        return self::code($fs, O::createABx($op, $a, $bc));
     }
 
     // lcode.c: codeAsBx
     private static function codeAsBx(FuncState $fs, int $op, int $a, int $bc): int
     {
-        return self::luaK_code($fs, O::CREATE_ABx($op, $a, $bc + O::OFFSET_sBx));
+        return self::code($fs, O::createABx($op, $a, $bc + O::OFFSET_SBX));
     }
 
     // lcode.c: codesJ
     private static function codesJ(FuncState $fs, int $op, int $sj, int $k): int
     {
-        return self::luaK_code($fs, O::CREATE_sJ($op, $sj + O::OFFSET_sJ, $k));
+        return self::code($fs, O::createSJ($op, $sj + O::OFFSET_SJ, $k));
     }
 
     // lcode.c: codeextraarg
     private static function codeextraarg(FuncState $fs, int $a): int
     {
-        return self::luaK_code($fs, O::CREATE_Ax(O::OP_EXTRAARG, $a));
+        return self::code($fs, O::createAx(O::OP_EXTRAARG, $a));
     }
 
     // lcode.c: luaK_codek
-    private static function luaK_codek(FuncState $fs, int $reg, int $k): int
+    private static function codek(FuncState $fs, int $reg, int $k): int
     {
-        if ($k <= O::MAXARG_Bx) {
-            return self::luaK_codeABx($fs, O::OP_LOADK, $reg, $k);
+        if ($k <= O::MAXARG_BX) {
+            return self::codeABx($fs, O::OP_LOADK, $reg, $k);
         }
-        $p = self::luaK_codeABx($fs, O::OP_LOADKX, $reg, 0);
+        $p = self::codeABx($fs, O::OP_LOADKX, $reg, 0);
         self::codeextraarg($fs, $k);
         return $p;
     }
 
     // lcode.c: luaK_checkstack
-    public static function luaK_checkstack(FuncState $fs, int $n): void
+    public static function checkstack(FuncState $fs, int $n): void
     {
         $newstack = $fs->freereg + $n;
         if ($newstack > $fs->f->maxstacksize) {
             if ($newstack >= self::MAXREGS) {
-                $fs->ls->luaX_syntaxerror('function or expression needs too many registers');
+                $fs->ls->syntaxerror('function or expression needs too many registers');
             }
             $fs->f->maxstacksize = $newstack;
         }
     }
 
     // lcode.c: luaK_reserveregs
-    public static function luaK_reserveregs(FuncState $fs, int $n): void
+    public static function reserveregs(FuncState $fs, int $n): void
     {
-        self::luaK_checkstack($fs, $n);
+        self::checkstack($fs, $n);
         $fs->freereg += $n;
     }
 
     // lcode.c: freereg
     private static function freereg(FuncState $fs, int $reg): void
     {
-        if ($reg >= Parser::luaY_nvarstack($fs)) {
+        if ($reg >= Parser::nvarstack($fs)) {
             $fs->freereg--;
         }
     }
@@ -498,7 +502,7 @@ final class CodeGen
         // constant not found; create a new entry
         $index = $fs->nk;
         $fs->ls->constantCache[$key] = $index;
-        self::checkVectorLimit($index, O::MAXARG_Ax, 'constants');
+        self::checkVectorLimit($index, O::MAXARG_AX, 'constants');
         $f->k[$index] = $value;
         $fs->nk++;
         return $index;
@@ -510,7 +514,7 @@ final class CodeGen
      */
     private static function floatKey(float $n): string
     {
-        $integer = RawArith::luaV_flttointeger($n);
+        $integer = RawArith::flttointeger($n);
         if ($integer !== null) {
             return 'i' . $integer;
         }
@@ -524,7 +528,7 @@ final class CodeGen
     }
 
     // lcode.c: luaK_intK
-    private static function luaK_intK(FuncState $fs, int $n): int
+    private static function intK(FuncState $fs, int $n): int
     {
         return self::addk($fs, 'i' . $n, $n);  // use integer itself as key
     }
@@ -534,9 +538,9 @@ final class CodeGen
      * key, to avoid collision with actual integers: add to the number its
      * smaller power-of-two fraction that is still significant in its scale.
      */
-    private static function luaK_numberK(FuncState $fs, float $r): int
+    private static function numberK(FuncState $fs, float $r): int
     {
-        $integer = RawArith::luaV_flttointeger($r);
+        $integer = RawArith::flttointeger($r);
         if ($integer === null) {  // not an integral value?
             return self::addk($fs, self::floatKey($r), $r);  // use number itself as key
         }
@@ -566,33 +570,33 @@ final class CodeGen
     // lcode.c: fitsC (-OFFSET_sC <= i <= MAXARG_C - OFFSET_sC)
     private static function fitsC(int $i): bool
     {
-        return $i >= -O::OFFSET_sC && $i <= O::MAXARG_C - O::OFFSET_sC;
+        return $i >= -O::OFFSET_SC && $i <= O::MAXARG_C - O::OFFSET_SC;
     }
 
     // lcode.c: fitsBx
     private static function fitsBx(int $i): bool
     {
-        return -O::OFFSET_sBx <= $i && $i <= O::MAXARG_Bx - O::OFFSET_sBx;
+        return -O::OFFSET_SBX <= $i && $i <= O::MAXARG_BX - O::OFFSET_SBX;
     }
 
     // lcode.c: luaK_int
-    public static function luaK_int(FuncState $fs, int $reg, int $i): void
+    public static function int(FuncState $fs, int $reg, int $i): void
     {
         if (self::fitsBx($i)) {
             self::codeAsBx($fs, O::OP_LOADI, $reg, $i);
         } else {
-            self::luaK_codek($fs, $reg, self::luaK_intK($fs, $i));
+            self::codek($fs, $reg, self::intK($fs, $i));
         }
     }
 
     // lcode.c: luaK_float
-    private static function luaK_float(FuncState $fs, int $reg, float $f): void
+    private static function float(FuncState $fs, int $reg, float $f): void
     {
-        $integer = RawArith::luaV_flttointeger($f);
+        $integer = RawArith::flttointeger($f);
         if ($integer !== null && self::fitsBx($integer)) {
             self::codeAsBx($fs, O::OP_LOADF, $reg, $integer);
         } else {
-            self::luaK_codek($fs, $reg, self::luaK_numberK($fs, $f));
+            self::codek($fs, $reg, self::numberK($fs, $f));
         }
     }
 
@@ -618,22 +622,22 @@ final class CodeGen
     }
 
     // lcode.c: luaK_setreturns
-    public static function luaK_setreturns(FuncState $fs, E $e, int $nresults): void
+    public static function setreturns(FuncState $fs, E $e, int $nresults): void
     {
         $f = $fs->f;
         if ($e->k === E::VCALL) {  // expression is an open function call?
-            $f->code[$e->info] = O::SETARG_C($f->code[$e->info], $nresults + 1);
+            $f->code[$e->info] = O::setArgC($f->code[$e->info], $nresults + 1);
             return;
         }
-        $instruction = O::SETARG_C($f->code[$e->info], $nresults + 1);
-        $f->code[$e->info] = O::SETARG_A($instruction, $fs->freereg);
-        self::luaK_reserveregs($fs, 1);
+        $instruction = O::setArgC($f->code[$e->info], $nresults + 1);
+        $f->code[$e->info] = O::setArgA($instruction, $fs->freereg);
+        self::reserveregs($fs, 1);
     }
 
     // lcode.h: luaK_setmultret
-    public static function luaK_setmultret(FuncState $fs, E $e): void
+    public static function setmultret(FuncState $fs, E $e): void
     {
-        self::luaK_setreturns($fs, $e, self::LUA_MULTRET);
+        self::setreturns($fs, $e, self::LUA_MULTRET);
     }
 
     // lcode.c: str2K
@@ -644,20 +648,20 @@ final class CodeGen
     }
 
     // lcode.c: luaK_setoneret
-    public static function luaK_setoneret(FuncState $fs, E $e): void
+    public static function setoneret(FuncState $fs, E $e): void
     {
         if ($e->k === E::VCALL) {  // expression is an open function call?
             // already returns 1 value
             $e->k = E::VNONRELOC;  // result has fixed position
-            $e->info = O::GETARG_A($fs->f->code[$e->info]);
+            $e->info = O::getArgA($fs->f->code[$e->info]);
         } elseif ($e->k === E::VVARARG) {
-            $fs->f->code[$e->info] = O::SETARG_C($fs->f->code[$e->info], 2);
+            $fs->f->code[$e->info] = O::setArgC($fs->f->code[$e->info], 2);
             $e->k = E::VRELOC;  // can relocate its simple result
         }
     }
 
     // lcode.c: luaK_dischargevars
-    public static function luaK_dischargevars(FuncState $fs, E $e): void
+    public static function dischargevars(FuncState $fs, E $e): void
     {
         switch ($e->k) {
             case E::VCONST:
@@ -668,31 +672,31 @@ final class CodeGen
                 $e->k = E::VNONRELOC;  // becomes a non-relocatable value
                 break;
             case E::VUPVAL:  // move value to some (pending) register
-                $e->info = self::luaK_codeABC($fs, O::OP_GETUPVAL, 0, $e->info, 0);
+                $e->info = self::codeABC($fs, O::OP_GETUPVAL, 0, $e->info, 0);
                 $e->k = E::VRELOC;
                 break;
             case E::VINDEXUP:
-                $e->info = self::luaK_codeABC($fs, O::OP_GETTABUP, 0, $e->indT, $e->indIdx);
+                $e->info = self::codeABC($fs, O::OP_GETTABUP, 0, $e->indT, $e->indIdx);
                 $e->k = E::VRELOC;
                 break;
             case E::VINDEXI:
                 self::freereg($fs, $e->indT);
-                $e->info = self::luaK_codeABC($fs, O::OP_GETI, 0, $e->indT, $e->indIdx);
+                $e->info = self::codeABC($fs, O::OP_GETI, 0, $e->indT, $e->indIdx);
                 $e->k = E::VRELOC;
                 break;
             case E::VINDEXSTR:
                 self::freereg($fs, $e->indT);
-                $e->info = self::luaK_codeABC($fs, O::OP_GETFIELD, 0, $e->indT, $e->indIdx);
+                $e->info = self::codeABC($fs, O::OP_GETFIELD, 0, $e->indT, $e->indIdx);
                 $e->k = E::VRELOC;
                 break;
             case E::VINDEXED:
                 self::freeregs($fs, $e->indT, $e->indIdx);
-                $e->info = self::luaK_codeABC($fs, O::OP_GETTABLE, 0, $e->indT, $e->indIdx);
+                $e->info = self::codeABC($fs, O::OP_GETTABLE, 0, $e->indT, $e->indIdx);
                 $e->k = E::VRELOC;
                 break;
             case E::VVARARG:
             case E::VCALL:
-                self::luaK_setoneret($fs, $e);
+                self::setoneret($fs, $e);
                 break;
             default:
                 break;  // there is one value available (somewhere)
@@ -702,36 +706,37 @@ final class CodeGen
     // lcode.c: discharge2reg
     private static function discharge2reg(FuncState $fs, E $e, int $reg): void
     {
-        self::luaK_dischargevars($fs, $e);
+        self::dischargevars($fs, $e);
         switch ($e->k) {
             case E::VNIL:
-                self::luaK_nil($fs, $reg, 1);
+                self::nil($fs, $reg, 1);
                 break;
             case E::VFALSE:
-                self::luaK_codeABC($fs, O::OP_LOADFALSE, $reg, 0, 0);
+                self::codeABC($fs, O::OP_LOADFALSE, $reg, 0, 0);
                 break;
             case E::VTRUE:
-                self::luaK_codeABC($fs, O::OP_LOADTRUE, $reg, 0, 0);
+                self::codeABC($fs, O::OP_LOADTRUE, $reg, 0, 0);
                 break;
             case E::VKSTR:
                 self::str2K($fs, $e);
-                self::luaK_codek($fs, $reg, $e->info);
+                self::codek($fs, $reg, $e->info);
                 break;
             case E::VK:
-                self::luaK_codek($fs, $reg, $e->info);
+                self::codek($fs, $reg, $e->info);
                 break;
             case E::VKFLT:
-                self::luaK_float($fs, $reg, $e->nval);
+                self::float($fs, $reg, $e->nval);
                 break;
             case E::VKINT:
-                self::luaK_int($fs, $reg, $e->ival);
+                self::int($fs, $reg, $e->ival);
                 break;
             case E::VRELOC:
-                $fs->f->code[$e->info] = O::SETARG_A($fs->f->code[$e->info], $reg);  // instruction will put result in 'reg'
+                // instruction will put result in 'reg'
+                $fs->f->code[$e->info] = O::setArgA($fs->f->code[$e->info], $reg);
                 break;
             case E::VNONRELOC:
                 if ($reg !== $e->info) {
-                    self::luaK_codeABC($fs, O::OP_MOVE, $reg, $e->info, 0);
+                    self::codeABC($fs, O::OP_MOVE, $reg, $e->info, 0);
                 }
                 break;
             default:  // VJMP
@@ -745,24 +750,24 @@ final class CodeGen
     private static function discharge2anyreg(FuncState $fs, E $e): void
     {
         if ($e->k !== E::VNONRELOC) {  // no fixed register yet?
-            self::luaK_reserveregs($fs, 1);  // get a register
+            self::reserveregs($fs, 1);  // get a register
             self::discharge2reg($fs, $e, $fs->freereg - 1);  // put value there
         }
     }
 
     // lcode.c: code_loadbool
-    private static function code_loadbool(FuncState $fs, int $a, int $op): int
+    private static function codeLoadbool(FuncState $fs, int $a, int $op): int
     {
-        self::luaK_getlabel($fs);  // those instructions may be jump targets
-        return self::luaK_codeABC($fs, $op, $a, 0, 0);
+        self::getlabel($fs);  // those instructions may be jump targets
+        return self::codeABC($fs, $op, $a, 0, 0);
     }
 
     // lcode.c: need_value
-    private static function need_value(FuncState $fs, int $list): bool
+    private static function needValue(FuncState $fs, int $list): bool
     {
         for (; $list !== self::NO_JUMP; $list = self::getjump($fs, $list)) {
             $instruction = $fs->f->code[self::getjumpcontrol($fs, $list)];
-            if (O::GET_OPCODE($instruction) !== O::OP_TESTSET) {
+            if (O::getOpcode($instruction) !== O::OP_TESTSET) {
                 return true;
             }
         }
@@ -774,19 +779,19 @@ final class CodeGen
     {
         self::discharge2reg($fs, $e, $reg);
         if ($e->k === E::VJMP) {  // expression itself is a test?
-            self::luaK_concat($fs, $e->t, $e->info);  // put this jump in 't' list
+            self::concat($fs, $e->t, $e->info);  // put this jump in 't' list
         }
         if (self::hasjumps($e)) {
             $loadFalsePosition = self::NO_JUMP;  // position of an eventual LOAD false
             $loadTruePosition = self::NO_JUMP;  // position of an eventual LOAD true
-            if (self::need_value($fs, $e->t) || self::need_value($fs, $e->f)) {
-                $fj = ($e->k === E::VJMP) ? self::NO_JUMP : self::luaK_jump($fs);
-                $loadFalsePosition = self::code_loadbool($fs, $reg, O::OP_LFALSESKIP);  // skip next inst.
-                $loadTruePosition = self::code_loadbool($fs, $reg, O::OP_LOADTRUE);
+            if (self::needValue($fs, $e->t) || self::needValue($fs, $e->f)) {
+                $fj = ($e->k === E::VJMP) ? self::NO_JUMP : self::jump($fs);
+                $loadFalsePosition = self::codeLoadbool($fs, $reg, O::OP_LFALSESKIP);  // skip next inst.
+                $loadTruePosition = self::codeLoadbool($fs, $reg, O::OP_LOADTRUE);
                 // jump around these booleans if 'e' is not a test
-                self::luaK_patchtohere($fs, $fj);
+                self::patchtohere($fs, $fj);
             }
-            $final = self::luaK_getlabel($fs);  // position after whole expression
+            $final = self::getlabel($fs);  // position after whole expression
             self::patchlistaux($fs, $e->f, $final, $reg, $loadFalsePosition);
             self::patchlistaux($fs, $e->t, $final, $reg, $loadTruePosition);
         }
@@ -796,23 +801,23 @@ final class CodeGen
     }
 
     // lcode.c: luaK_exp2nextreg
-    public static function luaK_exp2nextreg(FuncState $fs, E $e): void
+    public static function exp2nextreg(FuncState $fs, E $e): void
     {
-        self::luaK_dischargevars($fs, $e);
+        self::dischargevars($fs, $e);
         self::freeexp($fs, $e);
-        self::luaK_reserveregs($fs, 1);
+        self::reserveregs($fs, 1);
         self::exp2reg($fs, $e, $fs->freereg - 1);
     }
 
     // lcode.c: luaK_exp2anyreg
-    public static function luaK_exp2anyreg(FuncState $fs, E $e): int
+    public static function exp2anyreg(FuncState $fs, E $e): int
     {
-        self::luaK_dischargevars($fs, $e);
+        self::dischargevars($fs, $e);
         if ($e->k === E::VNONRELOC) {  // expression already has a register?
             if (!self::hasjumps($e)) {  // no jumps?
                 return $e->info;  // result is already in a register
             }
-            if ($e->info >= Parser::luaY_nvarstack($fs)) {  // reg. is not a local?
+            if ($e->info >= Parser::nvarstack($fs)) {  // reg. is not a local?
                 self::exp2reg($fs, $e, $e->info);  // put final result in it
                 return $e->info;
             }
@@ -820,41 +825,56 @@ final class CodeGen
             // to hold the jump values, because it is a local variable.
             // Go through to the default case.
         }
-        self::luaK_exp2nextreg($fs, $e);  // default: use next available register
+        self::exp2nextreg($fs, $e);  // default: use next available register
         return $e->info;
     }
 
     // lcode.c: luaK_exp2anyregup
-    public static function luaK_exp2anyregup(FuncState $fs, E $e): void
+    public static function exp2anyregup(FuncState $fs, E $e): void
     {
         if ($e->k !== E::VUPVAL || self::hasjumps($e)) {
-            self::luaK_exp2anyreg($fs, $e);
+            self::exp2anyreg($fs, $e);
         }
     }
 
     // lcode.c: luaK_exp2val
-    public static function luaK_exp2val(FuncState $fs, E $e): void
+    public static function exp2val(FuncState $fs, E $e): void
     {
         if ($e->k === E::VJMP || self::hasjumps($e)) {
-            self::luaK_exp2anyreg($fs, $e);
+            self::exp2anyreg($fs, $e);
         } else {
-            self::luaK_dischargevars($fs, $e);
+            self::dischargevars($fs, $e);
         }
     }
 
     // lcode.c: luaK_exp2K
-    private static function luaK_exp2K(FuncState $fs, E $e): bool
+    private static function exp2K(FuncState $fs, E $e): bool
     {
         if (!self::hasjumps($e)) {
             switch ($e->k) {  // move constants to 'k'
-                case E::VTRUE: $info = self::boolT($fs); break;
-                case E::VFALSE: $info = self::boolF($fs); break;
-                case E::VNIL: $info = self::nilK($fs); break;
-                case E::VKINT: $info = self::luaK_intK($fs, $e->ival); break;
-                case E::VKFLT: $info = self::luaK_numberK($fs, $e->nval); break;
-                case E::VKSTR: $info = self::stringK($fs, $e->strval); break;
-                case E::VK: $info = $e->info; break;
-                default: return false;  // not a constant
+                case E::VTRUE:
+                    $info = self::boolT($fs);
+                    break;
+                case E::VFALSE:
+                    $info = self::boolF($fs);
+                    break;
+                case E::VNIL:
+                    $info = self::nilK($fs);
+                    break;
+                case E::VKINT:
+                    $info = self::intK($fs, $e->ival);
+                    break;
+                case E::VKFLT:
+                    $info = self::numberK($fs, $e->nval);
+                    break;
+                case E::VKSTR:
+                    $info = self::stringK($fs, $e->strval);
+                    break;
+                case E::VK:
+                    $info = $e->info;
+                    break;
+                default:
+                    return false;  // not a constant
             }
             if ($info <= O::MAXINDEXRK) {  // does constant fit in 'argC'?
                 $e->k = E::VK;  // make expression a 'K' expression
@@ -869,11 +889,11 @@ final class CodeGen
     // lcode.c: exp2RK
     private static function exp2RK(FuncState $fs, E $e): bool
     {
-        if (self::luaK_exp2K($fs, $e)) {
+        if (self::exp2K($fs, $e)) {
             return true;
         }
         // not a constant in the right range: put it in a register
-        self::luaK_exp2anyreg($fs, $e);
+        self::exp2anyreg($fs, $e);
         return false;
     }
 
@@ -881,11 +901,11 @@ final class CodeGen
     private static function codeABRK(FuncState $fs, int $op, int $a, int $b, E $ec): void
     {
         $k = self::exp2RK($fs, $ec);
-        self::luaK_codeABCk($fs, $op, $a, $b, $ec->info, $k ? 1 : 0);
+        self::codeABCk($fs, $op, $a, $b, $ec->info, $k ? 1 : 0);
     }
 
     // lcode.c: luaK_storevar
-    public static function luaK_storevar(FuncState $fs, E $var, E $ex): void
+    public static function storevar(FuncState $fs, E $var, E $ex): void
     {
         switch ($var->k) {
             case E::VLOCAL:
@@ -893,8 +913,8 @@ final class CodeGen
                 self::exp2reg($fs, $ex, $var->varRidx);  // compute 'ex' into proper place
                 return;
             case E::VUPVAL:
-                $register = self::luaK_exp2anyreg($fs, $ex);
-                self::luaK_codeABC($fs, O::OP_SETUPVAL, $register, $var->info, 0);
+                $register = self::exp2anyreg($fs, $ex);
+                self::codeABC($fs, O::OP_SETUPVAL, $register, $var->info, 0);
                 break;
             case E::VINDEXUP:
                 self::codeABRK($fs, O::OP_SETTABUP, $var->indT, $var->indIdx, $ex);
@@ -915,14 +935,14 @@ final class CodeGen
     }
 
     // lcode.c: luaK_self
-    public static function luaK_self(FuncState $fs, E $e, E $key): void
+    public static function self(FuncState $fs, E $e, E $key): void
     {
-        self::luaK_exp2anyreg($fs, $e);
+        self::exp2anyreg($fs, $e);
         $ereg = $e->info;  // register where 'e' was placed
         self::freeexp($fs, $e);
         $e->info = $fs->freereg;  // base register for op_self
         $e->k = E::VNONRELOC;  // self expression has a fixed register
-        self::luaK_reserveregs($fs, 2);  // function and 'self' produced by op_self
+        self::reserveregs($fs, 2);  // function and 'self' produced by op_self
         self::codeABRK($fs, O::OP_SELF, $e->info, $ereg, $key);
         self::freeexp($fs, $key);
     }
@@ -932,7 +952,7 @@ final class CodeGen
     {
         $index = self::getjumpcontrol($fs, $e->info);
         $instruction = $fs->f->code[$index];
-        $fs->f->code[$index] = O::SETARG_k($instruction, O::GETARG_k($instruction) ^ 1);
+        $fs->f->code[$index] = O::setArgK($instruction, O::getArgK($instruction) ^ 1);
     }
 
     // lcode.c: jumponcond
@@ -940,9 +960,9 @@ final class CodeGen
     {
         if ($e->k === E::VRELOC) {
             $instruction = $fs->f->code[$e->info];
-            if (O::GET_OPCODE($instruction) === O::OP_NOT) {
+            if (O::getOpcode($instruction) === O::OP_NOT) {
                 self::removelastinstruction($fs);  // remove previous OP_NOT
-                return self::condjump($fs, O::OP_TEST, O::GETARG_B($instruction), 0, 0, $cond === 0 ? 1 : 0);
+                return self::condjump($fs, O::OP_TEST, O::getArgB($instruction), 0, 0, $cond === 0 ? 1 : 0);
             }
             // else go through
         }
@@ -952,9 +972,9 @@ final class CodeGen
     }
 
     // lcode.c: luaK_goiftrue
-    public static function luaK_goiftrue(FuncState $fs, E $e): void
+    public static function goiftrue(FuncState $fs, E $e): void
     {
-        self::luaK_dischargevars($fs, $e);
+        self::dischargevars($fs, $e);
         switch ($e->k) {
             case E::VJMP:  // condition?
                 self::negatecondition($fs, $e);  // jump when it is false
@@ -971,15 +991,15 @@ final class CodeGen
                 $pc = self::jumponcond($fs, $e, 0);  // jump when false
                 break;
         }
-        self::luaK_concat($fs, $e->f, $pc);  // insert new jump in false list
-        self::luaK_patchtohere($fs, $e->t);  // true list jumps to here (to go through)
+        self::concat($fs, $e->f, $pc);  // insert new jump in false list
+        self::patchtohere($fs, $e->t);  // true list jumps to here (to go through)
         $e->t = self::NO_JUMP;
     }
 
     // lcode.c: luaK_goiffalse
-    public static function luaK_goiffalse(FuncState $fs, E $e): void
+    public static function goiffalse(FuncState $fs, E $e): void
     {
-        self::luaK_dischargevars($fs, $e);
+        self::dischargevars($fs, $e);
         switch ($e->k) {
             case E::VJMP:
                 $pc = $e->info;  // already jump if true
@@ -992,8 +1012,8 @@ final class CodeGen
                 $pc = self::jumponcond($fs, $e, 1);  // jump if true
                 break;
         }
-        self::luaK_concat($fs, $e->t, $pc);  // insert new jump in 't' list
-        self::luaK_patchtohere($fs, $e->f);  // false list jumps to here (to go through)
+        self::concat($fs, $e->t, $pc);  // insert new jump in 't' list
+        self::patchtohere($fs, $e->f);  // false list jumps to here (to go through)
         $e->f = self::NO_JUMP;
     }
 
@@ -1019,7 +1039,7 @@ final class CodeGen
             case E::VNONRELOC:
                 self::discharge2anyreg($fs, $e);
                 self::freeexp($fs, $e);
-                $e->info = self::luaK_codeABC($fs, O::OP_NOT, 0, $e->info, 0);
+                $e->info = self::codeABC($fs, O::OP_NOT, 0, $e->info, 0);
                 $e->k = E::VRELOC;
                 break;
             default:
@@ -1066,7 +1086,7 @@ final class CodeGen
     {
         if ($e->k === E::VKINT) {
             $i = $e->ival;
-        } elseif ($e->k === E::VKFLT && ($i = RawArith::luaV_flttointeger($e->nval)) !== null) {
+        } elseif ($e->k === E::VKFLT && ($i = RawArith::flttointeger($e->nval)) !== null) {
             $isfloat = 1;
         } else {
             return false;  // not a number
@@ -1079,13 +1099,13 @@ final class CodeGen
     }
 
     // lcode.c: luaK_indexed
-    public static function luaK_indexed(FuncState $fs, E $t, E $k): void
+    public static function indexed(FuncState $fs, E $t, E $k): void
     {
         if ($k->k === E::VKSTR) {
             self::str2K($fs, $k);
         }
         if ($t->k === E::VUPVAL && !self::isKstr($fs, $k)) {  // upvalue indexed by non 'Kstr'?
-            self::luaK_exp2anyreg($fs, $t);  // put it in a register
+            self::exp2anyreg($fs, $t);  // put it in a register
         }
         if ($t->k === E::VUPVAL) {
             $t->indT = $t->info;  // upvalue index
@@ -1102,7 +1122,7 @@ final class CodeGen
             $t->indIdx = $k->ival;  // int. constant in proper range
             $t->k = E::VINDEXI;
         } else {
-            $t->indIdx = self::luaK_exp2anyreg($fs, $k);  // register
+            $t->indIdx = self::exp2anyreg($fs, $k);  // register
             $t->k = E::VINDEXED;
         }
     }
@@ -1117,8 +1137,8 @@ final class CodeGen
             case RawArith::LUA_OPSHL:
             case RawArith::LUA_OPSHR:
             case RawArith::LUA_OPBNOT:  // conversion errors
-                return (is_int($v1) || RawArith::luaV_flttointeger($v1) !== null)
-                    && (is_int($v2) || RawArith::luaV_flttointeger($v2) !== null);
+                return (is_int($v1) || RawArith::flttointeger($v1) !== null)
+                    && (is_int($v2) || RawArith::flttointeger($v2) !== null);
             case RawArith::LUA_OPDIV:
             case RawArith::LUA_OPIDIV:
             case RawArith::LUA_OPMOD:  // division by 0
@@ -1136,7 +1156,7 @@ final class CodeGen
         if ($v1 === null || $v2 === null || !self::validop($op, $v1, $v2)) {
             return false;  // non-numeric operands or not safe to fold
         }
-        $result = RawArith::luaO_rawarith($op, $v1, $v2);  // does operation
+        $result = RawArith::rawarith($op, $v1, $v2);  // does operation
         if (is_int($result)) {
             $e1->k = E::VKINT;
             $e1->ival = $result;
@@ -1172,31 +1192,40 @@ final class CodeGen
     // lcode.c: codeunexpval
     private static function codeunexpval(FuncState $fs, int $op, E $e, int $line): void
     {
-        $r = self::luaK_exp2anyreg($fs, $e);  // opcodes operate only on registers
+        $r = self::exp2anyreg($fs, $e);  // opcodes operate only on registers
         self::freeexp($fs, $e);
-        $e->info = self::luaK_codeABC($fs, $op, 0, $r, 0);  // generate opcode
+        $e->info = self::codeABC($fs, $op, 0, $r, 0);  // generate opcode
         $e->k = E::VRELOC;  // all those operations are relocatable
-        self::luaK_fixline($fs, $line);
+        self::fixline($fs, $line);
     }
 
     // lcode.c: finishbinexpval
-    private static function finishbinexpval(FuncState $fs, E $e1, E $e2, int $op, int $v2, int $flip, int $line, int $mmop, int $event): void
-    {
-        $v1 = self::luaK_exp2anyreg($fs, $e1);
-        $pc = self::luaK_codeABCk($fs, $op, 0, $v1, $v2, 0);
+    private static function finishbinexpval(
+        FuncState $fs,
+        E $e1,
+        E $e2,
+        int $op,
+        int $v2,
+        int $flip,
+        int $line,
+        int $mmop,
+        int $event,
+    ): void {
+        $v1 = self::exp2anyreg($fs, $e1);
+        $pc = self::codeABCk($fs, $op, 0, $v1, $v2, 0);
         self::freeexps($fs, $e1, $e2);
         $e1->info = $pc;
         $e1->k = E::VRELOC;  // all those operations are relocatable
-        self::luaK_fixline($fs, $line);
-        self::luaK_codeABCk($fs, $mmop, $v1, $v2, $event, $flip);  // to call metamethod
-        self::luaK_fixline($fs, $line);
+        self::fixline($fs, $line);
+        self::codeABCk($fs, $mmop, $v1, $v2, $event, $flip);  // to call metamethod
+        self::fixline($fs, $line);
     }
 
     // lcode.c: codebinexpval
     private static function codebinexpval(FuncState $fs, int $opr, E $e1, E $e2, int $line): void
     {
         $op = self::binopr2op($opr, self::OPR_ADD, O::OP_ADD);
-        $v2 = self::luaK_exp2anyreg($fs, $e2);  // make sure 'e2' is in a register
+        $v2 = self::exp2anyreg($fs, $e2);  // make sure 'e2' is in a register
         self::finishbinexpval($fs, $e1, $e2, $op, $v2, 0, $line, O::OP_MMBIN, self::binopr2TM($opr));
     }
 
@@ -1229,7 +1258,7 @@ final class CodeGen
         // operating a small integer constant
         self::finishbinexpval($fs, $e1, $e2, $op, O::int2sC(-$i2), 0, $line, O::OP_MMBINI, $event);
         // correct metamethod argument
-        $fs->f->code[$fs->pc - 1] = O::SETARG_B($fs->f->code[$fs->pc - 1], O::int2sC($i2));
+        $fs->f->code[$fs->pc - 1] = O::setArgB($fs->f->code[$fs->pc - 1], O::int2sC($i2));
         return true;  // successfully coded
     }
 
@@ -1254,7 +1283,7 @@ final class CodeGen
     // lcode.c: codearith
     private static function codearith(FuncState $fs, int $opr, E $e1, E $e2, int $flip, int $line): void
     {
-        if (self::tonumeral($e2) !== null && self::luaK_exp2K($fs, $e2)) {  // K operand?
+        if (self::tonumeral($e2) !== null && self::exp2K($fs, $e2)) {  // K operand?
             self::codebinK($fs, $opr, $e1, $e2, $flip, $line);
         } else {  // 'e2' is neither an immediate nor a K operand
             self::codebinNoK($fs, $opr, $e1, $e2, $flip, $line);
@@ -1284,7 +1313,7 @@ final class CodeGen
             self::swapexps($e1, $e2);  // 'e2' will be the constant operand
             $flip = 1;
         }
-        if ($e2->k === E::VKINT && self::luaK_exp2K($fs, $e2)) {  // K operand?
+        if ($e2->k === E::VKINT && self::exp2K($fs, $e2)) {  // K operand?
             self::codebinK($fs, $opr, $e1, $e2, $flip, $line);
         } else {  // no constants
             self::codebinNoK($fs, $opr, $e1, $e2, $flip, $line);
@@ -1298,17 +1327,17 @@ final class CodeGen
         $isfloat = 0;
         if (self::isSCnumber($e2, $im, $isfloat)) {
             // use immediate operand
-            $r1 = self::luaK_exp2anyreg($fs, $e1);
+            $r1 = self::exp2anyreg($fs, $e1);
             $r2 = $im;
             $op = self::binopr2op($opr, self::OPR_LT, O::OP_LTI);
         } elseif (self::isSCnumber($e1, $im, $isfloat)) {
             // transform (A < B) to (B > A) and (A <= B) to (B >= A)
-            $r1 = self::luaK_exp2anyreg($fs, $e2);
+            $r1 = self::exp2anyreg($fs, $e2);
             $r2 = $im;
             $op = self::binopr2op($opr, self::OPR_LT, O::OP_GTI);
         } else {  // regular case, compare two registers
-            $r1 = self::luaK_exp2anyreg($fs, $e1);
-            $r2 = self::luaK_exp2anyreg($fs, $e2);
+            $r1 = self::exp2anyreg($fs, $e1);
+            $r2 = self::exp2anyreg($fs, $e2);
             $op = self::binopr2op($opr, self::OPR_LT, O::OP_LT);
         }
         self::freeexps($fs, $e1, $e2);
@@ -1324,7 +1353,7 @@ final class CodeGen
         if ($e1->k !== E::VNONRELOC) {
             self::swapexps($e1, $e2);
         }
-        $r1 = self::luaK_exp2anyreg($fs, $e1);  // 1st expression must be in register
+        $r1 = self::exp2anyreg($fs, $e1);  // 1st expression must be in register
         if (self::isSCnumber($e2, $im, $isfloat)) {
             $op = O::OP_EQI;
             $r2 = $im;  // immediate operand
@@ -1333,7 +1362,7 @@ final class CodeGen
             $r2 = $e2->info;  // constant index
         } else {
             $op = O::OP_EQ;  // will compare two registers
-            $r2 = self::luaK_exp2anyreg($fs, $e2);
+            $r2 = self::exp2anyreg($fs, $e2);
         }
         self::freeexps($fs, $e1, $e2);
         $e1->info = self::condjump($fs, $op, $r1, $r2, $isfloat, $opr === self::OPR_EQ ? 1 : 0);
@@ -1341,9 +1370,9 @@ final class CodeGen
     }
 
     // lcode.c: luaK_prefix
-    public static function luaK_prefix(FuncState $fs, int $opr, E $e, int $line): void
+    public static function prefix(FuncState $fs, int $opr, E $e, int $line): void
     {
-        self::luaK_dischargevars($fs, $e);
+        self::dischargevars($fs, $e);
         switch ($opr) {
             case self::OPR_MINUS:
             case self::OPR_BNOT:  // use 'ef' (integer 0) as fake 2nd operand
@@ -1364,18 +1393,18 @@ final class CodeGen
     }
 
     // lcode.c: luaK_infix (1st operand of a binary operation, before the 2nd is read)
-    public static function luaK_infix(FuncState $fs, int $op, E $v): void
+    public static function infix(FuncState $fs, int $op, E $v): void
     {
-        self::luaK_dischargevars($fs, $v);
+        self::dischargevars($fs, $v);
         switch ($op) {
             case self::OPR_AND:
-                self::luaK_goiftrue($fs, $v);  // go ahead only if 'v' is true
+                self::goiftrue($fs, $v);  // go ahead only if 'v' is true
                 break;
             case self::OPR_OR:
-                self::luaK_goiffalse($fs, $v);  // go ahead only if 'v' is false
+                self::goiffalse($fs, $v);  // go ahead only if 'v' is false
                 break;
             case self::OPR_CONCAT:
-                self::luaK_exp2nextreg($fs, $v);  // operand must be on the stack
+                self::exp2nextreg($fs, $v);  // operand must be on the stack
                 break;
             case self::OPR_ADD:
             case self::OPR_SUB:
@@ -1390,7 +1419,7 @@ final class CodeGen
             case self::OPR_SHL:
             case self::OPR_SHR:
                 if (self::tonumeral($v) === null) {
-                    self::luaK_exp2anyreg($fs, $v);
+                    self::exp2anyreg($fs, $v);
                 }
                 // else keep numeral, which may be folded or used as an immediate operand
                 break;
@@ -1408,7 +1437,7 @@ final class CodeGen
                 $dummy = 0;
                 $dummy2 = 0;
                 if (!self::isSCnumber($v, $dummy, $dummy2)) {
-                    self::luaK_exp2anyreg($fs, $v);
+                    self::exp2anyreg($fs, $v);
                 }
                 // else keep numeral, which may be an immediate operand
                 break;
@@ -1424,37 +1453,37 @@ final class CodeGen
     {
         $previousIndex = self::previousinstruction($fs);
         $previous = self::instructionAt($fs, $previousIndex);
-        if (O::GET_OPCODE($previous) === O::OP_CONCAT) {  // is 'e2' a concatenation?
-            $n = O::GETARG_B($previous);  // # of elements concatenated in 'e2'
+        if (O::getOpcode($previous) === O::OP_CONCAT) {  // is 'e2' a concatenation?
+            $n = O::getArgB($previous);  // # of elements concatenated in 'e2'
             self::freeexp($fs, $e2);
-            $previous = O::SETARG_A($previous, $e1->info);  // correct first element ('e1')
-            $fs->f->code[$previousIndex] = O::SETARG_B($previous, $n + 1);  // will concatenate one more element
+            $previous = O::setArgA($previous, $e1->info);  // correct first element ('e1')
+            $fs->f->code[$previousIndex] = O::setArgB($previous, $n + 1);  // will concatenate one more element
             return;
         }
         // 'e2' is not a concatenation
-        self::luaK_codeABC($fs, O::OP_CONCAT, $e1->info, 2, 0);  // new concat opcode
+        self::codeABC($fs, O::OP_CONCAT, $e1->info, 2, 0);  // new concat opcode
         self::freeexp($fs, $e2);
-        self::luaK_fixline($fs, $line);
+        self::fixline($fs, $line);
     }
 
     // lcode.c: luaK_posfix (finalize code for binary operation, after reading 2nd operand)
-    public static function luaK_posfix(FuncState $fs, int $opr, E $e1, E $e2, int $line): void
+    public static function posfix(FuncState $fs, int $opr, E $e1, E $e2, int $line): void
     {
-        self::luaK_dischargevars($fs, $e2);
+        self::dischargevars($fs, $e2);
         if ($opr <= self::OPR_SHR && self::constfolding($fs, $opr + RawArith::LUA_OPADD, $e1, $e2)) {  // foldbinop
             return;  // done by folding
         }
         switch ($opr) {
             case self::OPR_AND:
-                self::luaK_concat($fs, $e2->f, $e1->f);
+                self::concat($fs, $e2->f, $e1->f);
                 $e1->copyFrom($e2);
                 break;
             case self::OPR_OR:
-                self::luaK_concat($fs, $e2->t, $e1->t);
+                self::concat($fs, $e2->t, $e1->t);
                 $e1->copyFrom($e2);
                 break;
             case self::OPR_CONCAT:  // e1 .. e2
-                self::luaK_exp2nextreg($fs, $e2);
+                self::exp2nextreg($fs, $e2);
                 self::codeconcat($fs, $e1, $e2, $line);
                 break;
             case self::OPR_ADD:
@@ -1513,25 +1542,25 @@ final class CodeGen
     }
 
     // lcode.c: luaK_fixline
-    public static function luaK_fixline(FuncState $fs, int $line): void
+    public static function fixline(FuncState $fs, int $line): void
     {
         self::removelastlineinfo($fs);
         self::savelineinfo($fs, $fs->f, $line);
     }
 
     // lcode.c: luaK_settablesize
-    public static function luaK_settablesize(FuncState $fs, int $pc, int $ra, int $asize, int $hsize): void
+    public static function settablesize(FuncState $fs, int $pc, int $ra, int $asize, int $hsize): void
     {
-        $rb = ($hsize !== 0) ? self::luaO_ceillog2($hsize) + 1 : 0;  // hash size
+        $rb = ($hsize !== 0) ? self::ceillog2($hsize) + 1 : 0;  // hash size
         $extra = intdiv($asize, O::MAXARG_C + 1);  // higher bits of array size
         $rc = $asize % (O::MAXARG_C + 1);  // lower bits of array size
         $k = ($extra > 0) ? 1 : 0;  // true iff needs extra argument
-        $fs->f->code[$pc] = O::CREATE_ABCk(O::OP_NEWTABLE, $ra, $rb, $rc, $k);
-        $fs->f->code[$pc + 1] = O::CREATE_Ax(O::OP_EXTRAARG, $extra);
+        $fs->f->code[$pc] = O::createABCk(O::OP_NEWTABLE, $ra, $rb, $rc, $k);
+        $fs->f->code[$pc + 1] = O::createAx(O::OP_EXTRAARG, $extra);
     }
 
     // lobject.c: luaO_ceillog2 (ceil(log2(x)))
-    private static function luaO_ceillog2(int $x): int
+    private static function ceillog2(int $x): int
     {
         $log = 0;
         $x--;
@@ -1548,17 +1577,17 @@ final class CodeGen
      * (in registers 'base + 1',...) to add to table (or LUA_MULTRET to add
      * up to stack top).
      */
-    public static function luaK_setlist(FuncState $fs, int $base, int $nelems, int $tostore): void
+    public static function setlist(FuncState $fs, int $base, int $nelems, int $tostore): void
     {
         if ($tostore === self::LUA_MULTRET) {
             $tostore = 0;
         }
         if ($nelems <= O::MAXARG_C) {
-            self::luaK_codeABC($fs, O::OP_SETLIST, $base, $tostore, $nelems);
+            self::codeABC($fs, O::OP_SETLIST, $base, $tostore, $nelems);
         } else {
             $extra = intdiv($nelems, O::MAXARG_C + 1);
             $nelems %= (O::MAXARG_C + 1);
-            self::luaK_codeABCk($fs, O::OP_SETLIST, $base, $tostore, $nelems, 1);
+            self::codeABCk($fs, O::OP_SETLIST, $base, $tostore, $nelems, 1);
             self::codeextraarg($fs, $extra);
         }
         $fs->freereg = $base + 1;  // free registers with list values
@@ -1569,36 +1598,36 @@ final class CodeGen
     {
         for ($count = 0; $count < 100; $count++) {  // avoid infinite loops
             $instruction = $code[$i];
-            if (O::GET_OPCODE($instruction) !== O::OP_JMP) {
+            if (O::getOpcode($instruction) !== O::OP_JMP) {
                 break;
             }
-            $i += O::GETARG_sJ($instruction) + 1;
+            $i += O::getArgSJ($instruction) + 1;
         }
         return $i;
     }
 
     // lcode.c: luaK_finish (final pass: small peephole optimizations and adjustments)
-    public static function luaK_finish(FuncState $fs): void
+    public static function finish(FuncState $fs): void
     {
         $p = $fs->f;
         for ($i = 0; $i < $fs->pc; $i++) {
             $instruction = $p->code[$i];
-            switch (O::GET_OPCODE($instruction)) {
+            switch (O::getOpcode($instruction)) {
                 case O::OP_RETURN0:
                 case O::OP_RETURN1:
                     if (!($fs->needclose || $p->is_vararg)) {
                         break;  // no extra work
                     }
                     // else use OP_RETURN to do the extra work
-                    $instruction = O::SET_OPCODE($instruction, O::OP_RETURN);
+                    $instruction = O::setOpcode($instruction, O::OP_RETURN);
                     // FALLTHROUGH
                 case O::OP_RETURN:
                 case O::OP_TAILCALL:
                     if ($fs->needclose) {
-                        $instruction = O::SETARG_k($instruction, 1);  // signal that it needs to close
+                        $instruction = O::setArgK($instruction, 1);  // signal that it needs to close
                     }
                     if ($p->is_vararg) {
-                        $instruction = O::SETARG_C($instruction, $p->numparams + 1);  // signal that it is vararg
+                        $instruction = O::setArgC($instruction, $p->numparams + 1);  // signal that it is vararg
                     }
                     $p->code[$i] = $instruction;
                     break;

@@ -121,7 +121,10 @@ function test_deep_chains_lua_cannot_build_are_freed_one_link_at_a_time(): void
     foreach (array_chunk($chains, 4, true) as $batch) {
         $running = [];
         foreach ($batch as $kind => $length) {
-            $running[$kind] = startProcess(['php', $script, REPO_ROOT . '/src/autoload.php', $kind, (string) $length], REPO_ROOT);
+            $running[$kind] = startProcess(
+                ['php', $script, REPO_ROOT . '/src/autoload.php', $kind, (string) $length],
+                REPO_ROOT,
+            );
         }
         foreach ($running as $kind => $process) {
             [$status, $stdout, $stderr] = finishProcess($process);

@@ -25,7 +25,7 @@ use LuaPhp\Embed\SyntaxError;
  * changing the host PHP process.
  */
 
-/** the brief's discount script */
+// the brief's discount script
 const LOYALTY = <<<'LUA'
     local orders = require("shop.orders")
     local cart = ...
@@ -49,7 +49,8 @@ final class OrderRepository
         if ($this->failure !== null) {
             throw $this->failure;
         }
-        return \array_slice([['id' => 1], ['id' => 2], ['id' => 3], ['id' => 4], ['id' => 5], ['id' => 6]], 0, min($limit, 5));
+        $orders = [['id' => 1], ['id' => 2], ['id' => 3], ['id' => 4], ['id' => 5], ['id' => 6]];
+        return \array_slice($orders, 0, min($limit, 5));
     }
 }
 
@@ -80,9 +81,16 @@ function shop(array $change = []): Environment
     return $environment;
 }
 
-function runLoyalty(Environment $environment, OrderRepository $orders, array $cart = ['total' => 180.0, 'items' => 3]): Result
-{
-    return $environment->run('discounts/loyalty.lua', args: [$cart], context: ['customerId' => 42, 'orders' => $orders]);
+function runLoyalty(
+    Environment $environment,
+    OrderRepository $orders,
+    array $cart = ['total' => 180.0, 'items' => 3],
+): Result {
+    return $environment->run(
+        'discounts/loyalty.lua',
+        args: [$cart],
+        context: ['customerId' => 42, 'orders' => $orders],
+    );
 }
 
 function test_the_brief_example(): void
@@ -96,19 +104,38 @@ function test_the_brief_example(): void
     assertTrue($result->usage->milliseconds > 0.0 && $result->usage->peakMemoryBytes >= 0);
 
     $failures = [
-        [[4 => 'local recent = orders.recent(500)'], 'discounts/loyalty.lua:4: orders.recent: limit must be 100 or less'],
-        [[4 => 'local recent = orders.recent(2.5)'], "discounts/loyalty.lua:4: bad argument #1 to 'recent' (number has no integer representation)"],
-        [[4 => 'local recent = orders.recent("ten")'], "discounts/loyalty.lua:4: bad argument #1 to 'recent' (number expected, got string)"],
+        [
+            [4 => 'local recent = orders.recent(500)'],
+            'discounts/loyalty.lua:4: orders.recent: limit must be 100 or less',
+        ],
+        [
+            [4 => 'local recent = orders.recent(2.5)'],
+            "discounts/loyalty.lua:4: bad argument #1 to 'recent' (number has no integer representation)",
+        ],
+        [
+            [4 => 'local recent = orders.recent("ten")'],
+            "discounts/loyalty.lua:4: bad argument #1 to 'recent' (number expected, got string)",
+        ],
     ];
     foreach ($failures as [$change, $message]) {
         assertSame($message, assertThrows(RuntimeError::class, static fn () => runLoyalty(shop($change), $orders)));
     }
-    assertSame("discounts/loyalty.lua:8: attempt to perform arithmetic on a nil value (field 'total')",
-        assertThrows(RuntimeError::class, static fn () => runLoyalty(shop(), $orders, ['items' => 3])));
+    assertSame(
+        "discounts/loyalty.lua:8: attempt to perform arithmetic on a nil value (field 'total')",
+        assertThrows(RuntimeError::class, static fn () => runLoyalty(shop(), $orders, ['items' => 3]))
+    );
     // the script's pcall catches a ScriptError and goes on
-    $result = runLoyalty(shop([4 => 'local ok, message = pcall(function() return orders.recent(500) end) local recent = {ok, message, 3, 4, 5}']), $orders);
+    $change = [
+        4 => 'local ok, message = pcall(function() return orders.recent(500) end)'
+            . ' local recent = {ok, message, 3, 4, 5}',
+    ];
+    $result = runLoyalty(shop($change), $orders);
     assertSame('loyal customer (5 orders)', $result->values[0]['reason']);
-    $result = runLoyalty(shop([4 => 'local recent = {pcall(function() return orders.recent(500) end)}', 7 => 'if true then return recent end if false then']), $orders);
+    $change = [
+        4 => 'local recent = {pcall(function() return orders.recent(500) end)}',
+        7 => 'if true then return recent end if false then',
+    ];
+    $result = runLoyalty(shop($change), $orders);
     assertSame([[false, 'discounts/loyalty.lua:4: orders.recent: limit must be 100 or less']], $result->values);
     // a PDOException from the repository: that same exception, which the script's pcall never sees
     $orders->failure = new \PDOException('SQLSTATE[HY000]: General error');
@@ -136,7 +163,10 @@ function test_lower_level_use(): void
     assertSame([110.00000000000001], $addTax(100));
     assertSame([2], Lua::run('return 1 + 1'));
     assertSame([6], Lua::run('local a, b = ... return a * b', [2, 3]));
-    assertSame("[string \"return 1 +\"]:1: unexpected symbol near <eof>", assertThrows(SyntaxError::class, static fn () => Lua::run('return 1 +')));
+    assertSame(
+        "[string \"return 1 +\"]:1: unexpected symbol near <eof>",
+        assertThrows(SyntaxError::class, static fn () => Lua::run('return 1 +')),
+    );
 }
 
 function test_runtime_errors_carry_lua_details(): void
@@ -171,7 +201,8 @@ function test_runtime_errors_carry_lua_details(): void
     $cases = [
         'error({code = 7})' => [['code' => 7], 'table: 0x'],
         'error(setmetatable({}, {__tostring = function () return "custom" end}))' => [[], 'custom'],
-        'error(setmetatable({}, {__tostring = function () error("inner") end}))' => [[], '(error object is a table value)'],
+        'error(setmetatable({}, {__tostring = function () error("inner") end}))'
+            => [[], '(error object is a table value)'],
         'error()' => [null, 'nil'],
         'error(42)' => [42, '42'],
         'error(true)' => [true, 'true'],
@@ -186,7 +217,10 @@ function test_runtime_errors_carry_lua_details(): void
         }
         assertSame($value, \is_object($error?->value) ? $error->value::class : $error?->value, $code);
         assertTrue(str_starts_with($error->luaMessage, $message), "$code: $error->luaMessage");
-        assertTrue(str_starts_with($error->traceback, "stack traceback:\n\t[C]: in function 'error'"), "$code: $error->traceback");
+        assertTrue(
+            str_starts_with($error->traceback, "stack traceback:\n\t[C]: in function 'error'"),
+            "$code: $error->traceback",
+        );
     }
     // Lua's own stack overflow stays a normal, catchable error
     [$ok, $message] = $sandbox->load('local function f() return f() + 1 end return pcall(f)', '=deep')->call();
@@ -198,16 +232,21 @@ function test_runtime_errors_carry_lua_details(): void
 /** $text as a Lua string literal */
 function luaString(string $text): string
 {
-    return '"' . preg_replace_callback('/[^\x20-\x7e]|["\\\\]/', static fn (array $match): string => sprintf('\\%03d', \ord($match[0])), $text) . '"';
+    $escape = static fn (array $match): string => sprintf('\\%03d', \ord($match[0]));
+    return '"' . preg_replace_callback('/[^\x20-\x7e]|["\\\\]/', $escape, $text) . '"';
 }
 
 function test_syntax_errors_as_lua54_reports_them(): void
 {
-    $chunks = ["x = = 1", "local t = {\n1,\n2", "for i = 1 do end", "return 'unfinished", "goto nowhere", "x = 1\n\n  )", "local x <const> = 1; x = 2", "\xEF\xBB\xBFreturn"];
+    $chunks = [
+        "x = = 1", "local t = {\n1,\n2", "for i = 1 do end", "return 'unfinished", "goto nowhere", "x = 1\n\n  )",
+        "local x <const> = 1; x = 2", "\xEF\xBB\xBFreturn",
+    ];
     $script = '';
     foreach ($chunks as $chunk) {
         foreach (['@x.lua', '=inline', null] as $name) {
-            $script .= 'io.write(select(2, load(' . luaString($chunk) . ($name === null ? '' : ', ' . luaString($name)) . ")) or 'loaded', '\\0')\n";
+            $nameArgument = $name === null ? '' : ', ' . luaString($name);
+            $script .= 'io.write(select(2, load(' . luaString($chunk) . $nameArgument . ")) or 'loaded', '\\0')\n";
         }
     }
     [$status, $output, $errors] = runCommand(['lua5.4', '-'], $script);
@@ -224,12 +263,17 @@ function test_syntax_errors_as_lua54_reports_them(): void
             }
             assertSame($expected[$index++], $error?->getMessage() ?? 'loaded', var_export([$chunk, $name], true));
             assertSame($name ?? $chunk, $error?->chunkName);
-            assertTrue(\is_int($error->luaLine) && preg_match('/:' . $error->luaLine . ': /', $error->getMessage()) === 1, $error->getMessage());
+            assertTrue(
+                \is_int($error->luaLine) && preg_match('/:' . $error->luaLine . ': /', $error->getMessage()) === 1,
+                $error->getMessage(),
+            );
         }
     }
     // text only: a binary chunk is refused as load(s, name, "t") refuses it
     $binary = runCommand(['lua5.4', '-e', 'io.write(string.dump(function () return 1 end))'])[1];
-    $reference = runCommand(['lua5.4', '-e', 'print(select(2, load(string.dump(function () return 1 end), "=b", "t")))'])[1];
+    $reference = runCommand(
+        ['lua5.4', '-e', 'print(select(2, load(string.dump(function () return 1 end), "=b", "t")))']
+    )[1];
     $error = null;
     try {
         $sandbox->load($binary, '=b');
@@ -238,8 +282,13 @@ function test_syntax_errors_as_lua54_reports_them(): void
     assertSame(rtrim($reference, "\n"), $error?->getMessage());
     assertSame(null, $error->luaLine);
     // a module that does not compile is a Lua error of require
-    $environment = new Environment(loader: new ArrayLoader(['main.lua' => 'return pcall(require, "broken")', 'broken.lua' => 'return +']));
-    assertSame([false, "error loading module 'broken' from file 'broken.lua':\n\tbroken.lua:1: unexpected symbol near '+'"], $environment->run('main.lua')->values);
+    $environment = new Environment(
+        loader: new ArrayLoader(['main.lua' => 'return pcall(require, "broken")', 'broken.lua' => 'return +']),
+    );
+    assertSame(
+        [false, "error loading module 'broken' from file 'broken.lua':\n\tbroken.lua:1: unexpected symbol near '+'"],
+        $environment->run('main.lua')->values,
+    );
 }
 
 function test_modules_and_require(): void
@@ -257,17 +306,25 @@ function test_modules_and_require(): void
     $sandbox = $environment->newSandbox();
     $run = static fn (string $code): array => $sandbox->load($code, '=test')->call();
     assertSame([['name' => 'a.b', 'file' => 'a/b.lua'], 'init of c', 'host', 2, 42], $run(
-        'return require("a.b"), require("c"), require("shadowed").from, #require("config").nested.list, require("config").double(21)'
+        'return require("a.b"), require("c"), require("shadowed").from, #require("config").nested.list,'
+        . ' require("config").double(21)'
     ));
     $run = static fn (string $code): array => $environment->newSandbox()->load($code, '=test')->call();
     assertSame([true, true, true, ':host:', 'a/b.lua'], $run(
         'local _, data = require("config") local _, file = require("a.b")'
-        . ' return rawequal(require("config"), require("config")), rawequal(require("a.b"), package.loaded["a.b"]), config == nil, data, file'
+        . ' return rawequal(require("config"), require("config")), rawequal(require("a.b"), package.loaded["a.b"]),'
+        . ' config == nil, data, file'
     ));
     $run = static fn (string $code): array => $sandbox->load($code, '=test')->call();
     assertSame([true, true], $run('return require("bad.value"), package.loaded["bad.value"]'));
-    assertSame([false, "test:1: module 'no.such' not found:\n\tno host module 'no.such'\n\tno file 'no/such.lua'\n\tno file 'no/such/init.lua'"],
-        $run('return pcall(function () return require("no.such") end)'));
+    assertSame(
+        [
+            false,
+            "test:1: module 'no.such' not found:\n\tno host module 'no.such'\n\tno file 'no/such.lua'"
+                . "\n\tno file 'no/such/init.lua'",
+        ],
+        $run('return pcall(function () return require("no.such") end)')
+    );
     assertSame([false, 'raises.lua:1: while loading'], $run('return pcall(require, "raises")'));
     // each sandbox has its own module tables
     $run('require("config").nested.changed = true');
@@ -286,7 +343,10 @@ function test_sandboxes_are_isolated(): void
     $a = $environment->newSandbox();
     $b = $environment->newSandbox();
     $a->load('string.upper = nil; x = 1; getmetatable("").__index = {}; package.loaded.string = nil')->call();
-    assertSame(['function', true, 'A', true], $b->load('return type(string.upper), x == nil, ("a"):upper(), package.loaded.string ~= nil')->call());
+    assertSame(
+        ['function', true, 'A', true],
+        $b->load('return type(string.upper), x == nil, ("a"):upper(), package.loaded.string ~= nil')->call(),
+    );
     assertSame([true], $a->load('return ("a").upper == nil')->call());
     // alive at once, calls interleaved
     $counter = 'n = (n or 0) + 1 return n';
@@ -295,7 +355,10 @@ function test_sandboxes_are_isolated(): void
     assertSame([2], $a->load($counter)->call());
     // re-entry: a PHP function called from A runs B and returns its result to A
     $a->setGlobal('runInB', static fn (string $code): array => $b->load($code)->call());
-    assertSame([2, 2, 'B'], $a->load('local results = runInB("n = n + 1 return n, \'B\'") return n, results[1], results[2]')->call());
+    assertSame(
+        [2, 2, 'B'],
+        $a->load('local results = runInB("n = n + 1 return n, \'B\'") return n, results[1], results[2]')->call(),
+    );
     // and a fresh sandbox inside a run
     $a->setGlobal('fresh', static fn (): array => $environment->newSandbox()->load('return x')->call());
     assertSame([0], $a->load('return #fresh()')->call());
@@ -312,14 +375,16 @@ function test_collectgarbage_count_sees_only_the_sandbox_s_own_memory(): void
     [$after] = $a->load($count)->call();
     assertTrue(abs($after - $before) < 1024, "A's count moved from $before to $after KB with B's 8 MB");
     // its own tables count
-    [$own] = $a->load('local t = {} for i = 1, 100000 do t[i] = {} end kept = t return collectgarbage("count")')->call();
+    $keepTables = 'local t = {} for i = 1, 100000 do t[i] = {} end kept = t return collectgarbage("count")';
+    [$own] = $a->load($keepTables)->call();
     assertTrue($own - $after > 1024, "A's own tables: from $after to $own KB");
 }
 
 function test_handles_keep_their_sandbox_alive(): void
 {
-    $environment = new Environment(loader: new ArrayLoader(['counter.lua' => 'local n = 0 return function () n = n + 1 return n end']));
-    $counter = (static fn (): LuaFunction => $environment->newSandbox()->load('local n = 0 return function () n = n + 1 return n end')->call()[0])();
+    $counterCode = 'local n = 0 return function () n = n + 1 return n end';
+    $environment = new Environment(loader: new ArrayLoader(['counter.lua' => $counterCode]));
+    $counter = (static fn (): LuaFunction => $environment->newSandbox()->load($counterCode)->call()[0])();
     gc_collect_cycles();
     assertSame([1], $counter());
     assertSame([2], $counter());
@@ -362,11 +427,12 @@ function test_closing_a_sandbox(): void
     $sandbox->setGlobal('finalized', static function () use (&$finalized): void {
         $finalized[] = true;
     });
-    [$function] = $sandbox->load('pending = setmetatable({}, {__gc = function () finalized() end}) return print')->call();
+    $code = 'pending = setmetatable({}, {__gc = function () finalized() end}) return print';
+    [$function] = $sandbox->load($code)->call();
     $table = $sandbox->getGlobalHandle('pending');
     $sandbox->close();
     assertTrue($sandbox->isClosed());
-    foreach ([
+    $uses = [
         static fn () => $sandbox->load('return 1'),
         static fn () => $sandbox->run('x.lua'),
         static fn () => $sandbox->getGlobal('pending'),
@@ -378,7 +444,8 @@ function test_closing_a_sandbox(): void
         static fn () => $table->length(),
         static fn () => $table->toArray(),
         static fn () => iterator_to_array($table->pairs()),
-    ] as $index => $use) {
+    ];
+    foreach ($uses as $index => $use) {
         assertSame('the sandbox is closed', assertThrows(SandboxClosed::class, $use), "use $index");
     }
     // pending finalizers are skipped
@@ -397,7 +464,10 @@ function test_closing_a_sandbox(): void
  */
 function test_runs_do_not_change_the_host_process(): void
 {
-    $settings = ['memory_limit', 'serialize_precision', 'zend.exception_ignore_args', 'error_reporting', 'display_errors', 'fiber.stack_size', 'precision', 'opcache.jit'];
+    $settings = [
+        'memory_limit', 'serialize_precision', 'zend.exception_ignore_args', 'error_reporting', 'display_errors',
+        'fiber.stack_size', 'precision', 'opcache.jit',
+    ];
     $memoryLimit = ini_get('memory_limit');
     assertTrue(ini_set('memory_limit', '128M') !== false);
     $before = array_map('ini_get', array_combine($settings, $settings));
@@ -414,28 +484,39 @@ function test_runs_do_not_change_the_host_process(): void
     try {
         $environment = shop();
         $orders = new OrderRepository();
-        foreach ([
+        $coroutines = <<<'LUA'
+            local co = coroutine.wrap(function (...)
+              print("in", ...) local x = coroutine.yield(1) print("got", x) return 3
+            end)
+            print(co("a"), co("b"))
+            local t = {}
+            for i = 1, 50 do t[i] = coroutine.create(function () coroutine.yield() end) coroutine.resume(t[i]) end
+            warn("@on") warn("careful")
+            return select("#", t)
+            LUA;
+        $coroutineLimit = 'local t = {} for i = 1, 100000 do'
+            . ' t[i] = coroutine.create(function() coroutine.yield() end) coroutine.resume(t[i]) end';
+        $printFromRun = 'print("from Lua::run")'
+            . ' return string.format("%5.2f", 1/3), math.type(os.time{year = 2020, month = 1, day = 1})';
+        $runs = [
             'ok' => static fn () => runLoyalty($environment, $orders)->output,
             'script error' => static fn () => runLoyalty(shop([4 => 'local recent = orders.recent(500)']), $orders),
             'syntax' => static fn () => $environment->newSandbox()->load('x = = 1'),
-            'coroutines' => static fn () => $environment->newSandbox()->load(<<<'LUA'
-                local co = coroutine.wrap(function (...) print("in", ...) local x = coroutine.yield(1) print("got", x) return 3 end)
-                print(co("a"), co("b"))
-                local t = {} for i = 1, 50 do t[i] = coroutine.create(function () coroutine.yield() end) coroutine.resume(t[i]) end
-                warn("@on") warn("careful")
-                return select("#", t)
-                LUA)->call(),
+            'coroutines' => static fn () => $environment->newSandbox()->load($coroutines)->call(),
             'steps' => static fn () => $environment->newSandbox()->load('while true do end')->call(),
             'output' => static fn () => $environment->newSandbox()->load('print(("x"):rep(2e6))')->call(),
             'memory' => static fn () => $environment->newSandbox()->load('local s = ("x"):rep(1e9)')->call(),
-            'coroutine limit' => static fn () => $environment->newSandbox()->load('local t = {} for i = 1, 100000 do t[i] = coroutine.create(function() coroutine.yield() end) coroutine.resume(t[i]) end')->call(),
-            'print' => static fn () => Lua::run('print("from Lua::run") return string.format("%5.2f", 1/3), math.type(os.time{year = 2020, month = 1, day = 1})'),
+            'coroutine limit' => static fn () => $environment->newSandbox()->load($coroutineLimit)->call(),
+            'print' => static fn () => Lua::run($printFromRun),
             'missing module' => static fn () => $environment->newSandbox()->load('return require("nope")')->call(),
-        ] as $label => $run) {
+        ];
+        foreach ($runs as $label => $run) {
             try {
                 $outcomes[$label] = $run();
             } catch (\Throwable $thrown) {
-                $outcomes[$label] = $thrown instanceof \LuaPhp\Embed\LimitExceeded ? 'limit ' . $thrown->limit : $thrown::class;
+                $outcomes[$label] = $thrown instanceof \LuaPhp\Embed\LimitExceeded
+                    ? 'limit ' . $thrown->limit
+                    : $thrown::class;
             }
         }
         $orders->failure = new \RuntimeException('host failure');
@@ -462,8 +543,9 @@ function test_runs_do_not_change_the_host_process(): void
         ini_set('memory_limit', $memoryLimit);
     }
     assertSame([
-        'ok' => "checked 5 orders\n", 'script error' => RuntimeError::class, 'syntax' => SyntaxError::class, 'coroutines' => [1],
-        'steps' => 'limit steps', 'output' => 'limit output', 'memory' => 'limit memory', 'coroutine limit' => 'limit coroutines',
+        'ok' => "checked 5 orders\n", 'script error' => RuntimeError::class, 'syntax' => SyntaxError::class,
+        'coroutines' => [1], 'steps' => 'limit steps', 'output' => 'limit output', 'memory' => 'limit memory',
+        'coroutine limit' => 'limit coroutines',
         'print' => [' 0.33', 'integer'], 'missing module' => RuntimeError::class, 'php exception' => 'host failure',
     ], $outcomes);
     assertSame('', $echoed, 'nothing was echoed');
@@ -527,13 +609,23 @@ function test_compiling_ahead_of_time_runs_nothing(): void
 
 function test_environment_options_are_checked(): void
 {
-    assertTrue(str_starts_with(assertThrows(\InvalidArgumentException::class, static fn () => new Environment(libraries: ['base', 'network'])), "unknown library 'network'"));
+    $message = assertThrows(
+        \InvalidArgumentException::class,
+        static fn () => new Environment(libraries: ['base', 'network']),
+    );
+    assertTrue(str_starts_with($message, "unknown library 'network'"));
     assertThrows(\InvalidArgumentException::class, static fn () => new Environment(libraries: ['os.']));
     new Environment(libraries: ['base', 'string', 'table', 'math', 'os.time', 'os.date']);
     new Environment(libraries: Libraries::ALL);
-    assertSame('Limits: steps must be null or at least 0', assertThrows(\InvalidArgumentException::class, static fn () => new Limits(steps: -1)));
+    assertSame(
+        'Limits: steps must be null or at least 0',
+        assertThrows(\InvalidArgumentException::class, static fn () => new Limits(steps: -1)),
+    );
     assertThrows(\InvalidArgumentException::class, static fn () => new Limits(seconds: NAN));
     assertThrows(\LogicException::class, static fn () => (new Environment())->run('x.lua'));
     assertThrows(\InvalidArgumentException::class, static fn () => (new Environment())->addModule('', []));
-    assertThrows(\InvalidArgumentException::class, static fn () => (new Environment())->newSandbox()->load('return ...')->call(x: 1));
+    assertThrows(
+        \InvalidArgumentException::class,
+        static fn () => (new Environment())->newSandbox()->load('return ...')->call(x: 1),
+    );
 }

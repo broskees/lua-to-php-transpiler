@@ -16,7 +16,7 @@ use LuaPhp\Emitter\Emitter;
  * (compact_forms.php) to show it.
  */
 
-/** makes every instruction that has a compact form compact (compact_forms.php) */
+// makes every instruction that has a compact form compact (compact_forms.php)
 const COMPACT = ['-d', 'auto_prepend_file=' . REPO_ROOT . '/tests/unit/compact_forms.php'];
 
 function test_the_differential_cases_behave_like_lua_in_compact_form(): void
@@ -38,12 +38,16 @@ function test_the_differential_cases_behave_like_lua_in_compact_form(): void
         foreach ($running as $name => [$referenceProcess, $ourProcess]) {
             [$referenceStatus, $referenceStdout, $referenceStderr] = finishProcess($referenceProcess);
             [$ourStatus, $ourStdout, $ourStderr] = finishProcess($ourProcess);
+            $expectedStdout = normalizeDifferentialOutput($referenceStdout, 'lua5.4');
+            $actualStdout = normalizeDifferentialOutput($ourStdout, 'lua5.4');
+            $expectedStderr = normalizeDifferentialOutput($referenceStderr, 'lua5.4');
+            $actualStderr = normalizeDifferentialOutput($ourStderr, $ourProgram);
             if ($referenceStatus !== $ourStatus) {
                 $failures[] = "$name: exit status $ourStatus, expected $referenceStatus";
-            } elseif (normalizeDifferentialOutput($referenceStdout, 'lua5.4') !== normalizeDifferentialOutput($ourStdout, 'lua5.4')) {
-                $failures[] = "$name: stdout" . firstDifference(normalizeDifferentialOutput($referenceStdout, 'lua5.4'), normalizeDifferentialOutput($ourStdout, 'lua5.4'));
-            } elseif (normalizeDifferentialOutput($referenceStderr, 'lua5.4') !== normalizeDifferentialOutput($ourStderr, $ourProgram)) {
-                $failures[] = "$name: stderr" . firstDifference(normalizeDifferentialOutput($referenceStderr, 'lua5.4'), normalizeDifferentialOutput($ourStderr, $ourProgram));
+            } elseif ($expectedStdout !== $actualStdout) {
+                $failures[] = "$name: stdout" . firstDifference($expectedStdout, $actualStdout);
+            } elseif ($expectedStderr !== $actualStderr) {
+                $failures[] = "$name: stderr" . firstDifference($expectedStderr, $actualStderr);
             }
         }
     }
@@ -78,7 +82,8 @@ function test_big_chunks_load_within_phps_default_memory_limit(): void
     file_put_contents("$directory/hot.lua", 'return ' . bigFunction(3000) . "\n");
     file_put_contents("$directory/mixed.lua", "return {\n" . implode("\n", $rows) . "\n}\n");
     file_put_contents("$directory/script.lua", 'local big = ' . bigFunction(3000) . "\n"
-        . "print('script', coroutine.wrap(function () local t = 0 for i = 1, 100 do t = t + big(i) end return t end)())\n");
+        . "print('script', coroutine.wrap(function ()"
+        . " local t = 0 for i = 1, 100 do t = t + big(i) end return t end)())\n");
     $use = "local big, rows = require 'hot', require 'mixed'\n"
         . "local t = 0 for i = 1, 100 do t = t + big(i) end\n"
         . "return t, #rows, rows[#rows].id, rows[1].fmt == string.format\n";
@@ -91,7 +96,9 @@ function test_big_chunks_load_within_phps_default_memory_limit(): void
         $variants = [
             'off' => ['-d', 'opcache.enable_cli=0'],
             'on' => OPCACHE_ON_NEW_FILES,
-            'on with the tracing JIT' => [...OPCACHE_ON_NEW_FILES, '-d', 'opcache.jit=tracing', '-d', 'opcache.jit_buffer_size=64M'],
+            'on with the tracing JIT' => [
+                ...OPCACHE_ON_NEW_FILES, '-d', 'opcache.jit=tracing', '-d', 'opcache.jit_buffer_size=64M',
+            ],
         ];
         foreach ($variants as $opcache => $options) {
             $result = runCommand(['php', ...$options, '-d', 'memory_limit=128M', "$name.php"], '', "$directory/out");
@@ -122,8 +129,16 @@ function test_the_code_outside_loops_of_the_heaviest_functions_is_compact(): voi
     assertTrue(substr_count($withLoopCode, 'Op::arith($L, ') === 3000, 'the code outside the loop is compact');
     // PHP's tracing JIT does not trace compact functions (see FunctionEmitter::emit)
     assertSame(2, substr_count($code, 'opcache_jit_blacklist('), 'the compact functions are kept from the JIT');
-    assertTrue(str_contains($withLoopCode, 'opcache_jit_blacklist($function_0_1)') && str_contains($bigCode, 'opcache_jit_blacklist($function_0_2)'));
+    assertTrue(
+        str_contains($withLoopCode, 'opcache_jit_blacklist($function_0_1)')
+        && str_contains($bigCode, 'opcache_jit_blacklist($function_0_2)')
+    );
     // a lighter chunk is all inline
-    $light = str_replace(str_repeat("  s = s + n\n", 3000), str_repeat("  s = s + n\n", 1000), "$small\n$withLoop\nreturn withLoop(2)");
-    assertTrue(!str_contains(Emitter::emitChunk(Compiler::compile($light, '=light')), 'Op::'), 'a light chunk stays inline');
+    $light = str_replace(
+        str_repeat("  s = s + n\n", 3000),
+        str_repeat("  s = s + n\n", 1000),
+        "$small\n$withLoop\nreturn withLoop(2)",
+    );
+    $lightCode = Emitter::emitChunk(Compiler::compile($light, '=light'));
+    assertTrue(!str_contains($lightCode, 'Op::'), 'a light chunk stays inline');
 }

@@ -26,13 +26,18 @@ final class MathLib
         $library = new LuaTable();
         Auxiliary::setFunctions($library, [
             'abs' => self::abs(...),
-            'acos' => static fn (Coroutine $L, array $args): array => [acos((float) Auxiliary::checkNumber($L, $args, 1))],
-            'asin' => static fn (Coroutine $L, array $args): array => [asin((float) Auxiliary::checkNumber($L, $args, 1))],
+            'acos' => static fn (Coroutine $L, array $args): array
+                => [acos((float) Auxiliary::checkNumber($L, $args, 1))],
+            'asin' => static fn (Coroutine $L, array $args): array
+                => [asin((float) Auxiliary::checkNumber($L, $args, 1))],
             'atan' => self::atan(...),
             'ceil' => self::ceil(...),
-            'cos' => static fn (Coroutine $L, array $args): array => [cos((float) Auxiliary::checkNumber($L, $args, 1))],
-            'deg' => static fn (Coroutine $L, array $args): array => [(float) Auxiliary::checkNumber($L, $args, 1) * (180.0 / M_PI)],
-            'exp' => static fn (Coroutine $L, array $args): array => [exp((float) Auxiliary::checkNumber($L, $args, 1))],
+            'cos' => static fn (Coroutine $L, array $args): array
+                => [cos((float) Auxiliary::checkNumber($L, $args, 1))],
+            'deg' => static fn (Coroutine $L, array $args): array
+                => [(float) Auxiliary::checkNumber($L, $args, 1) * (180.0 / M_PI)],
+            'exp' => static fn (Coroutine $L, array $args): array
+                => [exp((float) Auxiliary::checkNumber($L, $args, 1))],
             'tointeger' => self::tointeger(...),
             'floor' => self::floor(...),
             'fmod' => self::fmod(...),
@@ -41,20 +46,29 @@ final class MathLib
             'max' => self::max(...),
             'min' => self::min(...),
             'modf' => self::modf(...),
-            'rad' => static fn (Coroutine $L, array $args): array => [(float) Auxiliary::checkNumber($L, $args, 1) * (M_PI / 180.0)],
-            'sin' => static fn (Coroutine $L, array $args): array => [sin((float) Auxiliary::checkNumber($L, $args, 1))],
-            'sqrt' => static fn (Coroutine $L, array $args): array => [sqrt((float) Auxiliary::checkNumber($L, $args, 1))],
-            'tan' => static fn (Coroutine $L, array $args): array => [tan((float) Auxiliary::checkNumber($L, $args, 1))],
+            'rad' => static fn (Coroutine $L, array $args): array
+                => [(float) Auxiliary::checkNumber($L, $args, 1) * (M_PI / 180.0)],
+            'sin' => static fn (Coroutine $L, array $args): array
+                => [sin((float) Auxiliary::checkNumber($L, $args, 1))],
+            'sqrt' => static fn (Coroutine $L, array $args): array
+                => [sqrt((float) Auxiliary::checkNumber($L, $args, 1))],
+            'tan' => static fn (Coroutine $L, array $args): array
+                => [tan((float) Auxiliary::checkNumber($L, $args, 1))],
             'type' => self::type(...),
             // LUA_COMPAT_MATHLIB
             'atan2' => self::atan(...),
-            'cosh' => static fn (Coroutine $L, array $args): array => [cosh((float) Auxiliary::checkNumber($L, $args, 1))],
-            'sinh' => static fn (Coroutine $L, array $args): array => [sinh((float) Auxiliary::checkNumber($L, $args, 1))],
-            'tanh' => static fn (Coroutine $L, array $args): array => [tanh((float) Auxiliary::checkNumber($L, $args, 1))],
-            'pow' => static fn (Coroutine $L, array $args): array => [fpow((float) Auxiliary::checkNumber($L, $args, 1), (float) Auxiliary::checkNumber($L, $args, 2))],
+            'cosh' => static fn (Coroutine $L, array $args): array
+                => [cosh((float) Auxiliary::checkNumber($L, $args, 1))],
+            'sinh' => static fn (Coroutine $L, array $args): array
+                => [sinh((float) Auxiliary::checkNumber($L, $args, 1))],
+            'tanh' => static fn (Coroutine $L, array $args): array
+                => [tanh((float) Auxiliary::checkNumber($L, $args, 1))],
+            'pow' => static fn (Coroutine $L, array $args): array
+                => [fpow((float) Auxiliary::checkNumber($L, $args, 1), (float) Auxiliary::checkNumber($L, $args, 2))],
             'frexp' => self::frexpFunction(...),
             'ldexp' => self::ldexpFunction(...),
-            'log10' => static fn (Coroutine $L, array $args): array => [log10((float) Auxiliary::checkNumber($L, $args, 1))],
+            'log10' => static fn (Coroutine $L, array $args): array
+                => [log10((float) Auxiliary::checkNumber($L, $args, 1))],
         ]);
         $library->hash['pi'] = M_PI;
         $library->hash['huge'] = INF;

@@ -142,8 +142,13 @@ final class Emitter
      *
      * @param list<FunctionEmitter> $emitters
      */
-    private static function createEmitters(Proto $proto, string $path, string &$protoDeclarations, array &$emitters, bool $countSteps): void
-    {
+    private static function createEmitters(
+        Proto $proto,
+        string $path,
+        string &$protoDeclarations,
+        array &$emitters,
+        bool $countSteps,
+    ): void {
         foreach ($proto->p as $childIndex => $child) {
             $childPath = $path . '_' . $childIndex;
             $protoDeclarations .= '    $proto_' . $childPath . ' = $proto_' . $path . '->p[' . $childIndex . "];\n";

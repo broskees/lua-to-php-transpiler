@@ -111,7 +111,8 @@ final class Hooks
     public static function retHook(Coroutine $L, CallInfo $ci, int $ftransfer, int $nres): void
     {
         if ($L->hookmask & Lua::LUA_MASKRET) {  // is return hook on?
-            self::hook($L, Lua::LUA_HOOKRET, -1, $ftransfer, $nres, $ftransfer + $nres - 1);  // (the results end at the top)
+            // (the results end at the top)
+            self::hook($L, Lua::LUA_HOOKRET, -1, $ftransfer, $nres, $ftransfer + $nres - 1);
         }
         $previous = $ci->previous;
         if ($previous !== null && $previous->func instanceof LuaClosure) {
@@ -148,8 +149,10 @@ final class Hooks
         if ($mask & Lua::LUA_MASKLINE) {
             // 'L->oldpc' may be invalid; use zero in this case
             $oldpc = $L->oldpc < \count($p->code) ? $L->oldpc : 0;
-            if ($pc <= $oldpc  // call hook when jump back (loop),
-                || self::changedLine($p, $oldpc, $pc)) {  // or when enter new line
+            if (
+                $pc <= $oldpc  // call hook when jump back (loop),
+                || self::changedLine($p, $oldpc, $pc)  // or when enter new line
+            ) {
                 self::hook($L, Lua::LUA_HOOKLINE, DebugInfo::getFuncLine($p, $pc), 0, 0, $top);  // call line hook
             }
             $L->oldpc = $pc;  // 'pc' of last call to line hook

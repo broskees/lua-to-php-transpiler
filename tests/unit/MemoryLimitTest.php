@@ -53,7 +53,8 @@ function cases(): array
             <<<'LUA'
             try(table.concat, refs)
             try(table.concat, refs, ",")
-            try(table.concat, setmetatable({}, {__index = function() return mb end, __len = function() return 1000 end}))
+            try(table.concat,
+                setmetatable({}, {__index = function() return mb end, __len = function() return 1000 end}))
             try(table.concat, refs, "", 1, 10)
             LUA,
             NO_MEMORY . NO_MEMORY . NO_MEMORY . "true\t#10000000\n",
@@ -181,7 +182,9 @@ function commands(string $name): array
     return [
         'lua5.4' => ['sh', '-c', 'ulimit -v 163840 && exec lua5.4 "$1"', 'sh', "$name.lua"],
         'lua2php' => ['php', ...OPCACHE_ON_NEW_FILES, '-d', 'memory_limit=128M', "php/$name.php"],
-        'bin/lua' => ['php', '-d', 'memory_limit=64M', '-d', 'max_memory_limit=128M', REPO_ROOT . '/bin/lua', "$name.lua"],
+        'bin/lua' => [
+            'php', '-d', 'memory_limit=64M', '-d', 'max_memory_limit=128M', REPO_ROOT . '/bin/lua', "$name.lua",
+        ],
     ];
 }
 
@@ -203,10 +206,15 @@ function test_huge_results_are_a_catchable_not_enough_memory_error(): void
         $running = array_map(static fn (array $command): array => startProcess($command, $directory), commands($name));
         foreach ($running as $label => $process) {
             [$status, $stdout, $stderr] = finishProcess($process);
-            $programName = ['lua5.4' => 'lua5.4', 'lua2php' => "php/$name.php", 'bin/lua' => REPO_ROOT . '/bin/lua'][$label];
+            $programName = match ($label) {
+                'lua5.4' => 'lua5.4',
+                'lua2php' => "php/$name.php",
+                'bin/lua' => REPO_ROOT . '/bin/lua',
+            };
             $actual = [$status, $stdout, normalizeDifferentialOutput(substr($stderr, 0, 2000), $programName)];
             if ($actual !== $expected[$name]) {
-                $failures[] = "$name under $label: expected " . var_export($expected[$name], true) . ', got ' . var_export($actual, true);
+                $failures[] = "$name under $label: expected " . var_export($expected[$name], true)
+                    . ', got ' . var_export($actual, true);
             }
         }
     }
@@ -226,14 +234,30 @@ function test_memory_limit_policy(): void
     [$status, , $errorOutput] = runCommand(['php', REPO_ROOT . '/bin/lua2php', 'big.lua'], '', $directory);
     assertSame(0, $status, $errorOutput);
     $cases = [
-        'lua2php, memory_limit=128M, capped at 256M' => [['-d', 'memory_limit=128M', '-d', 'max_memory_limit=256M', 'big.php'], NO_MEMORY],
+        'lua2php, memory_limit=128M, capped at 256M' => [
+            ['-d', 'memory_limit=128M', '-d', 'max_memory_limit=256M', 'big.php'],
+            NO_MEMORY,
+        ],
         'lua2php, memory_limit=512M' => [['-d', 'memory_limit=512M', 'big.php'], "true\t150000000\n"],
-        'bin/lua, memory_limit=128M, capped at 256M' => [['-d', 'memory_limit=128M', '-d', 'max_memory_limit=256M', REPO_ROOT . '/bin/lua', 'big.lua'], "true\t150000000\n"],
-        'bin/lua, memory_limit=128M, capped at 128M' => [['-d', 'memory_limit=128M', '-d', 'max_memory_limit=128M', REPO_ROOT . '/bin/lua', 'big.lua'], NO_MEMORY],
-        'bin/lua, memory_limit=128M' => [['-d', 'memory_limit=128M', REPO_ROOT . '/bin/lua', 'big.lua'], "true\t150000000\n"],
+        'bin/lua, memory_limit=128M, capped at 256M' => [
+            ['-d', 'memory_limit=128M', '-d', 'max_memory_limit=256M', REPO_ROOT . '/bin/lua', 'big.lua'],
+            "true\t150000000\n",
+        ],
+        'bin/lua, memory_limit=128M, capped at 128M' => [
+            ['-d', 'memory_limit=128M', '-d', 'max_memory_limit=128M', REPO_ROOT . '/bin/lua', 'big.lua'],
+            NO_MEMORY,
+        ],
+        'bin/lua, memory_limit=128M' => [
+            ['-d', 'memory_limit=128M', REPO_ROOT . '/bin/lua', 'big.lua'],
+            "true\t150000000\n",
+        ],
     ];
     foreach ($cases as $label => [$phpArguments, $expectedOutput]) {
-        assertSame([0, $expectedOutput, ''], runCommand(['php', ...OPCACHE_ON_NEW_FILES, ...$phpArguments], '', $directory), $label);
+        assertSame(
+            [0, $expectedOutput, ''],
+            runCommand(['php', ...OPCACHE_ON_NEW_FILES, ...$phpArguments], '', $directory),
+            $label,
+        );
     }
 }
 
@@ -262,11 +286,17 @@ function test_deep_recursion_is_a_stack_overflow_under_a_low_memory_limit(): voi
     assertSame(0, $status, $errorOutput);
     $overflow = "false\trecursion.lua:1: stack overflow\n";
     foreach (['64M' => 5000, '128M' => 10000] as $limit => $depth) {
-        $expected = [0, $overflow . "false\terror in error handling\n" . $overflow . "true\t" . intdiv($depth * ($depth + 1), 2) . "\nafter\n", ''];
+        $sum = intdiv($depth * ($depth + 1), 2);
+        $expected = [0, $overflow . "false\terror in error handling\n" . $overflow . "true\t$sum\nafter\n", ''];
         $commands = [
             'lua5.4' => ['lua5.4', 'recursion.lua', (string) $depth],
-            'lua2php' => ['php', '-d', 'opcache.enable_cli=0', '-d', "memory_limit=$limit", 'recursion.php', (string) $depth],
-            'bin/lua' => ['php', '-d', "memory_limit=$limit", '-d', "max_memory_limit=$limit", REPO_ROOT . '/bin/lua', 'recursion.lua', (string) $depth],
+            'lua2php' => [
+                'php', '-d', 'opcache.enable_cli=0', '-d', "memory_limit=$limit", 'recursion.php', (string) $depth,
+            ],
+            'bin/lua' => [
+                'php', '-d', "memory_limit=$limit", '-d', "max_memory_limit=$limit",
+                REPO_ROOT . '/bin/lua', 'recursion.lua', (string) $depth,
+            ],
         ];
         foreach ($commands as $label => $command) {
             // (through files: PHP's fatal error would print a trace too long for a pipe)

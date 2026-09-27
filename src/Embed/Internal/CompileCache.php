@@ -64,7 +64,10 @@ final class CompileCache implements ChunkCache
         $message = \is_string($error->value) ? $error->value : Lua::MEMERRMSG;
         $prefix = ChunkId::of($source->chunkName) . ':';
         $line = null;
-        if (str_starts_with($message, $prefix) && preg_match('/^(\d+):/', substr($message, \strlen($prefix)), $match) === 1) {
+        if (
+            str_starts_with($message, $prefix)
+            && preg_match('/^(\d+):/', substr($message, \strlen($prefix)), $match) === 1
+        ) {
             $line = (int) $match[1];
         }
         return new SyntaxError($message, $source->chunkName, $line);

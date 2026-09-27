@@ -60,7 +60,8 @@ final class StringFormat
         while ($position < $formatEnd) {
             $escapePosition = strpos($format, self::L_ESC, $position);
             // room for the text before the next item and for the item, unless it is a string (checked below)
-            $bytes = \strlen($result) + ($escapePosition === false ? $formatEnd : $escapePosition) - $position + self::MAX_ITEM;
+            $bytes = \strlen($result) + ($escapePosition === false ? $formatEnd : $escapePosition) - $position
+                + self::MAX_ITEM;
             if ($bytes > $capacity) {
                 $capacity = MemoryLimit::grow($bytes, $L->globalState->budget);
             }
@@ -80,7 +81,8 @@ final class StringFormat
                 Auxiliary::argError($L, $arg, 'no value');
             }
             // lstrlib.c: getformat: spans flags, width, and precision ('0' is included as a flag)
-            $length = strspn($format, self::L_FMTFLAGSF . '123456789.', $position) + 1;  // adds following character (should be the specifier)
+            // adds following character (should be the specifier)
+            $length = strspn($format, self::L_FMTFLAGSF . '123456789.', $position) + 1;
             if ($length >= self::MAX_FORMAT - 10) {  // still needs space for '%', '\0', plus a length modifier
                 Auxiliary::error($L, 'invalid format (too long)');
             }
@@ -143,7 +145,8 @@ final class StringFormat
                     break;
                 case 's':
                     // fast path: a string, when strings have no '__tostring'
-                    $string = \is_string($value) && !isset($L->globalState->typeMetatables[Lua::LUA_TSTRING]->hash['__tostring'])
+                    $string = \is_string($value)
+                        && !isset($L->globalState->typeMetatables[Lua::LUA_TSTRING]->hash['__tostring'])
                         ? $value
                         : Auxiliary::toLString($L, $value);
                     if (\strlen($form) === 2) {  // no modifiers?
@@ -224,7 +227,11 @@ final class StringFormat
         if ($pointPosition === false) {
             return [$flags, (int) $widthAndPrecision, null];
         }
-        return [$flags, (int) substr($widthAndPrecision, 0, $pointPosition), (int) substr($widthAndPrecision, $pointPosition + 1)];
+        return [
+            $flags,
+            (int) substr($widthAndPrecision, 0, $pointPosition),
+            (int) substr($widthAndPrecision, $pointPosition + 1),
+        ];
     }
 
     /** C printf's field width for a string item ('%s', '%c', '%p'): pad with spaces */
@@ -241,8 +248,14 @@ final class StringFormat
     }
 
     /** lstrlib.c: str_format's 'intcase': C printf "%lld" and friends */
-    private static function formatInteger(Coroutine $L, array $args, int $arg, string $form, string $conversion, string $validFlags): string
-    {
+    private static function formatInteger(
+        Coroutine $L,
+        array $args,
+        int $arg,
+        string $form,
+        string $conversion,
+        string $validFlags,
+    ): string {
         $n = Auxiliary::checkInteger($L, $args, $arg);
         self::checkFormat($L, $form, $validFlags, true);
         [$flags, $width, $precision] = self::parseSpecification($form);

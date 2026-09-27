@@ -331,7 +331,8 @@ final class DebugLib
                 return [];
             }
             try {
-                // luaL_loadbuffer: code that exists only at run time, so also in lua2php output (through load()'s cache)
+                // luaL_loadbuffer: code that exists only at run time, so also in lua2php output (through
+                // load()'s cache)
                 $chunk = ChunkLoader::load($L, DebugInfo::cString($line), '=(debug command)', null);
                 [$status, $value] = Calls::protectedCall($L, $chunk, []);
             } catch (LuaError $error) {  // syntax error
@@ -392,7 +393,8 @@ final class DebugLib
     private static function setmetatable(Coroutine $L, array $args): array
     {
         $metatableType = Auxiliary::argumentType($args, 2);
-        Auxiliary::argExpected($L, $metatableType === Lua::LUA_TNIL || $metatableType === Lua::LUA_TTABLE, $args, 2, 'nil or table');
+        $isNilOrTable = $metatableType === Lua::LUA_TNIL || $metatableType === Lua::LUA_TTABLE;
+        Auxiliary::argExpected($L, $isNilOrTable, $args, 2, 'nil or table');
         $value = $args[0];
         $metatable = $args[1];
         if ($value instanceof LuaTable || $value instanceof Userdata) {
@@ -495,8 +497,12 @@ final class DebugLib
      * ldblib.c: checkupval with lapi.c: lua_upvalueid: the identity of
      * upvalue $n of the function in argument $functionArgument, or null.
      */
-    private static function upvalueIdentity(Coroutine $L, array $args, int $functionArgument, int $indexArgument): ?object
-    {
+    private static function upvalueIdentity(
+        Coroutine $L,
+        array $args,
+        int $functionArgument,
+        int $indexArgument,
+    ): ?object {
         $n = Auxiliary::checkInteger($L, $args, $indexArgument);  // upvalue index
         Auxiliary::checkType($L, $args, $functionArgument, Lua::LUA_TFUNCTION);  // closure
         $function = $args[$functionArgument - 1];

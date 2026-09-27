@@ -115,7 +115,11 @@ final class Op
         }
         $R = &$ci->R;
         $t = $R[$b];
-        if ($t instanceof LuaTable && (($v = (\is_int($key) ? ($t->arr[$key] ?? null) : ($t->hash[$key] ?? null))) !== null || $t->metatable === null)) {
+        if (
+            $t instanceof LuaTable
+            && (($v = (\is_int($key) ? ($t->arr[$key] ?? null) : ($t->hash[$key] ?? null))) !== null
+                || $t->metatable === null)
+        ) {
             $R[$a] = $v;
         } else {
             $ci->savedpc = $pc;
@@ -133,7 +137,13 @@ final class Op
         $R = &$ci->R;
         $t = $R[$b];
         $key = $R[$c];
-        if ($t instanceof LuaTable && (($v = (\is_int($key) ? ($t->arr[$key] ?? null) : (\is_string($key) ? ($t->hash[$key] ?? null) : $t->get($key)))) !== null || $t->metatable === null)) {
+        if (
+            $t instanceof LuaTable
+            && (($v = (\is_int($key)
+                    ? ($t->arr[$key] ?? null)
+                    : (\is_string($key) ? ($t->hash[$key] ?? null) : $t->get($key)))) !== null
+                || $t->metatable === null)
+        ) {
             $R[$a] = $v;
         } else {
             $ci->savedpc = $pc;
@@ -213,8 +223,15 @@ final class Op
     }
 
     /** t[key] = v for a string key (emitted code: emitSetField) */
-    private static function setString(Coroutine $L, CallInfo $ci, int $pc, mixed $t, string $key, mixed $v, int $slot): void
-    {
+    private static function setString(
+        Coroutine $L,
+        CallInfo $ci,
+        int $pc,
+        mixed $t,
+        string $key,
+        mixed $v,
+        int $slot,
+    ): void {
         if ($t instanceof LuaTable && ($t->metatable === null || isset($t->hash[$key]))) {
             if ($v !== null) {
                 $t->hash[$key] = $v;
@@ -228,8 +245,15 @@ final class Op
     }
 
     /** t[key] = v for an integer key (emitted code: OP_SETI) */
-    private static function setInteger(Coroutine $L, CallInfo $ci, int $pc, mixed $t, int $key, mixed $v, int $slot): void
-    {
+    private static function setInteger(
+        Coroutine $L,
+        CallInfo $ci,
+        int $pc,
+        mixed $t,
+        int $key,
+        mixed $v,
+        int $slot,
+    ): void {
         if ($t instanceof LuaTable && ($t->metatable === null || isset($t->arr[$key]))) {
             if ($v !== null) {
                 $t->arr[$key] = $v;
@@ -326,8 +350,15 @@ final class Op
      * operand is not a number: R[A] := R[B] op K[C] ($flip: the metamethod
      * gets the constant first).
      */
-    public static function arithK(Coroutine $L, int $pc, int $a, int $b, int|float $constant, int $operation, bool $flip): void
-    {
+    public static function arithK(
+        Coroutine $L,
+        int $pc,
+        int $a,
+        int $b,
+        int|float $constant,
+        int $operation,
+        bool $flip,
+    ): void {
         $ci = $L->ci;
         if ($L->trap) {
             Hooks::traceExec($L, $ci, $pc);
@@ -361,8 +392,15 @@ final class Op
      * OP_ADDI, OP_SHRI (R[A] := R[B] op sC) and OP_SHLI (R[A] := sC << R[B]),
      * then the OP_MMBINI that follows when the operand is not a number.
      */
-    public static function arithI(Coroutine $L, int $pc, int $a, int $b, int $immediate, int $operation, bool $flip): void
-    {
+    public static function arithI(
+        Coroutine $L,
+        int $pc,
+        int $a,
+        int $b,
+        int $immediate,
+        int $operation,
+        bool $flip,
+    ): void {
         $ci = $L->ci;
         if ($L->trap) {
             Hooks::traceExec($L, $ci, $pc);
@@ -371,7 +409,9 @@ final class Op
         $x = $R[$b];
         if (\is_int($x) && $operation <= Vm::LUA_OPSUB) {  // (the inline code's integer path)
             $v = $operation === Vm::LUA_OPADD ? $x + $immediate : $x - $immediate;
-            $R[$a] = \is_int($v) ? $v : ($operation === Vm::LUA_OPADD ? Vm::addWrap($x, $immediate) : Vm::subWrap($x, $immediate));
+            $R[$a] = \is_int($v)
+                ? $v
+                : ($operation === Vm::LUA_OPADD ? Vm::addWrap($x, $immediate) : Vm::subWrap($x, $immediate));
             return;
         }
         $result = $operation === Vm::LUA_OPSHL
@@ -480,7 +520,8 @@ final class Op
             $R[$a] = Vm::concat($L, $values, $a);
         }
         $v = $R[$a];
-        if (($L->globalState->gcDebt += (\is_string($v) ? Collector::STRING_OVERHEAD + \strlen($v) : 0)) > 0) {  // lvm.c: checkGC
+        if (($L->globalState->gcDebt += (\is_string($v) ? Collector::STRING_OVERHEAD + \strlen($v) : 0)) > 0) {
+            // lvm.c: checkGC
             $ci->savedpc = $pc;
             Collector::step($L, $a + 1);
         }
@@ -694,7 +735,9 @@ final class Op
             }
         }
         $f = $R[$a];
-        $ret = $f instanceof LuaClosure ? (($f->code)($L, $f, $args) ?? Calls::finishTailCall($L)) : Calls::callNonLua($L, $f, $args);
+        $ret = $f instanceof LuaClosure
+            ? (($f->code)($L, $f, $args) ?? Calls::finishTailCall($L))
+            : Calls::callNonLua($L, $f, $args);
         if ($c === 0) {  // all results
             $n = \count($ret);
             for ($i = 0; $i < $n; $i++) {
@@ -744,7 +787,8 @@ final class Op
         $va = $ci->varargs;
         if ($wanted < 0) {
             $n = \count($va);
-            if ($L->globalState->countSteps && ($L->globalState->stepsLeft -= $n) < 0) {  // (code counting steps: a step per value)
+            if ($L->globalState->countSteps && ($L->globalState->stepsLeft -= $n) < 0) {
+                // (code counting steps: a step per value)
                 Budget::stepsUsedUp($L);
             }
             for ($i = 0; $i < $n; $i++) {

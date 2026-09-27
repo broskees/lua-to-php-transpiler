@@ -1,0 +1,31 @@
+<?xml version="1.0"?>
+<ruleset name="lua-to-php-transpiler">
+    <description>PSR-12 for the transpiler, its runtime, its tools and its tests.</description>
+
+    <file>src</file>
+    <file>bin/lua</file>
+    <file>bin/lua2php</file>
+    <file>bin/luac</file>
+    <file>tests</file>
+    <file>bench</file>
+
+    <exclude-pattern>*/reference/*</exclude-pattern>
+    <exclude-pattern>*/vendor/*</exclude-pattern>
+
+    <arg name="extensions" value="php"/>
+    <arg name="colors"/>
+    <arg value="sp"/>
+
+    <rule ref="PSR12"/>
+
+    <!--
+        PHP_CodeSniffer 4.0 does not parse PHP 8.4 property hooks (the
+        project needs PHP 8.4): it reads Source::$fingerprint's get hook as
+        more property declarations, one of them "$this". The hook is the
+        public API (a fingerprint computed when asked), so the sniff is off
+        for that file only.
+    -->
+    <rule ref="PSR2.Classes.PropertyDeclaration">
+        <exclude-pattern>*/src/Embed/Loader/Source\.php$</exclude-pattern>
+    </rule>
+</ruleset>

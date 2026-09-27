@@ -236,21 +236,24 @@ final class FunctionEmitter
 
         $sourceName = PhpLiteral::commentText(ChunkId::of($proto->source ?? '=?'), 60);
         $closureClass = self::closureClass($proto);
-        $code = "    \$function_{$this->path} = static function (Coroutine \$L, $closureClass \$cl, array \$R, int \$callstatus = 0)$useClause: ?array {\n";
+        $code = "    \$function_{$this->path} = static function "
+            . "(Coroutine \$L, $closureClass \$cl, array \$R, int \$callstatus = 0)$useClause: ?array {\n";
         $code .= self::INDENT . "// function <$sourceName:{$proto->linedefined},{$proto->lastlinedefined}>"
             . " numparams={$proto->numparams}" . ($proto->is_vararg ? ' vararg' : '')
             . " maxstacksize={$proto->maxstacksize} instructions=" . \count($proto->code) . "\n";
         // ldo.c: luaD_precall for a Lua function (CallInfo::push, inline)
         $code .= self::lines(
             '$ci = new CallInfo(); $ci->func = $cl; $ci->callstatus = $callstatus;',
-            '$ci->previous = $previous = $L->ci; $ci->top = $previous->top + ' . ($proto->maxstacksize + 1) . '; $ci->frameBytes = $previous->frameBytes + ' . $this->frameBytes($compactInstructions) . ';',
+            '$ci->previous = $previous = $L->ci; $ci->top = $previous->top + ' . ($proto->maxstacksize + 1)
+                . '; $ci->frameBytes = $previous->frameBytes + ' . $this->frameBytes($compactInstructions) . ';',
             'if ($ci->top > $L->stackLimit || $ci->frameBytes > $L->frameBytesLimit) {',
             '    Calls::stackOverflow($L);',
             '}',
         );
         if ($this->countSteps) {
             $code .= self::lines(
-                '$ci->depth = ($previous->depth ?: Calls::luaDepth($previous)) + 1;  // (0: a native frame, which stores none)',
+                '$ci->depth = ($previous->depth ?: Calls::luaDepth($previous)) + 1;'
+                    . '  // (0: a native frame, which stores none)',
                 'if ($ci->depth > $L->globalState->callDepthLimit) {',
                 '    Calls::callDepthOverflow($L, $ci->depth);',
                 '}',
@@ -270,9 +273,10 @@ final class FunctionEmitter
         $code .= self::lines('$trap = &$L->trap;');
         if ($this->countSteps) {  // the function's size (see $countSteps)
             $size = \count($proto->code);
+            $stepsUsedUp = '\\LuaPhp\\Runtime\\Budget::stepsUsedUp($L);';
             $code .= $this->hasBackwardJumps
-                ? self::lines('$steps = &$L->globalState->stepsLeft;', "if ((\$steps -= $size) < 0) { \\LuaPhp\\Runtime\\Budget::stepsUsedUp(\$L); }")
-                : self::lines("if ((\$L->globalState->stepsLeft -= $size) < 0) { \\LuaPhp\\Runtime\\Budget::stepsUsedUp(\$L); }");
+                ? self::lines('$steps = &$L->globalState->stepsLeft;', "if ((\$steps -= $size) < 0) { $stepsUsedUp }")
+                : self::lines("if ((\$L->globalState->stepsLeft -= $size) < 0) { $stepsUsedUp }");
         }
         if (!$proto->is_vararg) {
             // ldebug.c: luaG_tracecall (vararg functions call the hook at OP_VARARGPREP)
@@ -311,7 +315,8 @@ final class FunctionEmitter
             // The Op methods are JIT-compiled anyway; a loop in the function
             // runs as fast as the function did before it was compact, which
             // the JIT did not speed up either.
-            $code .= "    if (\\function_exists('opcache_jit_blacklist')) { \\opcache_jit_blacklist(\$function_{$this->path}); }\n";
+            $code .= "    if (\\function_exists('opcache_jit_blacklist')) { "
+                . "\\opcache_jit_blacklist(\$function_{$this->path}); }\n";
         }
         return $code;
     }
@@ -342,9 +347,9 @@ final class FunctionEmitter
         // before any of $target + 1 .. $pc splits that loop
         $loopDepthChanges = [];
         foreach ($code as $pc => $instruction) {
-            $target = match (OpCodes::GET_OPCODE($instruction)) {
-                OpCodes::OP_JMP => $pc + 1 + OpCodes::GETARG_sJ($instruction),
-                OpCodes::OP_FORLOOP, OpCodes::OP_TFORLOOP => $pc + 1 - OpCodes::GETARG_Bx($instruction),
+            $target = match (OpCodes::getOpcode($instruction)) {
+                OpCodes::OP_JMP => $pc + 1 + OpCodes::getArgSJ($instruction),
+                OpCodes::OP_FORLOOP, OpCodes::OP_TFORLOOP => $pc + 1 - OpCodes::getArgBx($instruction),
                 default => null,
             };
             if ($target !== null && $target <= $pc) {
@@ -415,10 +420,10 @@ final class FunctionEmitter
      */
     private static function instructionWeight(int $instruction): int
     {
-        return 1 + match (OpCodes::GET_OPCODE($instruction)) {
-            OpCodes::OP_CALL, OpCodes::OP_VARARG => max(OpCodes::GETARG_C($instruction) - 1, 0),
-            OpCodes::OP_TFORCALL => OpCodes::GETARG_C($instruction),
-            OpCodes::OP_SETLIST, OpCodes::OP_CONCAT => OpCodes::GETARG_B($instruction),
+        return 1 + match (OpCodes::getOpcode($instruction)) {
+            OpCodes::OP_CALL, OpCodes::OP_VARARG => max(OpCodes::getArgC($instruction) - 1, 0),
+            OpCodes::OP_TFORCALL => OpCodes::getArgC($instruction),
+            OpCodes::OP_SETLIST, OpCodes::OP_CONCAT => OpCodes::getArgB($instruction),
             default => 0,
         };
     }
@@ -502,7 +507,7 @@ final class FunctionEmitter
      */
     private function hookCheck(int $pc): string
     {
-        $opcode = OpCodes::GET_OPCODE($this->proto->code[$pc]);
+        $opcode = OpCodes::getOpcode($this->proto->code[$pc]);
         if ($opcode === OpCodes::OP_VARARGPREP || $opcode === OpCodes::OP_TFORLOOP) {
             return '';
         }
@@ -517,17 +522,17 @@ final class FunctionEmitter
     {
         $code = $this->proto->code;
         foreach ($code as $pc => $instruction) {
-            $opcode = OpCodes::GET_OPCODE($instruction);
+            $opcode = OpCodes::getOpcode($instruction);
             switch ($opcode) {
                 case OpCodes::OP_JMP:
-                    $this->jumpTargets[$pc + 1 + OpCodes::GETARG_sJ($instruction)] = true;
+                    $this->jumpTargets[$pc + 1 + OpCodes::getArgSJ($instruction)] = true;
                     break;
                 case OpCodes::OP_FORLOOP:
                 case OpCodes::OP_TFORLOOP:
-                    $this->jumpTargets[$pc + 1 - OpCodes::GETARG_Bx($instruction)] = true;
+                    $this->jumpTargets[$pc + 1 - OpCodes::getArgBx($instruction)] = true;
                     break;
                 case OpCodes::OP_FORPREP:
-                    $this->jumpTargets[$pc + OpCodes::GETARG_Bx($instruction) + 2] = true;
+                    $this->jumpTargets[$pc + OpCodes::getArgBx($instruction) + 2] = true;
                     break;
                 case OpCodes::OP_LFALSESKIP:
                 case OpCodes::OP_EQ:
@@ -549,18 +554,22 @@ final class FunctionEmitter
         // metamethod call in its 'else' branch, unless something jumps there
         foreach ($code as $pc => $instruction) {
             $nextPc = $pc + 1;
-            if ($nextPc < \count($code)
-                && OpCodes::testMMMode(OpCodes::GET_OPCODE($code[$nextPc]))
-                && !isset($this->jumpTargets[$nextPc])) {
+            if (
+                $nextPc < \count($code)
+                && OpCodes::testMMMode(OpCodes::getOpcode($code[$nextPc]))
+                && !isset($this->jumpTargets[$nextPc])
+            ) {
                 $this->consumed[$nextPc] = true;
-            } elseif ($nextPc < \count($code) && OpCodes::testMMMode(OpCodes::GET_OPCODE($code[$nextPc]))) {
+            } elseif ($nextPc < \count($code) && OpCodes::testMMMode(OpCodes::getOpcode($code[$nextPc]))) {
                 $this->jumpTargets[$pc + 2] = true;  // success path skips the MMBIN with a goto
             }
         }
         foreach ($code as $pc => $instruction) {
-            $opcode = OpCodes::GET_OPCODE($instruction);
-            if (($opcode === OpCodes::OP_LOADKX || $opcode === OpCodes::OP_NEWTABLE || $opcode === OpCodes::OP_SETLIST)
-                && $pc + 1 < \count($code) && OpCodes::GET_OPCODE($code[$pc + 1]) === OpCodes::OP_EXTRAARG) {
+            $opcode = OpCodes::getOpcode($instruction);
+            if (
+                ($opcode === OpCodes::OP_LOADKX || $opcode === OpCodes::OP_NEWTABLE || $opcode === OpCodes::OP_SETLIST)
+                && $pc + 1 < \count($code) && OpCodes::getOpcode($code[$pc + 1]) === OpCodes::OP_EXTRAARG
+            ) {
                 $this->consumed[$pc + 1] = true;
             }
             // the code of a test ends with its jumps (conditionalJump): the
@@ -590,9 +599,9 @@ final class FunctionEmitter
         $code = $this->proto->code;
         $loopChanges = [];
         foreach ($code as $pc => $instruction) {
-            $target = match (OpCodes::GET_OPCODE($instruction)) {
-                OpCodes::OP_JMP => $pc + 1 + OpCodes::GETARG_sJ($instruction),
-                OpCodes::OP_FORLOOP, OpCodes::OP_TFORLOOP => $pc + 1 - OpCodes::GETARG_Bx($instruction),
+            $target = match (OpCodes::getOpcode($instruction)) {
+                OpCodes::OP_JMP => $pc + 1 + OpCodes::getArgSJ($instruction),
+                OpCodes::OP_FORLOOP, OpCodes::OP_TFORLOOP => $pc + 1 - OpCodes::getArgBx($instruction),
                 default => null,
             };
             if ($target !== null && $target <= $pc) {
@@ -625,7 +634,7 @@ final class FunctionEmitter
         $instructionCount = \count($code);
         $runInstructions = 0;
         for ($pc = 0; $pc < $instructionCount; $pc++) {
-            if (OpCodes::GET_OPCODE($code[$pc]) !== OpCodes::OP_NEWTABLE) {
+            if (OpCodes::getOpcode($code[$pc]) !== OpCodes::OP_NEWTABLE) {
                 continue;
             }
             $last = $this->constructorRunEnd($pc);
@@ -651,7 +660,8 @@ final class FunctionEmitter
     private function emitConstructorRun(int $first, int $last): string
     {
         $proto = $this->proto;
-        $code = self::INDENT . "// [$first..$last] constant table constructor: " . ($last - $first + 1) . ' instructions ; lines '
+        $code = self::INDENT . "// [$first..$last] constant table constructor: " . ($last - $first + 1)
+            . ' instructions ; lines '
             . DebugInfo::getFuncLine($proto, $first) . '-' . DebugInfo::getFuncLine($proto, $last) . "\n";
         $call = "TableConstructor::run(\$L, \$ci, \$R, $first, $last);";
         $result = $this->constructorLiterals ? $this->constructorResult($first, $last) : null;
@@ -676,7 +686,8 @@ final class FunctionEmitter
             $fastPath[] = self::r($register) . ' = ' . $this->constructorValue($value) . ';';
         }
         // (the tables live in registers now: a local would keep one alive after Lua drops it)
-        $fastPath[] = 'unset(' . implode(', ', array_map(static fn (int $index): string => '$table' . $index, array_keys($tables))) . ');';
+        $tableVariables = array_map(static fn (int $index): string => '$table' . $index, array_keys($tables));
+        $fastPath[] = 'unset(' . implode(', ', $tableVariables) . ');';
         return $code . self::lines("if (!\$trap && \$L->globalState->gcDebt + $charge <= 0) {")
             . self::lines(...array_map(static fn (string $line): string => "    $line", $fastPath))
             . self::lines('} else {', "    $call", '}');
@@ -703,16 +714,16 @@ final class FunctionEmitter
         $charge = 0;
         for ($pc = $first; $pc <= $last; $pc++) {
             $instruction = $code[$pc];
-            $a = OpCodes::GETARG_A($instruction);
-            $b = OpCodes::GETARG_B($instruction);
-            $c = OpCodes::GETARG_C($instruction);
-            $k = OpCodes::GETARG_k($instruction);
-            $opcode = OpCodes::GET_OPCODE($instruction);
+            $a = OpCodes::getArgA($instruction);
+            $b = OpCodes::getArgB($instruction);
+            $c = OpCodes::getArgC($instruction);
+            $k = OpCodes::getArgK($instruction);
+            $opcode = OpCodes::getOpcode($instruction);
             switch ($opcode) {
                 case OpCodes::OP_NEWTABLE:
                     $arraySize = $c;
                     if ($k) {
-                        $arraySize += OpCodes::GETARG_Ax($code[$pc + 1]) * (OpCodes::MAXARG_C + 1);
+                        $arraySize += OpCodes::getArgAx($code[$pc + 1]) * (OpCodes::MAXARG_C + 1);
                     }
                     $charge += Collector::tableSize($arraySize, $b > 0 ? 1 << ($b - 1) : 0);
                     $registers[$a] = ['table', \count($tables)];
@@ -720,16 +731,16 @@ final class FunctionEmitter
                     $pc++;  // its OP_EXTRAARG
                     continue 2;
                 case OpCodes::OP_LOADK:
-                    $registers[$a] = ['constant', OpCodes::GETARG_Bx($instruction)];
+                    $registers[$a] = ['constant', OpCodes::getArgBx($instruction)];
                     continue 2;
                 case OpCodes::OP_LOADKX:
-                    $registers[$a] = ['constant', OpCodes::GETARG_Ax($code[++$pc])];
+                    $registers[$a] = ['constant', OpCodes::getArgAx($code[++$pc])];
                     continue 2;
                 case OpCodes::OP_LOADI:
-                    $registers[$a] = ['value', OpCodes::GETARG_sBx($instruction)];
+                    $registers[$a] = ['value', OpCodes::getArgSBx($instruction)];
                     continue 2;
                 case OpCodes::OP_LOADF:
-                    $registers[$a] = ['value', (float) OpCodes::GETARG_sBx($instruction)];
+                    $registers[$a] = ['value', (float) OpCodes::getArgSBx($instruction)];
                     continue 2;
                 case OpCodes::OP_LOADFALSE:
                 case OpCodes::OP_LOADTRUE:
@@ -749,7 +760,7 @@ final class FunctionEmitter
             if ($opcode === OpCodes::OP_SETLIST) {
                 $index = $c;
                 if ($k) {
-                    $index += OpCodes::GETARG_Ax($code[++$pc]) * (OpCodes::MAXARG_C + 1);
+                    $index += OpCodes::getArgAx($code[++$pc]) * (OpCodes::MAXARG_C + 1);
                 }
                 for ($i = 1; $i <= $b; $i++) {
                     $value = $registers[$a + $i];
@@ -774,7 +785,8 @@ final class FunctionEmitter
                     'table' => null,
                 };
                 if (\is_float($key)) {
-                    $key = LuaTable::floatToInteger($key);  // an integral float key is that integer (ltable.c: luaH_get)
+                    // an integral float key is that integer (ltable.c: luaH_get)
+                    $key = LuaTable::floatToInteger($key);
                 }
             }
             if (\is_int($key)) {
@@ -855,12 +867,13 @@ final class FunctionEmitter
                 break;
             }
             $instruction = $code[$pc];
-            $a = OpCodes::GETARG_A($instruction);
-            $b = OpCodes::GETARG_B($instruction);
-            $k = OpCodes::GETARG_k($instruction);
-            $valueIsKnown = $k === 1 || isset($written[OpCodes::GETARG_C($instruction)]);
-            $nextIsExtraArgument = $pc + 1 < $instructionCount && OpCodes::GET_OPCODE($code[$pc + 1]) === OpCodes::OP_EXTRAARG;
-            switch (OpCodes::GET_OPCODE($instruction)) {
+            $a = OpCodes::getArgA($instruction);
+            $b = OpCodes::getArgB($instruction);
+            $k = OpCodes::getArgK($instruction);
+            $valueIsKnown = $k === 1 || isset($written[OpCodes::getArgC($instruction)]);
+            $nextIsExtraArgument = $pc + 1 < $instructionCount
+                && OpCodes::getOpcode($code[$pc + 1]) === OpCodes::OP_EXTRAARG;
+            switch (OpCodes::getOpcode($instruction)) {
                 case OpCodes::OP_NEWTABLE:
                 case OpCodes::OP_LOADKX:
                     if (!$nextIsExtraArgument) {
@@ -921,15 +934,15 @@ final class FunctionEmitter
     private function comment(int $pc): string
     {
         $instruction = $this->proto->code[$pc];
-        $opcode = OpCodes::GET_OPCODE($instruction);
+        $opcode = OpCodes::getOpcode($instruction);
         $name = OpCodes::OPNAMES[$opcode];
         $arguments = match (OpCodes::getOpMode($opcode)) {
-            OpCodes::iABC => OpCodes::GETARG_A($instruction) . ' ' . OpCodes::GETARG_B($instruction) . ' ' . OpCodes::GETARG_C($instruction)
-                . (OpCodes::GETARG_k($instruction) ? ' k' : ''),
-            OpCodes::iABx => OpCodes::GETARG_A($instruction) . ' ' . OpCodes::GETARG_Bx($instruction),
-            OpCodes::iAsBx => OpCodes::GETARG_A($instruction) . ' ' . OpCodes::GETARG_sBx($instruction),
-            OpCodes::iAx => (string) OpCodes::GETARG_Ax($instruction),
-            OpCodes::isJ => (string) OpCodes::GETARG_sJ($instruction),
+            OpCodes::IABC => OpCodes::getArgA($instruction) . ' ' . OpCodes::getArgB($instruction)
+                . ' ' . OpCodes::getArgC($instruction) . (OpCodes::getArgK($instruction) ? ' k' : ''),
+            OpCodes::IABX => OpCodes::getArgA($instruction) . ' ' . OpCodes::getArgBx($instruction),
+            OpCodes::IASBX => OpCodes::getArgA($instruction) . ' ' . OpCodes::getArgSBx($instruction),
+            OpCodes::IAX => (string) OpCodes::getArgAx($instruction),
+            OpCodes::ISJ => (string) OpCodes::getArgSJ($instruction),
         };
         $line = DebugInfo::getFuncLine($this->proto, $pc);
         return self::INDENT . "// [$pc] $name $arguments ; line $line\n";
@@ -985,8 +998,8 @@ final class FunctionEmitter
     /** R[C] or K[C] depending on the k bit */
     private function rkC(int $instruction): string
     {
-        $c = OpCodes::GETARG_C($instruction);
-        return OpCodes::GETARG_k($instruction) ? $this->k($c) : self::r($c);
+        $c = OpCodes::getArgC($instruction);
+        return OpCodes::getArgK($instruction) ? $this->k($c) : self::r($c);
     }
 
     private static function savePc(int $pc): string
@@ -1033,24 +1046,28 @@ final class FunctionEmitter
     private function metamethodFallback(int $pc): string
     {
         $mmPc = $pc + 1;
-        $resultRegister = OpCodes::GETARG_A($this->proto->code[$pc]);
+        $resultRegister = OpCodes::getArgA($this->proto->code[$pc]);
         if (!isset($this->consumed[$mmPc])) {
             return '';  // emitted on its own (it is a jump target)
         }
         // C's vmfetch fetches (and traces) the OP_MMBIN* only when the fast path fails
-        return "if (\$trap) { Hooks::traceExec(\$L, \$ci, $mmPc); } " . $this->emitMetamethodCall($mmPc, $resultRegister);
+        return "if (\$trap) { Hooks::traceExec(\$L, \$ci, $mmPc); } "
+            . $this->emitMetamethodCall($mmPc, $resultRegister);
     }
 
     private function emitMetamethodCall(int $mmPc, int $resultRegister): string
     {
         $instruction = $this->proto->code[$mmPc];
-        $a = OpCodes::GETARG_A($instruction);
-        $event = OpCodes::GETARG_C($instruction);
-        $flip = OpCodes::GETARG_k($instruction) ? 'true' : 'false';
-        $call = match (OpCodes::GET_OPCODE($instruction)) {
-            OpCodes::OP_MMBIN => 'MetaMethods::tryBinTM($L, ' . self::r($a) . ', ' . self::r(OpCodes::GETARG_B($instruction)) . ", $event, $a, " . OpCodes::GETARG_B($instruction) . ')',
-            OpCodes::OP_MMBINI => 'MetaMethods::tryBinITM($L, ' . self::r($a) . ', ' . OpCodes::GETARG_sB($instruction) . ", $flip, $event, $a)",
-            OpCodes::OP_MMBINK => 'MetaMethods::tryBinAssocTM($L, ' . self::r($a) . ', ' . $this->k(OpCodes::GETARG_B($instruction)) . ", $flip, $event, $a)",
+        $a = OpCodes::getArgA($instruction);
+        $event = OpCodes::getArgC($instruction);
+        $flip = OpCodes::getArgK($instruction) ? 'true' : 'false';
+        $b = OpCodes::getArgB($instruction);
+        $call = match (OpCodes::getOpcode($instruction)) {
+            OpCodes::OP_MMBIN => 'MetaMethods::tryBinTM($L, ' . self::r($a) . ', ' . self::r($b) . ", $event, $a, $b)",
+            OpCodes::OP_MMBINI => 'MetaMethods::tryBinITM($L, ' . self::r($a)
+                . ', ' . OpCodes::getArgSB($instruction) . ", $flip, $event, $a)",
+            OpCodes::OP_MMBINK => 'MetaMethods::tryBinAssocTM($L, ' . self::r($a)
+                . ', ' . $this->k($b) . ", $flip, $event, $a)",
         };
         return self::savePc($mmPc) . ' ' . self::r($resultRegister) . " = $call;";
     }
@@ -1074,7 +1091,9 @@ final class FunctionEmitter
         if ($fallback === '') {
             // the MMBIN at pc + 1 is emitted on its own (it is a jump
             // target): fall into it on failure, skip it on success
-            $code .= self::INDENT . "} else {\n" . self::INDENT . '    ' . $this->jump($pc, $pc + 1) . "\n" . self::INDENT . "}\n";
+            $code .= self::INDENT . "} else {\n"
+                . self::INDENT . '    ' . $this->jump($pc, $pc + 1) . "\n"
+                . self::INDENT . "}\n";
             return $code . self::lines($this->jump($pc, $pc + 2));
         }
         return $code . self::INDENT . "} else {\n" . self::INDENT . "    $fallback\n" . self::INDENT . "}\n";
@@ -1102,12 +1121,13 @@ final class FunctionEmitter
     {
         $proto = $this->proto;
         $instruction = $proto->code[$pc];
-        $opcode = OpCodes::GET_OPCODE($instruction);
-        $a = OpCodes::GETARG_A($instruction);
-        $b = OpCodes::GETARG_B($instruction);
-        $c = OpCodes::GETARG_C($instruction);
-        $k = OpCodes::GETARG_k($instruction);
-        $call = static fn (string $method, int|string ...$operands): string => "Op::$method(" . implode(', ', ['$L', $pc, ...$operands]) . ')';
+        $opcode = OpCodes::getOpcode($instruction);
+        $a = OpCodes::getArgA($instruction);
+        $b = OpCodes::getArgB($instruction);
+        $c = OpCodes::getArgC($instruction);
+        $k = OpCodes::getArgK($instruction);
+        $call = static fn (string $method, int|string ...$operands): string
+            => "Op::$method(" . implode(', ', ['$L', $pc, ...$operands]) . ')';
         $isStringConstant = static fn (int $index): bool => \is_string($proto->k[$index]);
         if ($opcode >= OpCodes::OP_ADDI && $opcode <= OpCodes::OP_SHR) {
             return $this->emitCompactArithmetic($pc);
@@ -1116,13 +1136,13 @@ final class FunctionEmitter
             case OpCodes::OP_MOVE:
                 return self::lines($call('move', $a, $b) . ';');
             case OpCodes::OP_LOADI:
-                return self::lines($call('load', $a, PhpLiteral::of(OpCodes::GETARG_sBx($instruction))) . ';');
+                return self::lines($call('load', $a, PhpLiteral::of(OpCodes::getArgSBx($instruction))) . ';');
             case OpCodes::OP_LOADF:
-                return self::lines($call('load', $a, PhpLiteral::of((float) OpCodes::GETARG_sBx($instruction))) . ';');
+                return self::lines($call('load', $a, PhpLiteral::of((float) OpCodes::getArgSBx($instruction))) . ';');
             case OpCodes::OP_LOADK:
-                return self::lines($call('load', $a, $this->k(OpCodes::GETARG_Bx($instruction))) . ';');
+                return self::lines($call('load', $a, $this->k(OpCodes::getArgBx($instruction))) . ';');
             case OpCodes::OP_LOADKX:
-                return self::lines($call('load', $a, $this->k(OpCodes::GETARG_Ax($proto->code[$pc + 1]))) . ';');
+                return self::lines($call('load', $a, $this->k(OpCodes::getArgAx($proto->code[$pc + 1]))) . ';');
             case OpCodes::OP_LOADFALSE:
                 return self::lines($call('load', $a, 'false') . ';');
             case OpCodes::OP_LFALSESKIP:
@@ -1147,23 +1167,32 @@ final class FunctionEmitter
                 if (!$isStringConstant($b)) {
                     return null;
                 }
-                return self::lines(($k ? $call('setTabUpK', $a, $this->k($b), $this->k($c)) : $call('setTabUp', $a, $this->k($b), $c)) . ';');
+                $expression = $k
+                    ? $call('setTabUpK', $a, $this->k($b), $this->k($c))
+                    : $call('setTabUp', $a, $this->k($b), $c);
+                return self::lines($expression . ';');
             case OpCodes::OP_SETTABLE:
-                return self::lines(($k ? $call('setTableK', $a, $b, $this->k($c)) : $call('setTable', $a, $b, $c)) . ';');
+                $expression = $k ? $call('setTableK', $a, $b, $this->k($c)) : $call('setTable', $a, $b, $c);
+                return self::lines($expression . ';');
             case OpCodes::OP_SETI:
-                return self::lines(($k ? $call('setFieldK', $a, $b, $this->k($c)) : $call('setField', $a, $b, $c)) . ';');
+                $expression = $k ? $call('setFieldK', $a, $b, $this->k($c)) : $call('setField', $a, $b, $c);
+                return self::lines($expression . ';');
             case OpCodes::OP_SETFIELD:
                 if (!$isStringConstant($b)) {
                     return null;
                 }
-                return self::lines(($k ? $call('setFieldK', $a, $this->k($b), $this->k($c)) : $call('setField', $a, $this->k($b), $c)) . ';');
+                $expression = $k
+                    ? $call('setFieldK', $a, $this->k($b), $this->k($c))
+                    : $call('setField', $a, $this->k($b), $c);
+                return self::lines($expression . ';');
             case OpCodes::OP_NEWTABLE:
                 $arraySize = $c;
                 if ($k) {  // non-zero extra argument?
-                    $arraySize += OpCodes::GETARG_Ax($proto->code[$pc + 1]) * (OpCodes::MAXARG_C + 1);
+                    $arraySize += OpCodes::getArgAx($proto->code[$pc + 1]) * (OpCodes::MAXARG_C + 1);
                 }
                 $hashSize = $b > 0 ? 1 << ($b - 1) : 0;  // size is 2^(b - 1)
-                return self::lines($call('newTable', $a, $arraySize, Collector::tableSize($arraySize, $hashSize)) . ';');
+                $tableSize = Collector::tableSize($arraySize, $hashSize);
+                return self::lines($call('newTable', $a, $arraySize, $tableSize) . ';');
             case OpCodes::OP_SELF:
                 return ($k && $isStringConstant($c)) ? self::lines($call('self', $a, $b, $this->k($c)) . ';') : null;
             case OpCodes::OP_UNM:
@@ -1181,7 +1210,7 @@ final class FunctionEmitter
             case OpCodes::OP_TBC:
                 return self::lines($call('tbc', $a) . ';');
             case OpCodes::OP_JMP:
-                return self::lines($call('jump') . ';', $this->jump($pc, $pc + 1 + OpCodes::GETARG_sJ($instruction)));
+                return self::lines($call('jump') . ';', $this->jump($pc, $pc + 1 + OpCodes::getArgSJ($instruction)));
             case OpCodes::OP_EQ:
                 return $this->conditionalJump($pc, $call('eq', $a, $b), $k);
             case OpCodes::OP_LT:
@@ -1191,18 +1220,27 @@ final class FunctionEmitter
             case OpCodes::OP_EQK:
                 return $this->conditionalJump($pc, $call('eqK', $a, $this->k($b)), $k);
             case OpCodes::OP_EQI:
-                return $this->conditionalJump($pc, $call('eqK', $a, PhpLiteral::of(OpCodes::GETARG_sB($instruction))), $k);
+                $immediate = PhpLiteral::of(OpCodes::getArgSB($instruction));
+                return $this->conditionalJump($pc, $call('eqK', $a, $immediate), $k);
             case OpCodes::OP_LTI:
             case OpCodes::OP_LEI:
             case OpCodes::OP_GTI:
             case OpCodes::OP_GEI:
-                $method = [OpCodes::OP_LTI => 'ltI', OpCodes::OP_LEI => 'leI', OpCodes::OP_GTI => 'gtI', OpCodes::OP_GEI => 'geI'][$opcode];
-                $condition = $call($method, $a, PhpLiteral::of(OpCodes::GETARG_sB($instruction)), $c ? 'true' : 'false');
+                $method = match ($opcode) {
+                    OpCodes::OP_LTI => 'ltI',
+                    OpCodes::OP_LEI => 'leI',
+                    OpCodes::OP_GTI => 'gtI',
+                    OpCodes::OP_GEI => 'geI',
+                };
+                $condition = $call($method, $a, PhpLiteral::of(OpCodes::getArgSB($instruction)), $c ? 'true' : 'false');
                 return $this->conditionalJump($pc, $condition, $k);
             case OpCodes::OP_TEST:
                 return $this->conditionalJump($pc, $call('test', $a), $k);
             case OpCodes::OP_TESTSET:
-                return self::lines('if (' . $call('testSet', $a, $b, $k ? 'true' : 'false') . ') ' . $this->jump($pc, $pc + 2), $this->nextJump($pc));
+                return self::lines(
+                    'if (' . $call('testSet', $a, $b, $k ? 'true' : 'false') . ') ' . $this->jump($pc, $pc + 2),
+                    $this->nextJump($pc),
+                );
             case OpCodes::OP_CALL:
                 // B = 0: the arguments up to $top (also for the hook: isIT); C = 0: all results, up to the new $top
                 $expression = $b === 0 ? $call('call', $a, $b, $c, '$top') : $call('call', $a, $b, $c);
@@ -1210,11 +1248,14 @@ final class FunctionEmitter
             case OpCodes::OP_SETLIST:
                 $index = $c;
                 if ($k) {
-                    $index += OpCodes::GETARG_Ax($proto->code[$pc + 1]) * (OpCodes::MAXARG_C + 1);
+                    $index += OpCodes::getArgAx($proto->code[$pc + 1]) * (OpCodes::MAXARG_C + 1);
                 }
-                return self::lines(($b === 0 ? $call('setList', $a, $b, $index, '$top') : $call('setList', $a, $b, $index)) . ';');
+                $expression = $b === 0 ? $call('setList', $a, $b, $index, '$top') : $call('setList', $a, $b, $index);
+                return self::lines($expression . ';');
             case OpCodes::OP_VARARG:
-                return self::lines($c === 0 ? '$top = ' . $call('vararg', $a, -1) . ';' : $call('vararg', $a, $c - 1) . ';');
+                return self::lines(
+                    $c === 0 ? '$top = ' . $call('vararg', $a, -1) . ';' : $call('vararg', $a, $c - 1) . ';'
+                );
         }
         return null;
     }
@@ -1235,32 +1276,36 @@ final class FunctionEmitter
             return null;
         }
         $instruction = $code[$pc];
-        $opcode = OpCodes::GET_OPCODE($instruction);
-        $a = OpCodes::GETARG_A($instruction);
-        $b = OpCodes::GETARG_B($instruction);
-        $c = OpCodes::GETARG_C($instruction);
+        $opcode = OpCodes::getOpcode($instruction);
+        $a = OpCodes::getArgA($instruction);
+        $b = OpCodes::getArgB($instruction);
+        $c = OpCodes::getArgC($instruction);
         $mm = $code[$mmPc];
-        $mmOpcode = OpCodes::GET_OPCODE($mm);
-        $flip = OpCodes::GETARG_k($mm) ? 'true' : 'false';
+        $mmOpcode = OpCodes::getOpcode($mm);
+        $flip = OpCodes::getArgK($mm) ? 'true' : 'false';
         if ($opcode >= OpCodes::OP_ADD) {  // OP_ADD .. OP_SHR: R[B] op R[C]
             $operation = $opcode - OpCodes::OP_ADD;
             $method = 'arith';
             $operands = [$a, $b, $c, $operation];
-            $repeats = $mmOpcode === OpCodes::OP_MMBIN && OpCodes::GETARG_B($mm) === $c;
+            $repeats = $mmOpcode === OpCodes::OP_MMBIN && OpCodes::getArgB($mm) === $c;
         } elseif ($opcode >= OpCodes::OP_ADDK && $opcode <= OpCodes::OP_BXORK) {  // R[B] op K[C]
             $constant = $this->proto->k[$c];
             $operation = $opcode - OpCodes::OP_ADDK;
             $method = 'arithK';
             $operands = [$a, $b, PhpLiteral::of($constant), $operation, $flip];
-            $repeats = $mmOpcode === OpCodes::OP_MMBINK && OpCodes::GETARG_B($mm) === $c && (\is_int($constant) || \is_float($constant));
+            $repeats = $mmOpcode === OpCodes::OP_MMBINK && OpCodes::getArgB($mm) === $c
+                && (\is_int($constant) || \is_float($constant));
         } else {  // OP_ADDI, OP_SHRI: R[B] op sC; OP_SHLI: sC << R[B]
-            $immediate = OpCodes::GETARG_sC($instruction);
+            $immediate = OpCodes::getArgSC($instruction);
             $operation = match ($opcode) {
                 OpCodes::OP_ADDI => Vm::LUA_OPADD,
                 OpCodes::OP_SHRI => Vm::LUA_OPSHR,
                 OpCodes::OP_SHLI => Vm::LUA_OPSHL,
             };
-            if ($opcode === OpCodes::OP_ADDI && $immediate !== 0 && OpCodes::GETARG_C($mm) === MetaMethods::TM_SUB && OpCodes::GETARG_sB($mm) === -$immediate) {
+            if (
+                $opcode === OpCodes::OP_ADDI && $immediate !== 0
+                && OpCodes::getArgC($mm) === MetaMethods::TM_SUB && OpCodes::getArgSB($mm) === -$immediate
+            ) {
                 // R[B] - n as R[B] + -n, the metamethod __sub with n (lcode.c:
                 // finishbinexpneg): R[B] - n is the same number (x - y is
                 // x + -y, but not for n = 0: -0.0 + 0 is 0.0, -0.0 - 0 is -0.0)
@@ -1269,9 +1314,9 @@ final class FunctionEmitter
             }
             $method = 'arithI';
             $operands = [$a, $b, PhpLiteral::of($immediate), $operation, $flip];
-            $repeats = $mmOpcode === OpCodes::OP_MMBINI && OpCodes::GETARG_sB($mm) === $immediate;
+            $repeats = $mmOpcode === OpCodes::OP_MMBINI && OpCodes::getArgSB($mm) === $immediate;
         }
-        if (!$repeats || OpCodes::GETARG_A($mm) !== $b || OpCodes::GETARG_C($mm) !== MetaMethods::TM_ADD + $operation) {
+        if (!$repeats || OpCodes::getArgA($mm) !== $b || OpCodes::getArgC($mm) !== MetaMethods::TM_ADD + $operation) {
             return null;
         }
         return self::lines("Op::$method(" . implode(', ', ['$L', $pc, ...$operands]) . ');');
@@ -1281,11 +1326,11 @@ final class FunctionEmitter
     {
         $proto = $this->proto;
         $instruction = $proto->code[$pc];
-        $opcode = OpCodes::GET_OPCODE($instruction);
-        $a = OpCodes::GETARG_A($instruction);
-        $b = OpCodes::GETARG_B($instruction);
-        $c = OpCodes::GETARG_C($instruction);
-        $k = OpCodes::GETARG_k($instruction);
+        $opcode = OpCodes::getOpcode($instruction);
+        $a = OpCodes::getArgA($instruction);
+        $b = OpCodes::getArgB($instruction);
+        $c = OpCodes::getArgC($instruction);
+        $k = OpCodes::getArgK($instruction);
         $ra = self::r($a);
 
         switch ($opcode) {
@@ -1293,16 +1338,16 @@ final class FunctionEmitter
                 return self::lines("$ra = " . self::r($b) . ';');
 
             case OpCodes::OP_LOADI:
-                return self::lines("$ra = " . PhpLiteral::of(OpCodes::GETARG_sBx($instruction)) . ';');
+                return self::lines("$ra = " . PhpLiteral::of(OpCodes::getArgSBx($instruction)) . ';');
 
             case OpCodes::OP_LOADF:
-                return self::lines("$ra = " . PhpLiteral::of((float) OpCodes::GETARG_sBx($instruction)) . ';');
+                return self::lines("$ra = " . PhpLiteral::of((float) OpCodes::getArgSBx($instruction)) . ';');
 
             case OpCodes::OP_LOADK:
-                return self::lines("$ra = " . $this->k(OpCodes::GETARG_Bx($instruction)) . ';');
+                return self::lines("$ra = " . $this->k(OpCodes::getArgBx($instruction)) . ';');
 
             case OpCodes::OP_LOADKX:
-                return self::lines("$ra = " . $this->k(OpCodes::GETARG_Ax($proto->code[$pc + 1])) . ';');
+                return self::lines("$ra = " . $this->k(OpCodes::getArgAx($proto->code[$pc + 1])) . ';');
 
             case OpCodes::OP_LOADFALSE:
                 return self::lines("$ra = false;");
@@ -1327,12 +1372,20 @@ final class FunctionEmitter
                 return self::lines($this->upval($b) . "->v = $ra;");
 
             case OpCodes::OP_GETTABUP:
-                return $this->emitGetField($pc, $ra, $this->upval($b) . '->v', $this->k($c), DebugInfo::upvalueSlot($b));
+                return $this->emitGetField(
+                    $pc,
+                    $ra,
+                    $this->upval($b) . '->v',
+                    $this->k($c),
+                    DebugInfo::upvalueSlot($b),
+                );
 
             case OpCodes::OP_GETTABLE:
                 return self::lines(
                     '$t = ' . self::r($b) . '; $key = ' . self::r($c) . ';',
-                    "if (\$t instanceof LuaTable && ((\$v = (\\is_int(\$key) ? (\$t->arr[\$key] ?? null) : (\\is_string(\$key) ? (\$t->hash[\$key] ?? null) : \$t->get(\$key)))) !== null || \$t->metatable === null)) {",
+                    "if (\$t instanceof LuaTable && ((\$v = (\\is_int(\$key) ? (\$t->arr[\$key] ?? null) : "
+                        . "(\\is_string(\$key) ? (\$t->hash[\$key] ?? null) : \$t->get(\$key)))) !== null "
+                        . "|| \$t->metatable === null)) {",
                     "    $ra = \$v;",
                     '} else {',
                     '    ' . self::savePc($pc) . " $ra = Vm::finishGet(\$L, \$t, \$key, $b);",
@@ -1342,7 +1395,8 @@ final class FunctionEmitter
             case OpCodes::OP_GETI:
                 return self::lines(
                     '$t = ' . self::r($b) . ';',
-                    "if (\$t instanceof LuaTable && ((\$v = \$t->arr[$c] ?? null) !== null || \$t->metatable === null)) {",
+                    "if (\$t instanceof LuaTable && ((\$v = \$t->arr[$c] ?? null) !== null"
+                        . " || \$t->metatable === null)) {",
                     "    $ra = \$v;",
                     '} else {',
                     '    ' . self::savePc($pc) . " $ra = Vm::finishGet(\$L, \$t, $c, $b);",
@@ -1353,14 +1407,23 @@ final class FunctionEmitter
                 return $this->emitGetField($pc, $ra, self::r($b), $this->k($c), $b);
 
             case OpCodes::OP_SETTABUP:
-                return $this->emitSetField($pc, $this->upval($a) . '->v', $this->k($b), $this->rkC($instruction), DebugInfo::upvalueSlot($a), $k && $this->proto->k[$c] !== null);
+                return $this->emitSetField(
+                    $pc,
+                    $this->upval($a) . '->v',
+                    $this->k($b),
+                    $this->rkC($instruction),
+                    DebugInfo::upvalueSlot($a),
+                    $k && $this->proto->k[$c] !== null,
+                );
 
             case OpCodes::OP_SETTABLE:
                 return self::lines(
                     "\$t = $ra; \$key = " . self::r($b) . '; $v = ' . $this->rkC($instruction) . ';',
-                    'if ($t instanceof LuaTable && \is_int($key) && ($t->metatable === null || isset($t->arr[$key]))) {',
+                    'if ($t instanceof LuaTable && \is_int($key)'
+                        . ' && ($t->metatable === null || isset($t->arr[$key]))) {',
                     '    if ($v !== null) { $t->arr[$key] = $v; } else { unset($t->arr[$key]); }',
-                    '} elseif ($t instanceof LuaTable && \is_string($key) && ($t->metatable === null || isset($t->hash[$key]))) {',
+                    '} elseif ($t instanceof LuaTable && \is_string($key)'
+                        . ' && ($t->metatable === null || isset($t->hash[$key]))) {',
                     '    if ($v !== null) { $t->hash[$key] = $v; } else { unset($t->hash[$key]); }',
                     '} else {',
                     '    ' . self::savePc($pc) . " Vm::setTable(\$L, \$t, \$key, \$v, $a);",
@@ -1378,12 +1441,19 @@ final class FunctionEmitter
                 );
 
             case OpCodes::OP_SETFIELD:
-                return $this->emitSetField($pc, $ra, $this->k($b), $this->rkC($instruction), $a, $k && $this->proto->k[$c] !== null);
+                return $this->emitSetField(
+                    $pc,
+                    $ra,
+                    $this->k($b),
+                    $this->rkC($instruction),
+                    $a,
+                    $k && $this->proto->k[$c] !== null,
+                );
 
             case OpCodes::OP_NEWTABLE:
                 $arraySize = $c;
                 if ($k) {  // non-zero extra argument?
-                    $arraySize += OpCodes::GETARG_Ax($proto->code[$pc + 1]) * (OpCodes::MAXARG_C + 1);
+                    $arraySize += OpCodes::getArgAx($proto->code[$pc + 1]) * (OpCodes::MAXARG_C + 1);
                 }
                 $hashSize = $b > 0 ? 1 << ($b - 1) : 0;  // size is 2^(b - 1)
                 return self::lines(
@@ -1396,7 +1466,8 @@ final class FunctionEmitter
                 return self::lines(
                     '$t = ' . self::r($b) . '; $key = ' . $key . ';',
                     self::r($a + 1) . ' = $t;',
-                    "if (\$t instanceof LuaTable && ((\$v = \$t->hash[\$key] ?? null) !== null || \$t->metatable === null)) {",
+                    "if (\$t instanceof LuaTable && ((\$v = \$t->hash[\$key] ?? null) !== null"
+                        . " || \$t->metatable === null)) {",
                     "    $ra = \$v;",
                     '} else {',
                     '    ' . self::savePc($pc) . " $ra = Vm::finishGet(\$L, \$t, \$key, $b);",
@@ -1404,9 +1475,13 @@ final class FunctionEmitter
                 );
 
             case OpCodes::OP_ADDI:
-                $immediate = OpCodes::GETARG_sC($instruction);
+                $immediate = OpCodes::getArgSC($instruction);
                 return $this->arithmetic($pc, '$x = ' . self::r($b) . ';', [
-                    ['\is_int($x)', '$v = $x + ' . self::operand($immediate) . "; $ra = \\is_int(\$v) ? \$v : Vm::addWrap(\$x, " . self::operand($immediate) . ');'],
+                    [
+                        '\is_int($x)',
+                        '$v = $x + ' . self::operand($immediate)
+                            . "; $ra = \\is_int(\$v) ? \$v : Vm::addWrap(\$x, " . self::operand($immediate) . ');',
+                    ],
                     ['\is_float($x)', "$ra = \$x + " . self::operand((float) $immediate) . ';'],
                 ]);
 
@@ -1430,26 +1505,39 @@ final class FunctionEmitter
                 ]);
 
             case OpCodes::OP_SHRI:
-                $immediate = OpCodes::GETARG_sC($instruction);
+                $immediate = OpCodes::getArgSC($instruction);
                 return $this->arithmetic($pc, '$x = ' . self::r($b) . ';', [
                     ['\is_int($x)', "$ra = Vm::shiftLeft(\$x, " . self::operand(-$immediate) . ');'],
-                    ['($i1 = Vm::toIntegerNoString($x)) !== null', "$ra = Vm::shiftLeft(\$i1, " . self::operand(-$immediate) . ');'],
+                    [
+                        '($i1 = Vm::toIntegerNoString($x)) !== null',
+                        "$ra = Vm::shiftLeft(\$i1, " . self::operand(-$immediate) . ');',
+                    ],
                 ]);
 
             case OpCodes::OP_SHLI:
-                $immediate = OpCodes::GETARG_sC($instruction);
+                $immediate = OpCodes::getArgSC($instruction);
                 return $this->arithmetic($pc, '$x = ' . self::r($b) . ';', [
                     ['\is_int($x)', "$ra = Vm::shiftLeft(" . self::operand($immediate) . ', $x);'],
-                    ['($i1 = Vm::toIntegerNoString($x)) !== null', "$ra = Vm::shiftLeft(" . self::operand($immediate) . ', $i1);'],
+                    [
+                        '($i1 = Vm::toIntegerNoString($x)) !== null',
+                        "$ra = Vm::shiftLeft(" . self::operand($immediate) . ', $i1);',
+                    ],
                 ]);
 
             case OpCodes::OP_ADD:
             case OpCodes::OP_SUB:
             case OpCodes::OP_MUL:
                 $operator = [OpCodes::OP_ADD => '+', OpCodes::OP_SUB => '-', OpCodes::OP_MUL => '*'][$opcode];
-                $wrap = [OpCodes::OP_ADD => 'addWrap', OpCodes::OP_SUB => 'subWrap', OpCodes::OP_MUL => 'mulWrap'][$opcode];
+                $wrap = match ($opcode) {
+                    OpCodes::OP_ADD => 'addWrap',
+                    OpCodes::OP_SUB => 'subWrap',
+                    OpCodes::OP_MUL => 'mulWrap',
+                };
                 return $this->arithmetic($pc, '$x = ' . self::r($b) . '; $y = ' . self::r($c) . ';', [
-                    ['\is_int($x) && \is_int($y)', "\$v = \$x $operator \$y; $ra = \\is_int(\$v) ? \$v : Vm::$wrap(\$x, \$y);"],
+                    [
+                        '\is_int($x) && \is_int($y)',
+                        "\$v = \$x $operator \$y; $ra = \\is_int(\$v) ? \$v : Vm::$wrap(\$x, \$y);",
+                    ],
                     ['(\is_float($x) || \is_int($x)) && (\is_float($y) || \is_int($y))', "$ra = \$x $operator \$y;"],
                 ]);
 
@@ -1462,12 +1550,18 @@ final class FunctionEmitter
             case OpCodes::OP_IDIV:
                 return $this->arithmetic($pc, '$x = ' . self::r($b) . '; $y = ' . self::r($c) . ';', [
                     ['\is_int($x) && \is_int($y)', self::savePc($pc) . " $ra = Vm::idiv(\$L, \$x, \$y);"],
-                    ['(\is_float($x) || \is_int($x)) && (\is_float($y) || \is_int($y))', "$ra = \\floor(\\fdiv(\$x, \$y));"],
+                    [
+                        '(\is_float($x) || \is_int($x)) && (\is_float($y) || \is_int($y))',
+                        "$ra = \\floor(\\fdiv(\$x, \$y));",
+                    ],
                 ]);
 
             case OpCodes::OP_POW:
                 return $this->arithmetic($pc, '$x = ' . self::r($b) . '; $y = ' . self::r($c) . ';', [
-                    ['(\is_float($x) || \is_int($x)) && (\is_float($y) || \is_int($y))', "$ra = Vm::floatPow(\$x, \$y);"],
+                    [
+                        '(\is_float($x) || \is_int($x)) && (\is_float($y) || \is_int($y))',
+                        "$ra = Vm::floatPow(\$x, \$y);",
+                    ],
                 ]);
 
             case OpCodes::OP_DIV:
@@ -1481,7 +1575,10 @@ final class FunctionEmitter
                 $operator = [OpCodes::OP_BAND => '&', OpCodes::OP_BOR => '|', OpCodes::OP_BXOR => '^'][$opcode];
                 return $this->arithmetic($pc, '$x = ' . self::r($b) . '; $y = ' . self::r($c) . ';', [
                     ['\is_int($x) && \is_int($y)', "$ra = \$x $operator \$y;"],
-                    ['($i1 = Vm::toIntegerNoString($x)) !== null && ($i2 = Vm::toIntegerNoString($y)) !== null', "$ra = \$i1 $operator \$i2;"],
+                    [
+                        '($i1 = Vm::toIntegerNoString($x)) !== null && ($i2 = Vm::toIntegerNoString($y)) !== null',
+                        "$ra = \$i1 $operator \$i2;",
+                    ],
                 ]);
 
             case OpCodes::OP_SHL:
@@ -1489,14 +1586,17 @@ final class FunctionEmitter
                 $function = $opcode === OpCodes::OP_SHL ? 'shiftLeft' : 'shiftRight';
                 return $this->arithmetic($pc, '$x = ' . self::r($b) . '; $y = ' . self::r($c) . ';', [
                     ['\is_int($x) && \is_int($y)', "$ra = Vm::$function(\$x, \$y);"],
-                    ['($i1 = Vm::toIntegerNoString($x)) !== null && ($i2 = Vm::toIntegerNoString($y)) !== null', "$ra = Vm::$function(\$i1, \$i2);"],
+                    [
+                        '($i1 = Vm::toIntegerNoString($x)) !== null && ($i2 = Vm::toIntegerNoString($y)) !== null',
+                        "$ra = Vm::$function(\$i1, \$i2);",
+                    ],
                 ]);
 
             case OpCodes::OP_MMBIN:
             case OpCodes::OP_MMBINI:
             case OpCodes::OP_MMBINK:
                 // reached only when the preceding arithmetic instruction failed its fast paths
-                return self::lines($this->emitMetamethodCall($pc, OpCodes::GETARG_A($proto->code[$pc - 1])));
+                return self::lines($this->emitMetamethodCall($pc, OpCodes::getArgA($proto->code[$pc - 1])));
 
             case OpCodes::OP_UNM:
                 return self::lines(
@@ -1504,9 +1604,11 @@ final class FunctionEmitter
                     'if (\is_int($x)) {',
                     "    $ra = \$x === \\PHP_INT_MIN ? \$x : -\$x;",
                     '} elseif (\is_float($x)) {',
-                    "    $ra = \$x === \$x ? -\$x : Vm::floatNegate(\$x);",  // (only a NaN differs from itself; PHP's -$x keeps its sign)
+                    // (only a NaN differs from itself; PHP's -$x keeps its sign)
+                    "    $ra = \$x === \$x ? -\$x : Vm::floatNegate(\$x);",
                     '} else {',
-                    '    ' . self::savePc($pc) . " $ra = MetaMethods::tryBinTM(\$L, \$x, \$x, " . MetaMethods::TM_UNM . ", $b, $b);",
+                    '    ' . self::savePc($pc)
+                        . " $ra = MetaMethods::tryBinTM(\$L, \$x, \$x, " . MetaMethods::TM_UNM . ", $b, $b);",
                     '}',
                 );
 
@@ -1518,7 +1620,8 @@ final class FunctionEmitter
                     '} elseif (($i1 = Vm::toIntegerNoString($x)) !== null) {',
                     "    $ra = ~\$i1;",
                     '} else {',
-                    '    ' . self::savePc($pc) . " $ra = MetaMethods::tryBinTM(\$L, \$x, \$x, " . MetaMethods::TM_BNOT . ", $b, $b);",
+                    '    ' . self::savePc($pc)
+                        . " $ra = MetaMethods::tryBinTM(\$L, \$x, \$x, " . MetaMethods::TM_BNOT . ", $b, $b);",
                     '}',
                 );
 
@@ -1555,7 +1658,11 @@ final class FunctionEmitter
                     '} else {',
                     '    ' . self::savePc($pc) . " $ra = Vm::concat(\$L, [" . implode(', ', $operands) . "], $a);",
                     '}',
-                    self::checkGc($pc, $a + 1, "(\\is_string($ra) ? " . Collector::STRING_OVERHEAD . " + \\strlen($ra) : 0)"),
+                    self::checkGc(
+                        $pc,
+                        $a + 1,
+                        "(\\is_string($ra) ? " . Collector::STRING_OVERHEAD . " + \\strlen($ra) : 0)",
+                    ),
                 );
 
             case OpCodes::OP_CLOSE:
@@ -1569,7 +1676,7 @@ final class FunctionEmitter
                 return self::lines(self::savePc($pc) . " Upvalues::newTbc(\$L, \$ci, $a);");
 
             case OpCodes::OP_JMP:
-                return self::lines($this->jump($pc, $pc + 1 + OpCodes::GETARG_sJ($instruction)));
+                return self::lines($this->jump($pc, $pc + 1 + OpCodes::getArgSJ($instruction)));
 
             case OpCodes::OP_EQ:
                 return self::lines(
@@ -1597,17 +1704,19 @@ final class FunctionEmitter
                 ) . $this->conditionalJump($pc, '$c', $k);
 
             case OpCodes::OP_EQK:
-                return self::lines("\$x = $ra;") . $this->conditionalJump($pc, $this->equalsConstant('$x', $proto->k[$b]), $k);
+                return self::lines("\$x = $ra;")
+                    . $this->conditionalJump($pc, $this->equalsConstant('$x', $proto->k[$b]), $k);
 
             case OpCodes::OP_EQI:
-                $immediate = OpCodes::GETARG_sB($instruction);
-                return self::lines("\$x = $ra;") . $this->conditionalJump($pc, $this->equalsConstant('$x', $immediate), $k);
+                $immediate = OpCodes::getArgSB($instruction);
+                return self::lines("\$x = $ra;")
+                    . $this->conditionalJump($pc, $this->equalsConstant('$x', $immediate), $k);
 
             case OpCodes::OP_LTI:
             case OpCodes::OP_LEI:
             case OpCodes::OP_GTI:
             case OpCodes::OP_GEI:
-                $immediate = OpCodes::GETARG_sB($instruction);
+                $immediate = OpCodes::getArgSB($instruction);
                 [$operator, $flip, $event] = match ($opcode) {
                     OpCodes::OP_LTI => ['<', 'false', MetaMethods::TM_LT],
                     OpCodes::OP_LEI => ['<=', 'false', MetaMethods::TM_LE],
@@ -1620,13 +1729,17 @@ final class FunctionEmitter
                     'if (\is_int($x) || \is_float($x)) {',
                     "    \$c = \$x $operator " . self::operand($immediate) . ';',
                     '} else {',
-                    '    ' . self::savePc($pc) . " \$c = MetaMethods::callOrderITM(\$L, \$x, " . self::operand($immediate) . ", $flip, $isFloat, $event);",
+                    '    ' . self::savePc($pc) . " \$c = MetaMethods::callOrderITM(\$L, \$x, "
+                        . self::operand($immediate) . ", $flip, $isFloat, $event);",
                     '}',
                 ) . $this->conditionalJump($pc, '$c', $k);
 
             case OpCodes::OP_TEST:
                 // jump (the next instruction) when truthiness equals k; else skip it
-                return self::lines('if ' . ($k ? self::falsy($ra) : self::truthy($ra)) . ' ' . $this->jump($pc, $pc + 2), $this->nextJump($pc));
+                return self::lines(
+                    'if ' . ($k ? self::falsy($ra) : self::truthy($ra)) . ' ' . $this->jump($pc, $pc + 2),
+                    $this->nextJump($pc),
+                );
 
             case OpCodes::OP_TESTSET:
                 return self::lines(
@@ -1683,7 +1796,7 @@ final class FunctionEmitter
                 return $this->returnHook($pc, $a, '1') . self::lines('$L->ci = $ci->previous;', "return [$ra];");
 
             case OpCodes::OP_FORLOOP:
-                $loopStart = $pc + 1 - OpCodes::GETARG_Bx($instruction);
+                $loopStart = $pc + 1 - OpCodes::getArgBx($instruction);
                 // integer loop: R[a+1] is the unsigned count of iterations left
                 // (a count >= 2^63 would stop being an integer after 2^63 iterations)
                 return self::lines(
@@ -1705,7 +1818,7 @@ final class FunctionEmitter
                 return self::lines(
                     self::savePc($pc),
                     "if (Vm::forPrep(\$L, \$R, $a)) {",
-                    '    ' . $this->jump($pc, $pc + OpCodes::GETARG_Bx($instruction) + 2),
+                    '    ' . $this->jump($pc, $pc + OpCodes::getArgBx($instruction) + 2),
                     '}',
                 );
 
@@ -1714,7 +1827,8 @@ final class FunctionEmitter
                     'if (' . self::r($a + 3) . ' !== null && ' . self::r($a + 3) . ' !== false) {',
                     '    ' . self::savePc($pc) . ' Upvalues::newTbc($L, $ci, ' . ($a + 3) . ');',
                     '}',
-                    $this->jump($pc, $pc + OpCodes::GETARG_Bx($instruction) + 1, 'T'),  // to OP_TFORCALL, past its hook check
+                    // to OP_TFORCALL, past its hook check
+                    $this->jump($pc, $pc + OpCodes::getArgBx($instruction) + 1, 'T'),
                 );
 
             case OpCodes::OP_TFORCALL:
@@ -1733,14 +1847,14 @@ final class FunctionEmitter
                 return self::lines(
                     'if (($v = ' . self::r($a + 4) . ') !== null) {',
                     '    ' . self::r($a + 2) . ' = $v;',
-                    '    ' . $this->jump($pc, $pc + 1 - OpCodes::GETARG_Bx($instruction)),
+                    '    ' . $this->jump($pc, $pc + 1 - OpCodes::getArgBx($instruction)),
                     '}',
                 );
 
             case OpCodes::OP_SETLIST:
                 $last = $c;
                 if ($k) {
-                    $last += OpCodes::GETARG_Ax($proto->code[$pc + 1]) * (OpCodes::MAXARG_C + 1);
+                    $last += OpCodes::getArgAx($proto->code[$pc + 1]) * (OpCodes::MAXARG_C + 1);
                 }
                 $code = self::lines("\$t = $ra;");
                 if ($b === 0) {  // get up to the top
@@ -1762,10 +1876,14 @@ final class FunctionEmitter
                         "if (\$v !== null) { \$t->arr[$index] = \$v; } else { unset(\$t->arr[$index]); }",
                     );
                 }
-                return $code . self::lines('if ($t->sizearray < ' . ($last + $b) . ') {', '    $t->sizearray = ' . ($last + $b) . ';', '}');
+                return $code . self::lines(
+                    'if ($t->sizearray < ' . ($last + $b) . ') {',
+                    '    $t->sizearray = ' . ($last + $b) . ';',
+                    '}',
+                );
 
             case OpCodes::OP_CLOSURE:
-                $childIndex = OpCodes::GETARG_Bx($instruction);
+                $childIndex = OpCodes::getArgBx($instruction);
                 $child = $proto->p[$childIndex];
                 $upvalues = [];
                 foreach ($child->upvalues as $upvalueDescription) {
@@ -1777,7 +1895,9 @@ final class FunctionEmitter
                 }
                 $childPath = $this->path . '_' . $childIndex;
                 $childClass = self::closureClass($child);
-                $upvalueArguments = $childClass === 'LuaClosureN' ? '[' . implode(', ', $upvalues) . ']' : implode(', ', $upvalues);
+                $upvalueArguments = $childClass === 'LuaClosureN'
+                    ? '[' . implode(', ', $upvalues) . ']'
+                    : implode(', ', $upvalues);
                 return self::lines(
                     "$ra = new $childClass(\$proto_$childPath, \$function_$childPath, $upvalueArguments);",
                     self::checkGc($pc, $a + 1, (string) Collector::closureSize(\count($upvalues))),
@@ -1789,7 +1909,9 @@ final class FunctionEmitter
                     $code = self::lines('$va = $ci->varargs; $n = \count($va);');
                     if ($this->countSteps) {  // copying them all is work in proportion: a step each (see $countSteps)
                         $counter = $this->hasBackwardJumps ? '$steps' : '$L->globalState->stepsLeft';
-                        $code .= self::lines("if (($counter -= \$n) < 0) { \\LuaPhp\\Runtime\\Budget::stepsUsedUp(\$L); }");
+                        $code .= self::lines(
+                            "if (($counter -= \$n) < 0) { \\LuaPhp\\Runtime\\Budget::stepsUsedUp(\$L); }"
+                        );
                     }
                     return $code . self::lines(
                         'for ($i = 0; $i < $n; $i++) {',
@@ -1839,7 +1961,8 @@ final class FunctionEmitter
     {
         return self::lines(
             "\$t = $tableExpression;",
-            "if (\$t instanceof LuaTable && ((\$v = \$t->hash[$keyLiteral] ?? null) !== null || \$t->metatable === null)) {",
+            "if (\$t instanceof LuaTable && ((\$v = \$t->hash[$keyLiteral] ?? null) !== null"
+                . " || \$t->metatable === null)) {",
             "    $ra = \$v;",
             '} else {',
             '    ' . self::savePc($pc) . " $ra = Vm::finishGet(\$L, \$t, $keyLiteral, $slot);",
@@ -1848,8 +1971,14 @@ final class FunctionEmitter
     }
 
     /** OP_SETTABUP / OP_SETFIELD: t[k] = v with a constant string key */
-    private function emitSetField(int $pc, string $tableExpression, string $keyLiteral, string $valueExpression, int $slot, bool $valueIsNonNilConstant): string
-    {
+    private function emitSetField(
+        int $pc,
+        string $tableExpression,
+        string $keyLiteral,
+        string $valueExpression,
+        int $slot,
+        bool $valueIsNonNilConstant,
+    ): string {
         $rawSet = $valueIsNonNilConstant
             ? "    \$t->hash[$keyLiteral] = \$v;"
             : "    if (\$v !== null) { \$t->hash[$keyLiteral] = \$v; } else { unset(\$t->hash[$keyLiteral]); }";
@@ -1887,12 +2016,16 @@ final class FunctionEmitter
         }
         $integerConstant = self::operand($constant);
         $integerOperation = match ($opcode) {
-            OpCodes::OP_ADDK => "\$v = \$x + $integerConstant; $ra = \\is_int(\$v) ? \$v : Vm::addWrap(\$x, $integerConstant);",
-            OpCodes::OP_SUBK => "\$v = \$x - $integerConstant; $ra = \\is_int(\$v) ? \$v : Vm::subWrap(\$x, $integerConstant);",
-            OpCodes::OP_MULK => "\$v = \$x * $integerConstant; $ra = \\is_int(\$v) ? \$v : Vm::mulWrap(\$x, $integerConstant);",
+            OpCodes::OP_ADDK => "\$v = \$x + $integerConstant; "
+                . "$ra = \\is_int(\$v) ? \$v : Vm::addWrap(\$x, $integerConstant);",
+            OpCodes::OP_SUBK => "\$v = \$x - $integerConstant; "
+                . "$ra = \\is_int(\$v) ? \$v : Vm::subWrap(\$x, $integerConstant);",
+            OpCodes::OP_MULK => "\$v = \$x * $integerConstant; "
+                . "$ra = \\is_int(\$v) ? \$v : Vm::mulWrap(\$x, $integerConstant);",
             OpCodes::OP_MODK => ($constant === 0 || $constant === -1)
                 ? self::savePc($pc) . " $ra = Vm::mod(\$L, \$x, $integerConstant);"
-                : "\$v = \$x % $integerConstant; $ra = (\$v !== 0 && (\$v ^ $integerConstant) < 0) ? \$v + $integerConstant : \$v;",
+                : "\$v = \$x % $integerConstant; "
+                    . "$ra = (\$v !== 0 && (\$v ^ $integerConstant) < 0) ? \$v + $integerConstant : \$v;",
             OpCodes::OP_IDIVK => self::savePc($pc) . " $ra = Vm::idiv(\$L, \$x, $integerConstant);",
         };
         $floatOperation = match ($opcode) {
@@ -1912,7 +2045,10 @@ final class FunctionEmitter
     private function equalsConstant(string $variable, mixed $constant): string
     {
         $alternatives = ["$variable === " . PhpLiteral::of($constant)];
-        if (\is_int($constant) && (float) $constant !== 9.2233720368547758E18 && (int) (float) $constant === $constant) {
+        if (
+            \is_int($constant) && (float) $constant !== 9.2233720368547758E18
+            && (int) (float) $constant === $constant
+        ) {
             $alternatives[] = "$variable === " . PhpLiteral::of((float) $constant);
         } elseif (\is_float($constant)) {
             $integerValue = LuaTable::floatToInteger($constant);
@@ -1940,7 +2076,7 @@ final class FunctionEmitter
     private function nextJump(int $pc): string
     {
         $jump = $this->proto->code[$pc + 1];
-        return $this->jump($pc, $pc + 2 + OpCodes::GETARG_sJ($jump));
+        return $this->jump($pc, $pc + 2 + OpCodes::getArgSJ($jump));
     }
 
     /** builds $args from R[a+1 .. a+b-1], or up to $top when b is 0 */
@@ -1969,7 +2105,8 @@ final class FunctionEmitter
         $code .= $this->argumentList($a, $b);
         $code .= self::lines(
             "\$f = $ra;",
-            '$ret = $f instanceof LuaClosure ? (($f->code)($L, $f, $args) ?? Calls::finishTailCall($L)) : Calls::callNonLua($L, $f, $args);',
+            '$ret = $f instanceof LuaClosure ? (($f->code)($L, $f, $args) ?? Calls::finishTailCall($L))'
+                . ' : Calls::callNonLua($L, $f, $args);',
         );
         $wanted = $c - 1;
         if ($wanted < 0) {  // all results

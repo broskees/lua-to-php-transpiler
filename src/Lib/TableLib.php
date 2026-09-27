@@ -55,10 +55,12 @@ final class TableLib
             return;
         }
         $metatable = MetaMethods::metatableOf($L, $value);
-        if ($metatable !== null  // must have metatable
+        if (
+            $metatable !== null  // must have metatable
             && (!($what & self::TAB_R) || isset($metatable->hash['__index']))
             && (!($what & self::TAB_W) || isset($metatable->hash['__newindex']))
-            && (!($what & self::TAB_L) || isset($metatable->hash['__len']))) {
+            && (!($what & self::TAB_L) || isset($metatable->hash['__len']))
+        ) {
             return;
         }
         Auxiliary::checkType($L, $args, $arg, Lua::LUA_TTABLE);  // force an error
@@ -118,7 +120,8 @@ final class TableLib
             case 3:
                 $position = Auxiliary::checkInteger($L, $args, 2);  // 2nd argument is the position
                 // check whether 'pos' is in [1, e]
-                Auxiliary::argCheck($L, Vm::unsignedLess(Vm::subWrap($position, 1), $firstEmpty), 2, 'position out of bounds');
+                $inBounds = Vm::unsignedLess(Vm::subWrap($position, 1), $firstEmpty);
+                Auxiliary::argCheck($L, $inBounds, 2, 'position out of bounds');
                 $budget = $L->globalState->budget;
                 for ($i = $firstEmpty; $i > $position; $i--) {  // move up elements
                     $budget?->chargeSteps(1);
@@ -179,7 +182,10 @@ final class TableLib
             $count = $end - $first + 1;  // number of elements to move
             Auxiliary::argCheck($L, $target <= PHP_INT_MAX - $count + 1, 4, 'destination wrap around');
             $budget = $L->globalState->budget;
-            if ($target > $end || $target <= $first || ($destinationArgument !== 1 && !Vm::equalObjects($L, $source, $destination))) {
+            if (
+                $target > $end || $target <= $first
+                || ($destinationArgument !== 1 && !Vm::equalObjects($L, $source, $destination))
+            ) {
                 for ($i = 0; $i < $count; $i++) {
                     $budget?->chargeSteps(1);
                     self::setIndex($L, $destination, $target + $i, self::getIndex($L, $source, $first + $i));
@@ -200,7 +206,8 @@ final class TableLib
         $value = self::getIndex($L, $table, $index);
         $string = LuaObject::toStringCoerced($value);
         if ($string === null) {
-            Auxiliary::error($L, 'invalid value (' . LuaObject::typeName($value) . ") at index $index in table for 'concat'");
+            $typeName = LuaObject::typeName($value);
+            Auxiliary::error($L, "invalid value ($typeName) at index $index in table for 'concat'");
         }
         return $string;
     }
@@ -365,8 +372,14 @@ final class TableLib
      * Pos-condition: a[lo .. i - 1] <= a[i] == P <= a[i + 1 .. up]
      * returns 'i'.
      */
-    private static function partition(Coroutine $L, mixed $table, mixed $comparator, int $lo, int $up, mixed $pivot): int
-    {
+    private static function partition(
+        Coroutine $L,
+        mixed $table,
+        mixed $comparator,
+        int $lo,
+        int $up,
+        mixed $pivot,
+    ): int {
         $i = $lo;  // will be incremented before first use
         $j = $up - 1;  // will be decremented before first use
         // loop invariant: a[lo .. i] <= P <= a[j .. up]

@@ -25,7 +25,10 @@ namespace LuaPhp\Embed;
  */
 final class Libraries
 {
-    public const SAFE = ['base', 'package', 'string', 'table', 'math', 'utf8', 'coroutine', 'os.time', 'os.date', 'os.clock', 'os.difftime'];
+    public const SAFE = [
+        'base', 'package', 'string', 'table', 'math', 'utf8', 'coroutine',
+        'os.time', 'os.date', 'os.clock', 'os.difftime',
+    ];
 
     public const ALL = ['base', 'package', 'coroutine', 'table', 'io', 'os', 'string', 'math', 'utf8', 'debug'];
 
@@ -36,7 +39,8 @@ final class Libraries
      */
     public static function check(array $libraries): array
     {
-        if (!array_is_list($libraries) || array_filter($libraries, static fn (mixed $name): bool => !\is_string($name)) !== []) {
+        $notNames = array_filter($libraries, static fn (mixed $name): bool => !\is_string($name));
+        if (!array_is_list($libraries) || $notNames !== []) {
             throw new \InvalidArgumentException('libraries must be a list of names');
         }
         return $libraries;

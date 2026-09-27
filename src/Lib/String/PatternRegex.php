@@ -188,8 +188,9 @@ final class PatternRegex
                         $regex .= self::byteRegex($open) . self::byteSetRegex($others) . '*+' . self::byteRegex($close);
                     } else {
                         $name = 'b' . \strlen($balanceGroups);  // (unique: the definitions only grow)
-                        $balanceGroups .= '(?<' . $name . '>' . self::byteRegex($open) . '(?:' . self::byteSetRegex($others)
-                            . '++|(?&' . $name . '))*+' . self::byteRegex($close) . ')';
+                        $balanceGroups .= '(?<' . $name . '>' . self::byteRegex($open)
+                            . '(?:' . self::byteSetRegex($others) . '++|(?&' . $name . '))*+'
+                            . self::byteRegex($close) . ')';
                         $regex .= '(?>(?&' . $name . '))';
                     }
                     $p += 4;
@@ -333,7 +334,11 @@ final class PatternRegex
     private static function byteRanges(string $accepted, string $flag): string
     {
         $ranges = '';
-        for ($first = strcspn($accepted, $flag); $first < 256; $first = $last + 1 + strcspn($accepted, $flag, $last + 1)) {
+        for (
+            $first = strcspn($accepted, $flag);
+            $first < 256;
+            $first = $last + 1 + strcspn($accepted, $flag, $last + 1)
+        ) {
             $last = $first + strspn($accepted, $flag, $first) - 1;
             $ranges .= \sprintf($last === $first ? '\x%02x' : '\x%02x-\x%02x', $first, $last);
         }
@@ -343,7 +348,8 @@ final class PatternRegex
     /** a literal byte: letters and digits as themselves, anything else escaped */
     private static function byteRegex(int $byte): string
     {
-        $isAlphanumeric = ($byte >= 0x30 && $byte <= 0x39) || ($byte >= 0x41 && $byte <= 0x5A) || ($byte >= 0x61 && $byte <= 0x7A);
+        $isAlphanumeric = ($byte >= 0x30 && $byte <= 0x39) || ($byte >= 0x41 && $byte <= 0x5A)
+            || ($byte >= 0x61 && $byte <= 0x7A);
         return $isAlphanumeric ? \chr($byte) : \sprintf('\x%02x', $byte);
     }
 }

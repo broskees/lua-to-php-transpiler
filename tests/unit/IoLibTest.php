@@ -30,7 +30,11 @@ function assertSameAsReference(string $script, string $standardInput): void
 function test_reading_standard_input(): void
 {
     $input = "first line\nsecond line\n  42 3.5 0x10 nan\nrest\nof the input";
-    assertSameAsReference('print(io.read()) print(io.read("L")) print(io.read("n", "n", "n", "n")) print(io.read("a")) print(io.read(), io.read(0), io.read("a"))', $input);
+    assertSameAsReference(
+        'print(io.read()) print(io.read("L")) print(io.read("n", "n", "n", "n")) print(io.read("a"))'
+        . ' print(io.read(), io.read(0), io.read("a"))',
+        $input,
+    );
     assertSameAsReference('for l in io.lines() do print("[" .. l .. "]") end print(io.read())', $input);
     assertSameAsReference('for a, b in io.stdin:lines(3, "l") do print(a, b) end', $input);
     assertSameAsReference('print(io.read(5), io.stdin:read(7)) print(io.stdin:seek("set", 0))', $input);
@@ -40,7 +44,13 @@ function test_reading_standard_input(): void
 function test_standard_output_and_error_on_pipes(): void
 {
     assertSameAsReference('io.write("x") print(io.stdout:seek()) print(io.stderr:seek("end"))', '');
-    assertSameAsReference('print(io.stdout:setvbuf("no"), io.stdout:write("a", 1, 2.5, "\n"), io.stderr:write("to stderr\n"))', '');
+    assertSameAsReference(
+        'print(io.stdout:setvbuf("no"), io.stdout:write("a", 1, 2.5, "\n"), io.stderr:write("to stderr\n"))',
+        '',
+    );
     assertSameAsReference('print(io.stdin:write("x")) print(io.stdout:read()) print(io.stderr:read("a"))', 'input');
-    assertSameAsReference('io.output():setvbuf("line") io.write("no newline yet") io.stderr:write("err\n") io.write(" then newline\n")', '');
+    assertSameAsReference(
+        'io.output():setvbuf("line") io.write("no newline yet") io.stderr:write("err\n") io.write(" then newline\n")',
+        '',
+    );
 }

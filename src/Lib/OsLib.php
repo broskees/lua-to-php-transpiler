@@ -256,7 +256,8 @@ final class OsLib
                 return substr($format, $position, $optionLength);  // match
             }
         }
-        Auxiliary::argError($L, 1, "invalid conversion specifier '%" . DebugInfo::cString(substr($format, $position)) . "'");
+        $specifier = DebugInfo::cString(substr($format, $position));
+        Auxiliary::argError($L, 1, "invalid conversion specifier '%$specifier'");
     }
 
     /** loslib.c: l_checktime (time_t is 64-bit, so every integer fits) */
@@ -349,7 +350,8 @@ final class OsLib
     {
         $categories = [LC_ALL, LC_COLLATE, LC_CTYPE, LC_MONETARY, LC_NUMERIC, LC_TIME];
         $locale = Auxiliary::optString($L, $args, 1, null);
-        $option = Auxiliary::checkOption($L, $args, 2, 'all', ['all', 'collate', 'ctype', 'monetary', 'numeric', 'time']);
+        $categoryNames = ['all', 'collate', 'ctype', 'monetary', 'numeric', 'time'];
+        $option = Auxiliary::checkOption($L, $args, 2, 'all', $categoryNames);
         if (!self::$localeInitialized) {  // a C program starts in the "C" locale; PHP does not
             \setlocale(LC_ALL, 'C');
             self::$localeInitialized = true;

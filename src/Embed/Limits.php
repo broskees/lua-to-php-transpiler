@@ -44,7 +44,16 @@ final class Limits
         public readonly ?int $sourceBytes = 2 << 20,
     ) {
         // (NAN >= 0 can be true in PHP: is_nan first)
-        foreach (['steps' => $steps, 'memoryBytes' => $memoryBytes, 'seconds' => $seconds, 'outputBytes' => $outputBytes, 'coroutines' => $coroutines, 'callDepth' => $callDepth, 'sourceBytes' => $sourceBytes] as $name => $limit) {
+        $limits = [
+            'steps' => $steps,
+            'memoryBytes' => $memoryBytes,
+            'seconds' => $seconds,
+            'outputBytes' => $outputBytes,
+            'coroutines' => $coroutines,
+            'callDepth' => $callDepth,
+            'sourceBytes' => $sourceBytes,
+        ];
+        foreach ($limits as $name => $limit) {
             if ($limit !== null && (is_nan((float) $limit) || $limit < 0)) {
                 throw new \InvalidArgumentException("Limits: $name must be null or at least 0");
             }
@@ -63,6 +72,7 @@ final class Limits
      */
     public function needStepCounting(): bool
     {
-        return $this->steps !== null || $this->memoryBytes !== null || $this->seconds !== null || $this->callDepth !== null;
+        return $this->steps !== null || $this->memoryBytes !== null
+            || $this->seconds !== null || $this->callDepth !== null;
     }
 }

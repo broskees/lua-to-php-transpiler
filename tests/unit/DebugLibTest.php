@@ -85,7 +85,8 @@ function test_debug_debug_runs_input_lines_until_cont(): void
 {
     $directory = scratchDirectory();
     file_put_contents("$directory/debug_debug.lua", "x = 1\nprint(debug.debug())\nprint('after', x)\n");
-    $input = "print('hello', x)\nx = x + 1\nerror('oops')\nerror({})\nerror(setmetatable({}, {__tostring = function () return 'meta' end}))\n"
+    $input = "print('hello', x)\nx = x + 1\nerror('oops')\nerror({})\n"
+        . "error(setmetatable({}, {__tostring = function () return 'meta' end}))\n"
         . "this is not lua\nprint(debug.traceback())\nprint(x)\ncont\nprint('never')\n";
     $normalize = static fn (array $result): array => preg_replace('/0x[0-9a-f]+/', '0x?', $result);
     $ours = runCommand(['php', realpath(REPO_ROOT . '/bin/lua'), 'debug_debug.lua'], $input, $directory);

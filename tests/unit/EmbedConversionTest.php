@@ -20,7 +20,7 @@ use LuaPhp\Embed\Sandbox;
  * must say the same.
  */
 
-/**
+/*
  * describe(v): a canonical text of what v becomes in PHP. Lists (keys
  * exactly 1..n) are L{...}, other tables T{key=value,...} sorted by key,
  * with keys as PHP arrays keep them (a string that is a canonical decimal
@@ -149,7 +149,8 @@ function describePhp(mixed $value): string
 /** @return list<string> the reference's description of every case */
 function referenceDescriptions(): array
 {
-    $script = 'local describe = (function () ' . DESCRIBE . " end)()\n" . CASES . "\nfor i = 1, #cases do io.write(describe(cases[i]), '\\n') end";
+    $script = 'local describe = (function () ' . DESCRIBE . " end)()\n" . CASES
+        . "\nfor i = 1, #cases do io.write(describe(cases[i]), '\\n') end";
     [$status, $output, $errors] = runCommand(['lua5.4', '-'], $script);
     assertSame(0, $status, $errors);
     return explode("\n", rtrim($output, "\n"));
@@ -194,7 +195,10 @@ function test_lua_values_to_php(): void
     assertSame([10, 20, 30], $list);
     assertSame([], $empty);
     assertSame(['name' => 'Ana', 'tags' => ['vip']], $record);
-    assertSame([[1 => 'a', 3 => 'c'], [1 => 'a', 2 => 'b', 'n' => 2]], $sandbox->load('return {[1] = "a", [3] = "c"}, {"a", "b", n = 2}')->call());
+    assertSame(
+        [[1 => 'a', 3 => 'c'], [1 => 'a', 2 => 'b', 'n' => 2]],
+        $sandbox->load('return {[1] = "a", [3] = "c"}, {"a", "b", n = 2}')->call(),
+    );
     [$function, $thread, $file] = $sandbox->load('return print, coroutine.create(print), io.stdout')->call();
     assertTrue($function instanceof LuaFunction);
     assertSame('thread', $thread->type());
@@ -210,16 +214,24 @@ function test_errors_name_the_path_to_the_bad_value(): void
 {
     $sandbox = sandbox();
     $cases = [
-        'return 1, {name = "x", tags = {"a", "b", {[true] = 1}}}' => 'cannot convert table key true to PHP (keys must be integers or strings) at result[2].tags[3]',
+        'return 1, {name = "x", tags = {"a", "b", {[true] = 1}}}'
+            => 'cannot convert table key true to PHP (keys must be integers or strings) at result[2].tags[3]',
         'return {[1] = "a", ["1"] = "b"}' => 'table has both 1 and "1" as keys at result[1]',
-        'return {{}, {[1.5] = "x"}}' => 'cannot convert table key 1.5 to PHP (keys must be integers or strings) at result[1][2]',
-        'return {[{}] = 1}' => 'cannot convert a table key of type table to PHP (keys must be integers or strings) at result[1]',
+        'return {{}, {[1.5] = "x"}}'
+            => 'cannot convert table key 1.5 to PHP (keys must be integers or strings) at result[1][2]',
+        'return {[{}] = 1}'
+            => 'cannot convert a table key of type table to PHP (keys must be integers or strings) at result[1]',
         'local t = {} t.self = t return t' => 'table contains a cycle at result[1].self',
         'local t = {} t["a b"] = {t} return t' => 'table contains a cycle at result[1]["a b"][1]',
-        'local t = {} for i = 1, 100 do t = {x = t} end return t' => 'table nested deeper than 100 levels at result[1]' . str_repeat('.x', 100),
+        'local t = {} for i = 1, 100 do t = {x = t} end return t'
+            => 'table nested deeper than 100 levels at result[1]' . str_repeat('.x', 100),
     ];
     foreach ($cases as $code => $message) {
-        assertSame($message, assertThrows(ConversionError::class, static fn () => $sandbox->load($code)->call()), $code);
+        assertSame(
+            $message,
+            assertThrows(ConversionError::class, static fn () => $sandbox->load($code)->call()),
+            $code,
+        );
     }
     // the path of a global, and of a table handle
     $sandbox->load('config = {db = {hosts = {"a", {}}}}; config.db.hosts[2][false] = 1')->call();
@@ -230,8 +242,10 @@ function test_errors_name_the_path_to_the_bad_value(): void
     }
     assertSame('config.db.hosts[2]', $error?->path);
     assertSame('cannot convert table key false to PHP (keys must be integers or strings)', $error->reason);
-    assertSame('cannot convert table key false to PHP (keys must be integers or strings) at table.db.hosts[2]',
-        assertThrows(ConversionError::class, static fn () => $sandbox->getGlobalHandle('config')->toArray()));
+    assertSame(
+        'cannot convert table key false to PHP (keys must be integers or strings) at table.db.hosts[2]',
+        assertThrows(ConversionError::class, static fn () => $sandbox->getGlobalHandle('config')->toArray())
+    );
     // 100 levels are fine
     assertSame(100, depthOf($sandbox->load('local t = {} for i = 1, 99 do t = {x = t} end return t')->call()[0]));
 }
@@ -243,7 +257,8 @@ function depthOf(array $value): int
 
 function test_php_values_to_lua(): void
 {
-    $describe = static fn (Sandbox $sandbox, mixed $value): string => $sandbox->load(DESCRIBE, '=describe')->call()[0]->call($value)[0];
+    $describe = static fn (Sandbox $sandbox, mixed $value): string
+        => $sandbox->load(DESCRIBE, '=describe')->call()[0]->call($value)[0];
     $sandbox = sandbox();
     $cases = [
         [null, 'nil'], [true, 'true'], [42, 'i:42'], [4.2, 'f:4.2000000000000002'], ['hi', 's:hi'],
@@ -273,15 +288,26 @@ function test_php_values_to_lua(): void
 function test_php_values_that_cannot_go_to_lua(): void
 {
     $sandbox = sandbox();
-    assertSame('cannot pass object of class DateTime to Lua at when',
-        assertThrows(ConversionError::class, static fn () => $sandbox->setGlobal('when', new \DateTime())));
-    assertSame("cannot pass object of class ArrayObject to Lua at config['items'][1]",
-        assertThrows(ConversionError::class, static fn () => $sandbox->setGlobal('config', ['items' => [1, new \ArrayObject()]])));
-    assertSame('cannot pass object of class stdClass to Lua at args[1]',
-        assertThrows(ConversionError::class, static fn () => $sandbox->load('return ...')->call(1, new \stdClass())));
+    assertSame(
+        'cannot pass object of class DateTime to Lua at when',
+        assertThrows(ConversionError::class, static fn () => $sandbox->setGlobal('when', new \DateTime()))
+    );
+    assertSame(
+        "cannot pass object of class ArrayObject to Lua at config['items'][1]",
+        assertThrows(
+            ConversionError::class,
+            static fn () => $sandbox->setGlobal('config', ['items' => [1, new \ArrayObject()]]),
+        )
+    );
+    assertSame(
+        'cannot pass object of class stdClass to Lua at args[1]',
+        assertThrows(ConversionError::class, static fn () => $sandbox->load('return ...')->call(1, new \stdClass()))
+    );
     $resource = fopen('php://memory', 'r');
-    assertSame('cannot pass a resource (stream) to Lua at file',
-        assertThrows(ConversionError::class, static fn () => $sandbox->setGlobal('file', $resource)));
+    assertSame(
+        'cannot pass a resource (stream) to Lua at file',
+        assertThrows(ConversionError::class, static fn () => $sandbox->setGlobal('file', $resource))
+    );
     fclose($resource);
     // an invokable object is not a Closure: not a function either
     $invokable = new class () {
@@ -290,19 +316,24 @@ function test_php_values_that_cannot_go_to_lua(): void
             return 1;
         }
     };
-    assertTrue(str_starts_with(assertThrows(ConversionError::class, static fn () => $sandbox->setGlobal('f', $invokable)), 'cannot pass object of class '));
+    $message = assertThrows(ConversionError::class, static fn () => $sandbox->setGlobal('f', $invokable));
+    assertTrue(str_starts_with($message, 'cannot pass object of class '));
     // nesting: 100 levels, not 101; a reference loop is infinitely deep
     $deep = [];
     for ($i = 1; $i < 100; $i++) {
         $deep = [$deep];
     }
     $sandbox->setGlobal('deep', $deep);
-    assertSame('array nested deeper than 100 levels at deep' . str_repeat('[0]', 100),
-        assertThrows(ConversionError::class, static fn () => $sandbox->setGlobal('deep', [$deep])));
+    assertSame(
+        'array nested deeper than 100 levels at deep' . str_repeat('[0]', 100),
+        assertThrows(ConversionError::class, static fn () => $sandbox->setGlobal('deep', [$deep]))
+    );
     $loop = ['name' => 'loop'];
     $loop['self'] = &$loop;
-    assertSame("array nested deeper than 100 levels at loop" . str_repeat("['self']", 100),
-        assertThrows(ConversionError::class, static fn () => $sandbox->setGlobal('loop', $loop)));
+    assertSame(
+        "array nested deeper than 100 levels at loop" . str_repeat("['self']", 100),
+        assertThrows(ConversionError::class, static fn () => $sandbox->setGlobal('loop', $loop))
+    );
     // nothing was set by a failed conversion
     assertSame(null, $sandbox->getGlobal('config'));
     assertSame(null, $sandbox->getGlobal('loop'));
@@ -319,12 +350,18 @@ function test_handles_go_back_only_into_their_own_sandbox(): void
     // the same Lua value, not a copy
     $first->setGlobal('back', $tableHandle);
     assertSame([true, true], $first->load('return rawequal(back, t), rawequal(..., f)')->call($function));
-    assertSame('cannot pass a value of another sandbox to Lua at x',
-        assertThrows(ConversionError::class, static fn () => $second->setGlobal('x', $tableHandle)));
-    assertSame('cannot pass a value of another sandbox to Lua at args[0]',
-        assertThrows(ConversionError::class, static fn () => $second->load('return ...')->call($function)));
-    assertSame('cannot register a value of a sandbox in an Environment at x',
-        assertThrows(ConversionError::class, static fn () => (new Environment())->addGlobal('x', $tableHandle)));
+    assertSame(
+        'cannot pass a value of another sandbox to Lua at x',
+        assertThrows(ConversionError::class, static fn () => $second->setGlobal('x', $tableHandle))
+    );
+    assertSame(
+        'cannot pass a value of another sandbox to Lua at args[0]',
+        assertThrows(ConversionError::class, static fn () => $second->load('return ...')->call($function))
+    );
+    assertSame(
+        'cannot register a value of a sandbox in an Environment at x',
+        assertThrows(ConversionError::class, static fn () => (new Environment())->addGlobal('x', $tableHandle))
+    );
 }
 
 function test_metatables_are_ignored(): void
@@ -342,7 +379,8 @@ function test_metatables_are_ignored(): void
 function test_table_handles(): void
 {
     $sandbox = sandbox();
-    $sandbox->load('config = setmetatable({tax = 0.08, list = {"a", "b"}, [true] = "yes", [2.5] = "float"}, {__index = function () return "meta" end})')->call();
+    $sandbox->load('config = setmetatable({tax = 0.08, list = {"a", "b"}, [true] = "yes", [2.5] = "float"},'
+        . ' {__index = function () return "meta" end})')->call();
     $config = $sandbox->getGlobalHandle('config');
     assertSame(0.08, $config->get('tax'));
     assertSame(null, $config->get('missing'), 'raw: no __index');
@@ -360,8 +398,14 @@ function test_table_handles(): void
     assertSame([0.1, 1, 'three again'], $sandbox->load('return config.tax, config.added.x, config[3]')->call());
     $config->set('added', null);
     assertSame([true], $sandbox->load('return rawget(config, "added") == nil')->call());
-    assertSame('a table index cannot be nil', assertThrows(ConversionError::class, static fn () => $config->set(null, 1)));
-    assertSame('a table index cannot be NaN', assertThrows(ConversionError::class, static fn () => $config->set(NAN, 1)));
+    assertSame(
+        'a table index cannot be nil',
+        assertThrows(ConversionError::class, static fn () => $config->set(null, 1)),
+    );
+    assertSame(
+        'a table index cannot be NaN',
+        assertThrows(ConversionError::class, static fn () => $config->set(NAN, 1)),
+    );
     // pairs: every key, of any type, as get gives it; entries may be cleared while iterating
     $seen = [];
     foreach ($config->pairs() as $key => $value) {

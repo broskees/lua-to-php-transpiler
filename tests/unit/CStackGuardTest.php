@@ -28,13 +28,14 @@ use LuaPhp\Runtime\Standalone;
 
 Standalone::configurePhp();
 $L = Standalone::newStateWithLibraries();
-$L->globalState->globals->hash['exhaustCStack'] = new NativeFunction('exhaustCStack', static function (Coroutine $L, array $args): array {
+$exhaustCStack = static function (Coroutine $L, array $args): array {
     $recurse = static function () use (&$recurse): array {
         return array_map($recurse, [1]);
     };
     $recurse();
     return [];
-});
+};
+$L->globalState->globals->hash['exhaustCStack'] = new NativeFunction('exhaustCStack', $exhaustCStack);
 $code = <<<'LUA'
 print(pcall(exhaustCStack))
 print(coroutine.resume(coroutine.create(function () return pcall(exhaustCStack) end)))
@@ -55,5 +56,8 @@ function test_php_c_stack_guard_becomes_a_lua_error(): void
     // (output through files: an uncaught error would print a trace too long for a pipe)
     $result = finishProcess(startProcess(['php', $script, REPO_ROOT . '/src/autoload.php'], REPO_ROOT));
     $result[2] = substr($result[2], 0, 2000);
-    assertSame([0, "false\tC stack overflow\ntrue\tfalse\tC stack overflow\nfalse\tC stack overflow\ndead\ntrue\txxx\n", ''], $result);
+    assertSame(
+        [0, "false\tC stack overflow\ntrue\tfalse\tC stack overflow\nfalse\tC stack overflow\ndead\ntrue\txxx\n", ''],
+        $result,
+    );
 }

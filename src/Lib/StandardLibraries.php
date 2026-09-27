@@ -120,7 +120,8 @@ final class StandardLibraries
     private static function keepOnly(LuaTable $module, string $library, array $functions, bool $sandboxed): void
     {
         foreach ($functions as $function) {
-            if (!isset($module->hash[$function]) && !($sandboxed && \in_array($function, self::SANDBOX_REMOVES[$library] ?? [], true))) {
+            $removedBySandbox = $sandboxed && \in_array($function, self::SANDBOX_REMOVES[$library] ?? [], true);
+            if (!isset($module->hash[$function]) && !$removedBySandbox) {
                 throw new \InvalidArgumentException("unknown library function '$library.$function'");
             }
         }

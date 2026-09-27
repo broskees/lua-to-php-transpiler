@@ -2,9 +2,9 @@
 
 Transpiles Lua 5.4 to PHP. The generated PHP behaves like Lua 5.4.9: it passes
 Lua's official 5.4.9 test suite. The transpiler and its runtime are plain PHP,
-with no Composer packages and no extensions. PHP applications can also run
-untrusted Lua inside a request, sandboxed and with limits: see
-[Embedding](#embedding).
+with no dependencies beyond PHP itself and its ctype extension. PHP
+applications can also run untrusted Lua inside a request, sandboxed and with
+limits: see [Embedding](#embedding).
 
 ```sh
 bin/lua2php hello.lua -o hello.php
@@ -15,8 +15,53 @@ php hello.php
 
 - PHP 8.4 or newer, from the command line. Developed on PHP 8.5; the official
   test suite also passes on 8.4. PHP 8.3 and older don't work.
+- PHP's ctype extension (on in almost every PHP build). Optional: opcache
+  (its tracing JIT runs the generated code 1.3 to 2 times faster), posix
+  (the host C library's error texts) and pcntl (exit statuses of `io.popen`
+  and `os.execute` without polling).
 - For running the tests: `lua5.4` and `luac5.4` (5.4.9). The tests compare
   against them.
+
+## Installation
+
+With Composer, once the package is on Packagist:
+
+```sh
+composer require broskees/lua-to-php-transpiler
+```
+
+Until then, add the GitHub repository to your project first:
+
+```sh
+composer config repositories.lua-to-php-transpiler vcs https://github.com/broskees/lua-to-php-transpiler
+composer require broskees/lua-to-php-transpiler:dev-main
+```
+
+which is this in your `composer.json`:
+
+```json
+{
+    "repositories": [
+        {"type": "vcs", "url": "https://github.com/broskees/lua-to-php-transpiler"}
+    ],
+    "require": {
+        "broskees/lua-to-php-transpiler": "dev-main"
+    }
+}
+```
+
+The commands are then in `vendor/bin` (`vendor/bin/lua2php`, `vendor/bin/lua`,
+`vendor/bin/luac`), and Composer's autoloader loads the classes:
+
+```php
+require 'vendor/autoload.php';
+
+var_dump(LuaPhp\Embed\Lua::run('return 1 + 1'));  // [2]
+```
+
+Without Composer, clone the repository: `bin/` has the commands and
+`src/autoload.php` loads the classes. The rest of this README uses these
+paths; with Composer, read `vendor/bin/lua2php` for `bin/lua2php`.
 
 ## Usage
 
@@ -43,11 +88,12 @@ Every `.lua` file becomes a `.php` file at the same path. Run them from
 transpiled while the program runs. `lua2php` only converts code, so deploy
 `build/` together with any data files your program reads.
 
-Generated files need this repository's runtime (`src/`). Each file remembers
-where the runtime was when it was generated. On another machine, set
-`LUAPHP_HOME` to the directory that contains `src/` (or `LUAPHP_AUTOLOAD` to
-`src/autoload.php`). The runtime must be the same version that generated the
-files.
+Generated files need this package's runtime (`src/`). Each file remembers
+where the runtime was when it was generated (with Composer,
+`vendor/broskees/lua-to-php-transpiler/src/autoload.php`). On another machine,
+set `LUAPHP_HOME` to the directory that contains `src/` (or `LUAPHP_AUTOLOAD`
+to `src/autoload.php`, or to a Composer project's `vendor/autoload.php`). The
+runtime must be the same version that generated the files.
 
 ### `load()`
 
@@ -77,7 +123,7 @@ host process changes: no `ini_set`, no handler or output buffer left
 behind, no output.
 
 ```php
-require 'path/to/src/autoload.php';
+require 'vendor/autoload.php';  // without Composer: path/to/src/autoload.php
 
 use LuaPhp\Embed\{Environment, Limits, RunContext, ScriptError};
 use LuaPhp\Embed\Loader\FilesystemLoader;
@@ -252,9 +298,10 @@ against `lua5.4`:
 ## Tests
 
 ```sh
-php tests/run.php     # unit tests, plus every tests/diff case compared with lua5.4
+php tests/run.php     # unit tests, plus every tests/diff case compared with lua5.4 (composer test)
 tests/bytecode.sh     # bin/luac listings compared with luac5.4 for the official test files
 tests/official.sh     # the official test files, one at a time
+composer lint         # the code style: PSR-12, checked by PHP_CodeSniffer (after composer install)
 ```
 
 Each differential case in `tests/diff/` runs under `lua5.4` and under this
@@ -264,7 +311,7 @@ errors and exit status must be identical.
 ## Layout
 
 ```
-bin/            lua2php, lua, luac
+bin/            lua2php, lua, luac (their programs are in src/Cli/)
 src/Compiler/   lexer, parser, code generator, bytecode dump and undump
 src/Emitter/    bytecode to PHP
 src/Runtime/    values, tables, calls, errors, coroutines, metamethods, debug info, GC
