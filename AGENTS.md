@@ -530,8 +530,10 @@ Lua string keys and integer keys distinct.
   `allowhook` while the hook runs; `Calls::protectedRun` restores it.
 - **PHP hygiene.** `Standalone::configurePhp()`: PHP warnings become
   exceptions (a crash, never output; the handler is
-  `PhpErrors::throwAsException`), exception traces drop arguments, and
-  PHP's shutdown (also after a fatal error) flushes C's stdout. No PHP
+  `PhpErrors::throwAsException`), exception traces drop arguments,
+  SIGPIPE gets its default disposition back (`Lib\Io\PipeSignal`, see
+  Files and processes), and PHP's shutdown (also after a fatal error)
+  flushes C's stdout. No PHP
   output buffer and no echo: C's stdout is `CFile::standardOutput()` (see
   Files and processes), which `print` (`StandardOutput`, then a flush, like
   lua_writeline), io.stdout and lua.c's own output (`Standalone::
@@ -583,13 +585,25 @@ Lua string keys and integer keys distinct.
   to the state's sink like `print` (see Embedding conventions). A failed
   write or flush is the Lua error C reports (ENOSPC, EPIPE, EBADF...;
   `StandardOutputTest`); print ignores it, and the exit status stays the
-  script's. PHP ignores SIGPIPE (php_cli.c), so a closed pipe is EPIPE, as
-  for lua5.4 started with SIGPIPE ignored (from a shell lua5.4 dies of the
-  signal instead). Lua-supplied file names are plain paths, never PHP
+  script's. SIGPIPE (decided 2026-10-02): bin/lua and lua2php scripts are C
+  programs run from a shell, whose SIGPIPE has its default disposition
+  (Python, Node, Go and shell parents all give children that), so a write
+  to a pipe or FIFO nobody reads kills them at the write: `... | head -1`
+  ends with status 141, nothing more is written, no __close or __gc runs.
+  PHP's CLI ignores SIGPIPE (php_cli.c), so configurePhp restores the
+  default with `pcntl_signal(SIGPIPE, SIG_DFL)`; without pcntl,
+  `PipeSignal` emulates it: a write failing with EPIPE (CFile::writeOut,
+  `StandardError::writeBytes` for stderr) ends the process with exit status
+  141 and PHP's shutdown writes nothing. Embedded states never do this (the
+  host's process keeps its disposition; EPIPE is an error Lua sees). Tests
+  compare with lua5.4 started as from a shell (`env --default-signal=PIPE`):
+  tests/run.php runs lua5.4 with SIGPIPE ignored (inherited from PHP), so a
+  diff case that wrote to a closed pipe would differ (none does).
+  Lua-supplied file names are plain paths, never PHP
   stream wrappers: every PHP file function on one goes through
   `CFile::plainPath` ("php://memory" is a file in a directory "php:";
   fopen, package.searchpath's readable, loadfile and lua2php's precompiled
-  files; `file_names_are_plain_paths.lua`). C's `errno` is `Lib\Io\Errno`
+  files, bin/luac's file arguments; `file_names_are_plain_paths.lua`). C's `errno` is `Lib\Io\Errno`
   (recovered from PHP's warning text); `Errno::fileResult/execResult` are
   luaL_fileresult/luaL_execresult. PHP's fopen and file_get_contents
   resolve paths themselves first and report any failure there as ENOENT
@@ -620,7 +634,14 @@ Lua string keys and integer keys distinct.
   after the last transition), else a POSIX TZ string (no rule: posixrules'
   transitions, read again at every mktime), else UTC under the name given;
   C's int arithmetic wraps where glibc's does (`TimeZoneTest` compares
-  lua5.4 over many TZ values). strftime takes names and the %c %x %X %r
+  lua5.4 over many TZ values). Until 2026-10-02 every zone came from PHP's
+  bundled database (DateTimeZone), which works where a host's open_basedir
+  forbids PHP to read /usr/share/zoneinfo; now, when open_basedir forbids
+  reading the zone file and PHP's database has a zone of exactly that name,
+  that zone stands in (`TimeZone::useBundledZone`: PHP's transitions, no
+  leap seconds); a file it does not name stays missing, as for glibc, and
+  TZ unset is UTC there (readlink of /etc/localtime is forbidden too, as it
+  was before). strftime takes names and the %c %x %X %r
   formats of the LC_TIME locale (os.setlocale) from nl_langinfo ("C" and
   "POSIX", or no nl_langinfo: the C locale's); PHP's nl_langinfo gives
   only the first era and no alternative digits (a list in C, cut at the

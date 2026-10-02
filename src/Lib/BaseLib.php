@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace LuaPhp\Lib;
 
+use LuaPhp\Lib\Io\CFile;
 use LuaPhp\Runtime\Auxiliary;
 use LuaPhp\Runtime\Calls;
 use LuaPhp\Runtime\ChunkLoader;
@@ -18,6 +19,7 @@ use LuaPhp\Runtime\LuaTable;
 use LuaPhp\Runtime\MemoryLimit;
 use LuaPhp\Runtime\MetaMethods;
 use LuaPhp\Runtime\NativeFunction;
+use LuaPhp\Runtime\StandardOutput;
 use LuaPhp\Runtime\StringToNumber;
 use LuaPhp\Runtime\Vm;
 
@@ -84,6 +86,21 @@ final class BaseLib
     {
         $G = $L->globalState;
         $count = \count($args);
+        if ($G->budget === null && $G->output instanceof StandardOutput) {
+            // the command line: C's stdout itself, as writeOutput and StandardOutput write and flush it
+            $stdout = CFile::standardOutput();
+            for ($i = 0; $i < $count; $i++) {
+                $text = Auxiliary::toLString($L, $args[$i]);  // (a __tostring may print: write as we go)
+                $piece = $i > 0 ? "\t" . $text : $text;
+                if (\strlen($piece) > MemoryLimit::CHECK_ABOVE) {
+                    MemoryLimit::reserve(\strlen($piece), null);
+                }
+                $stdout->write($piece);
+            }
+            $stdout->write("\n");
+            $stdout->flush();
+            return [];
+        }
         for ($i = 0; $i < $count; $i++) {
             $text = Auxiliary::toLString($L, $args[$i]);  // convert it to string
             $G->writeOutput($i > 0 ? "\t" . $text : $text);  // lua_writestring (a tab before all but the first)

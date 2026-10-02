@@ -614,11 +614,19 @@ final class CFile
     {
         $G = $this->sinkState;
         if ($G->output instanceof StandardOutput) {
+            $stdout = self::$standardOutput ?? self::standardOutput();
+            if (
+                $G->budget === null && $stdout->bufferMode === self::IOFBF && $stdout->putting
+                && !$stdout->writeEndPinned && \strlen($stdout->writeBuffer) + \strlen($data) <= $stdout->bufferSize
+            ) {
+                $stdout->writeBuffer .= $data;  // the command line: write()'s first case, without the calls
+                return true;
+            }
             $G->budget?->chargeOutput(\strlen($data));
             if (\strlen($data) > MemoryLimit::CHECK_ABOVE) {
                 MemoryLimit::reserve(\strlen($data), $G->budget);  // (the buffer copies it)
             }
-            return self::standardOutput()->write($data);
+            return $stdout->write($data);
         }
         if ($this->bufferMode === self::IOLBF && str_contains($data, "\n")) {
             $newlinePosition = strrpos($data, "\n");
@@ -637,6 +645,9 @@ final class CFile
     /** write $data to the underlying stream now */
     private function writeOut(string $data): bool
     {
+        if (PipeSignal::$killed) {
+            return false;  // the process is ending as SIGPIPE ends it
+        }
         if ($this->sinkState !== null) {  // standard error
             if (!($this->sinkState->errorOutput instanceof StandardError)) {
                 $this->sinkState->writeErrorOutput($data);
@@ -647,11 +658,12 @@ final class CFile
         $length = \strlen($data);
         $written = 0;
         while ($written < $length) {
-            Errno::clearPhpError();
+            error_clear_last();  // (Errno::clearPhpError, without the call: print flushes here every line)
             $count = @fwrite($this->stream, $written === 0 ? $data : substr($data, $written));
             if ($count === false || $count === 0) {
                 Errno::setFromPhpError(Errno::EBADF);
                 $this->error = true;
+                PipeSignal::afterFailedWrite(Errno::$errno);
                 return false;
             }
             $written += $count;

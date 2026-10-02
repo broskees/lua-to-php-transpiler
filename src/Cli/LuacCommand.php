@@ -10,6 +10,7 @@ use LuaPhp\Compiler\Dump;
 use LuaPhp\Compiler\Listing;
 use LuaPhp\Compiler\Proto;
 use LuaPhp\Compiler\Undump;
+use LuaPhp\Lib\Io\CFile;
 
 /**
  * bin/luac: port of luac.c (Lua 5.4.9) for a single input file: list,
@@ -102,7 +103,7 @@ final class LuacCommand
                 fwrite(STDOUT, $bytes);
                 return 0;
             }
-            $outputHandle = @fopen($output, 'wb');
+            $outputHandle = @fopen(CFile::plainPath($output), 'wb');  // (a plain path, as for C's fopen)
             if ($outputHandle === false) {
                 self::fatal("cannot open $output: " . self::lastSystemError());  // luac.c: cannot("open")
             }
@@ -163,11 +164,12 @@ final class LuacCommand
             $contents = stream_get_contents(STDIN);
         } else {
             $chunkname = '@' . $filename;
-            if (is_dir($filename)) {
+            $path = CFile::plainPath($filename);  // a plain path, as for C's fopen: never a stream wrapper
+            if (is_dir($path)) {
                 // C's fopen succeeds on a directory; the read then fails with EISDIR
                 self::fatal("cannot read $filename: Is a directory");
             }
-            $contents = @file_get_contents($filename);
+            $contents = @file_get_contents($path);
             if ($contents === false) {
                 self::fatal("cannot open $filename: " . self::lastSystemError());
             }

@@ -17,6 +17,7 @@ use LuaPhp\Runtime\LuaError;
 use LuaPhp\Runtime\LuaObject;
 use LuaPhp\Runtime\NativeFunction;
 use LuaPhp\Runtime\Standalone;
+use LuaPhp\Runtime\StandardError;
 
 /**
  * bin/lua: port of lua.c (Lua 5.4.9), the stand-alone interpreter: options
@@ -70,13 +71,13 @@ final class LuaCommand
     private static function printUsage(string $programName, string $badOption): void
     {
         Standalone::flushStdout();
-        fwrite(STDERR, "$programName: ");
+        StandardError::writeBytes("$programName: ");
         if (($badOption[1] ?? '') === 'e' || ($badOption[1] ?? '') === 'l') {
-            fwrite(STDERR, "'$badOption' needs argument\n");
+            StandardError::writeBytes("'$badOption' needs argument\n");
         } else {
-            fwrite(STDERR, "unrecognized option '$badOption'\n");
+            StandardError::writeBytes("unrecognized option '$badOption'\n");
         }
-        fwrite(STDERR, "usage: $programName [options] [script [args]]\n"
+        StandardError::writeBytes("usage: $programName [options] [script [args]]\n"
             . "Available options are:\n"
             . "  -e stat   execute string 'stat'\n"
             . "  -i        enter interactive mode after executing 'script'\n"

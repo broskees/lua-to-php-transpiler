@@ -81,6 +81,29 @@ const CASES = [
         io.write("pending")
         error("fails")
         LUA,
+    'buffered_at_the_end' => <<<'LUA'
+        io.write("written when the program ends")
+        LUA,
+    'endless_print' => <<<'LUA'
+        while true do print("y") end
+        LUA,
+    'endless_write' => <<<'LUA'
+        while true do io.write("y\n") end
+        LUA,
+    'endless_stderr' => <<<'LUA'
+        while true do io.stderr:write("e\n") end
+        LUA,
+    'endless_warnings' => <<<'LUA'
+        warn("@on")
+        while true do warn("w") end
+        LUA,
+    'pipe_reader_gone' => <<<'LUA'
+        local pipe = io.popen("exit 0", "w")
+        io.write("left in the buffer")
+        local closing <close> = setmetatable({}, {__close = function () io.stderr:write("closed\n") end})
+        local finalized = setmetatable({}, {__gc = function () io.stderr:write("collected\n") end})
+        while true do pipe:write(string.rep("x", 4096)) pipe:flush() end
+        LUA,
 ];
 
 /**
@@ -143,27 +166,108 @@ function assertSameAsReference(string $name, string $shellRedirection): void
 
 function test_write_errors_on_a_full_device(): void
 {
-    foreach (array_keys(CASES) as $name) {
+    $names = [
+        'full_buffering', 'line_buffering', 'no_buffering', 'os_exit', 'os_exit_closing_the_state', 'error_at_the_end',
+    ];
+    foreach ($names as $name) {
         assertSameAsReference($name, '> /dev/full');
     }
 }
 
-function test_write_errors_on_a_pipe_nobody_reads(): void
+/**
+ * The commands that run case $name as from a shell, whose SIGPIPE has its
+ * default disposition (the caller starts them under env
+ * --default-signal=PIPE: this process ignores SIGPIPE, as PHP does, and its
+ * children inherit that): lua5.4, bin/lua and the transpiled script, the
+ * last two also on hosts without pcntl, where they emulate the signal (a
+ * shared host's, which cannot start processes, unless $startsProcesses)
+ *
+ * @return array<string, list<string>>
+ */
+function programsAsFromAShell(string $name, bool $startsProcesses = false): array
 {
-    // SIGPIPE is ignored (PHP ignores it, and lua5.4 inherits that from this
-    // process): writing to the pipe fails with EPIPE
-    foreach (['full_buffering', 'no_buffering', 'os_exit'] as $name) {
+    $hosts = ['without pcntl' => \Tests\DisabledFunctionsTest\disabling(get_extension_funcs('pcntl'))];
+    if (!$startsProcesses) {
+        $hosts['on a shared host'] = \Tests\DisabledFunctionsTest\disabling(
+            \Tests\DisabledFunctionsTest\sharedHostDisabledFunctions()
+        );
+    }
+    $programs = [];
+    foreach (programsFor($name) as $program => $command) {
+        $programs[$program] = $command;
+        if ($command[0] === 'lua5.4') {
+            continue;
+        }
+        foreach ($hosts as $host => $phpOptions) {
+            $programs["$program $host"] = ['php', ...$phpOptions, ...\array_slice($command, 1)];
+        }
+    }
+    return $programs;
+}
+
+/**
+ * Runs each of programsAsFromAShell($name) under bash running $shellLine
+ * ("$@" is the program, ${PIPESTATUS[0]} its status: 141 is 128 + SIGPIPE,
+ * killed by the signal) as from a shell (SIGPIPE at its default), bounded
+ * by a timeout (137: it never ended). Every result must be lua5.4's, which
+ * it returns: [exit status, stdout, stderr].
+ *
+ * @return array{int, string, string}
+ */
+function assertSameAsFromAShell(string $name, string $shellLine, bool $startsProcesses = false): array
+{
+    $expected = null;
+    foreach (programsAsFromAShell($name, $startsProcesses) as $program => $command) {  // (lua5.4 first)
+        $asFromAShell = ['env', '--default-signal=PIPE', 'bash', '-c', $shellLine, 'bash'];
+        $result = runCommand([...$asFromAShell, 'timeout', '-s', 'KILL', '20', ...$command]);
+        $result = [$result[0], withProgramName($result[1], $command), withProgramName($result[2], $command)];
+        $expected ??= $result;
+        assertSame($expected, $result, "$name, $program");
+    }
+    return $expected;
+}
+
+function test_a_program_writing_to_a_closed_pipe_dies_of_sigpipe(): void
+{
+    // the pipe's reader is gone before the program writes anything
+    foreach (['full_buffering', 'no_buffering', 'os_exit', 'buffered_at_the_end'] as $name) {
         $results = [];
-        foreach (programsFor($name) as $program => $command) {
-            $process = proc_open($command, [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
-            fclose($pipes[1]);  // before the program writes anything
+        foreach (programsAsFromAShell($name) as $program => $command) {
+            $process = proc_open(
+                ['env', '--default-signal=PIPE', 'sh', '-c', '"$@"; echo "exit status $?" >&2', 'sh', ...$command],
+                [1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
+                $pipes,
+            );
+            fclose($pipes[1]);
             $errorOutput = stream_get_contents($pipes[2]);
             fclose($pipes[2]);
             $results[$program] = [proc_close($process), withProgramName($errorOutput, $command)];
         }
-        assertSame($results['lua5.4'], $results['bin/lua'], "$name on a closed pipe: bin/lua");
-        assertSame($results['lua5.4'], $results['lua2php'], "$name on a closed pipe: lua2php output");
+        assertTrue(str_ends_with($results['lua5.4'][1], "exit status 141\n"), "$name: SIGPIPE killed lua5.4");
+        foreach ($results as $program => $result) {
+            assertSame($results['lua5.4'], $result, "$name on a closed pipe: $program");
+        }
     }
+}
+
+function test_a_program_writing_into_head_ends_with_status_141(): void
+{
+    $stdoutIntoHead = '"$@" | head -1; echo "status ${PIPESTATUS[0]}"';
+    $stderrIntoHead = '"$@" 2>&1 >/dev/null | head -1; echo "status ${PIPESTATUS[0]}"';
+    assertSame([0, "y\nstatus 141\n", ''], assertSameAsFromAShell('endless_print', $stdoutIntoHead));
+    assertSame([0, "y\nstatus 141\n", ''], assertSameAsFromAShell('endless_write', $stdoutIntoHead));
+    assertSame([0, "e\nstatus 141\n", ''], assertSameAsFromAShell('endless_stderr', $stderrIntoHead));
+    assertSame(
+        [0, "Lua warning: w\nstatus 141\n", ''],
+        assertSameAsFromAShell('endless_warnings', $stderrIntoHead),
+    );
+}
+
+function test_sigpipe_ends_the_program_at_once(): void
+{
+    // a pipe to a command that has ended: nothing more is written (the
+    // buffered stdout is lost), no __close and no __gc runs
+    assertSame([0, "status 141\n", ''], assertSameAsFromAShell('pipe_reader_gone', '"$@"; echo "status $?"', true));
 }
 
 function test_standard_output_and_error_to_one_file_keep_their_order(): void

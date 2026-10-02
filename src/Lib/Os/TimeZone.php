@@ -71,6 +71,9 @@ final class TimeZone
     private static int $ruleStdoff = 0;
     private static int $ruleDstoff = 0;
 
+    /** PHP's zone of the zone file open_basedir forbids to read (see useBundledZone) */
+    private static ?\DateTimeZone $bundledZone = null;
+
     /** C's int: $value wrapped to 32 bits, as gcc's arithmetic on int wraps */
     private static function int32(int $value): int
     {
@@ -509,12 +512,15 @@ final class TimeZone
     {
         $wasUsingTzfile = self::$useTzfile;
         self::$useTzfile = false;
+        self::$bundledZone = null;
         if ($file === '') {
             return;  // the empty string: UTC with no leap seconds
         }
+        $name = $file;
+        $directory = getenv('TZDIR');
+        $directory = \is_string($directory) && $directory !== '' ? $directory : self::TZDIR;
         if ($file[0] !== '/') {
-            $directory = getenv('TZDIR');
-            $file = (\is_string($directory) && $directory !== '' ? $directory : self::TZDIR) . '/' . $file;
+            $file = "$directory/$file";
         }
         $path = CFile::plainPath($file);
         // if we were already using a zone file, check whether the file changed
@@ -528,6 +534,7 @@ final class TimeZone
         }
         $stream = @fopen($path, 'r');
         if ($stream === false) {
+            self::useBundledZone($name, $directory);
             return;
         }
         try {
@@ -535,6 +542,37 @@ final class TimeZone
         } finally {
             fclose($stream);
         }
+    }
+
+    /**
+     * A host's open_basedir may forbid PHP to read the zone file $name
+     * (relative to the zone directory $directory, or absolute), which C
+     * reads: then PHP's bundled zone of that name stands in when PHP's
+     * database has it (spelled the same), as PHP's zones stood in for
+     * every zone before glibc's were ported. A file that is missing, or
+     * that PHP's database does not name, stays missing, as for glibc
+     * (open_basedir hides which: the database decides). /etc/localtime
+     * does not even tell its zone's name then (readlink is forbidden too).
+     */
+    private static function useBundledZone(string $name, string $directory): void
+    {
+        if ($name[0] === '/') {
+            if ($name === self::TZDEFAULT) {
+                $name = (string) @readlink($name);
+            }
+            if (!str_starts_with($name, "$directory/")) {
+                return;
+            }
+            $name = substr($name, \strlen($directory) + 1);
+        }
+        error_clear_last();
+        @file_exists("$directory/$name");
+        $forbidden = str_contains(error_get_last()['message'] ?? '', 'open_basedir restriction in effect');
+        if (!$forbidden || !\in_array($name, \DateTimeZone::listIdentifiers(\DateTimeZone::ALL_WITH_BC), true)) {
+            return;
+        }
+        self::$bundledZone = new \DateTimeZone($name);
+        self::$useTzfile = true;
     }
 
     /** the signed big-endian 32-bit number at $offset of $bytes (tzfile.c: decode) */
@@ -763,6 +801,17 @@ final class TimeZone
      */
     private static function tzfileCompute(int $timer, bool $useLocaltime, ?int $utcYear): array
     {
+        if (self::$bundledZone !== null) {
+            if (!$useLocaltime) {
+                return [0, 0, '', 0, 0];
+            }
+            // PHP's zone database, as getTransitions gives the transition in force at $timer
+            $transition = self::$bundledZone->getTransitions($timer, $timer)[0] ?? null;
+            if ($transition === null) {
+                return [0, 0, 'UTC', 0, 0];
+            }
+            return [$transition['offset'], $transition['isdst'] ? 1 : 0, $transition['abbr'], 0, 0];
+        }
         $offset = 0;
         $isdst = 0;
         $zone = '';

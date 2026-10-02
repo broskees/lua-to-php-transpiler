@@ -148,3 +148,51 @@ function test_zone_files_under_tzdir(): void
     copy('/usr/share/zoneinfo/Asia/Tokyo', "$directory/Mine");
     assertSameAsReference(['Mine', 'America/New_York', 'AAA3BBB'], ["TZDIR=$directory"]);
 }
+
+// the local zone around its transitions in years PHP's zone database and the system's agree on
+const RECENT_PROBE = <<<'LUA'
+    for _, year in ipairs{1971, 2000, 2024, 2037} do
+      local start = os.time{year = year, month = 1, day = 1, hour = 12}
+      local before = os.date("%z %Z", start)
+      for t = start + 86400, start + 365 * 86400, 86400 do
+        if os.date("%z %Z", t) ~= before then
+          local low, high = t - 86400, t
+          while high - low > 1 do
+            local middle = (low + high) // 2
+            if os.date("%z %Z", middle) == before then low = middle else high = middle end
+          end
+          print(high - 1, os.date("%Y-%m-%d %H:%M:%S %z %Z", high - 1), os.date("*t", high - 1).isdst)
+          print(high, os.date("%Y-%m-%d %H:%M:%S %z %Z", high), os.date("*t", high).isdst)
+          local wall = os.date("*t", high)
+          for _, isdst in ipairs{"nil", true, false} do
+            local fields = {year = wall.year, month = wall.month, day = wall.day, hour = wall.hour - 1, min = 30}
+            if isdst ~= "nil" then fields.isdst = isdst end
+            print(os.time(fields), fields.hour, fields.isdst)
+          end
+          before = os.date("%z %Z", t)
+        end
+      end
+    end
+    print(os.date("%c %Z", 0), os.time{year = 2000, month = 1, day = 1, hour = 0})
+    LUA;
+
+function test_zone_files_open_basedir_forbids_to_read(): void
+{
+    // PHP's open_basedir (a web host's) forbids reading /usr/share/zoneinfo and
+    // /etc/localtime: a zone PHP's database names stands in for the file
+    $script = scratchDirectory() . '/time_zone_recent.lua';
+    file_put_contents($script, RECENT_PROBE);
+    $openBasedir = ['-d', 'open_basedir=' . realpath(REPO_ROOT) . ':' . scratchDirectory()];
+    $values = ['America/New_York', 'Europe/Berlin', ':Asia/Kolkata', 'Australia/Lord_Howe', 'US/Eastern', '',
+        'america/new_york', 'Europe/Nowhere', 'EST5EDT,M3.2.0,M11.1.0'];
+    foreach ($values as $tz) {
+        $reference = runCommand(['env', "TZ=$tz", 'lua5.4', $script]);
+        assertSame(0, $reference[0], "lua5.4 with TZ=$tz: $reference[2]");
+        $ours = runCommand(['env', "TZ=$tz", 'php', ...$openBasedir, realpath(REPO_ROOT . '/bin/lua'), $script]);
+        assertSame($reference, $ours, "TZ=$tz under open_basedir");
+    }
+    // /etc/localtime cannot even tell its zone's name there: UTC, as glibc without the file (as UTC0)
+    $ours = runCommand(['env', '-u', 'TZ', 'php', ...$openBasedir, realpath(REPO_ROOT . '/bin/lua'), $script]);
+    $reference = runCommand(['env', 'TZ=UTC0', 'lua5.4', $script]);
+    assertSame($reference, $ours, 'TZ unset under open_basedir');
+}

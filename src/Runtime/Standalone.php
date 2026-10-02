@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace LuaPhp\Runtime;
 
 use LuaPhp\Lib\Io\CFile;
+use LuaPhp\Lib\Io\PipeSignal;
 use LuaPhp\Lib\StandardLibraries;
 use LuaPhp\Runtime\Gc\Collector;
 
@@ -44,6 +45,7 @@ final class Standalone
         set_error_handler(PhpErrors::throwAsException(...));
         // what stdout holds when PHP ends (also after a fatal error) is written, as C's exit writes it
         register_shutdown_function(self::flushStdout(...));
+        PipeSignal::useDefaultDisposition();  // a C program run from a shell: SIGPIPE kills it
     }
 
     /**
@@ -129,9 +131,9 @@ final class Standalone
     public static function message(?string $programName, string $message): void
     {
         if ($programName !== null) {
-            fwrite(STDERR, "$programName: ");
+            StandardError::writeBytes("$programName: ");
         }
-        fwrite(STDERR, "$message\n");
+        StandardError::writeBytes("$message\n");
     }
 
     /** lua.c: report: print a non-OK status's message */

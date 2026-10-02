@@ -122,3 +122,12 @@ function test_nesting_limit_matches_luac(): void
         assertSame($reference, $ours, "nesting depth $depth");
     }
 }
+
+function test_file_names_are_plain_paths(): void
+{
+    // "php://memory" or "data:..." name files in directories "php:" and "data:...", as for C's fopen
+    assertSameAsReference(['-p', 'php://memory']);
+    assertSameAsReference(['-p', 'data:text/plain,return 1']);
+    assertSameAsReference(['-p', 'compress.zlib://./sample.lua']);
+    assertSameAsReference(['-o', 'php://memory', 'sample.lua']);
+}
