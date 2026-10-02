@@ -52,12 +52,16 @@ final class Coroutine
     public int $nCcalls = 0;
 
     /**
-     * the value $nCcalls got at the last resume (C: getCcalls(from) + 1).
-     * C restarts the count there; here the PHP frames of a suspended
-     * coroutine survive the yield and undo their own increments when they
-     * return, so a resume shifts $nCcalls by the change of this base, and
-     * counts saved before a yield are kept relative to it (see
-     * Calls::protectedRun). Always 0 for the main thread.
+     * the value $nCcalls got at the last resume (C: getCcalls(from) + 1;
+     * always 0 for the main thread). C counts a coroutine's C calls from
+     * there: a yield unwinds the C calls since the resume (ldo.c:
+     * lua_yieldk longjmps out of them), and the code that continues after
+     * the next resume runs from continuations that count no level. So does
+     * a pcall inside a coroutine that recovers from an error (ldo.c:
+     * precover): the count goes back to the resume's. Here those calls are
+     * PHP frames that survive: when one returns, every call made since has
+     * returned, so it finds the count at this base and leaves it there
+     * (Calls::callk).
      */
     public int $nCcallsBase = 0;
 
@@ -135,11 +139,14 @@ final class Coroutine
     public mixed $errorValue = null;
 
     /**
-     * @var list<array{CallInfo, CallInfo}> [top frame, protected call's
-     * frame] of each chain of frames abandoned by an error whose '__close'
-     * methods a yieldable pcall is running (Calls::closeProtected). C still
-     * has those frames on the stack, between the protected call and the
-     * running '__close' method, so closeThread puts them back there.
+     * @var list<array{CallInfo, CallInfo, CallInfo, int}> each chain of
+     * frames abandoned by an error whose '__close' methods are being
+     * called (Calls::closeProtected): [top frame, protected call's frame,
+     * the frame whose variable is being closed, its live registers (-1:
+     * all)]. C still has those frames on the stack, between the protected
+     * call and the running '__close' method, up to the variable being
+     * closed: the collector marks them from there (lgc.c: traversethread),
+     * and closeThread puts the chain back when a '__close' method yielded.
      */
     public array $pendingCloses = [];
 
@@ -153,36 +160,58 @@ final class Coroutine
     /**
      * Freeing a dropped coroutine must not recurse (see Teardown): its
      * CallInfo chain (kept by a coroutine dead by an error, or suspended
-     * and collected with its fiber) is as deep as its Lua stack was, so it
-     * is unlinked one frame at a time; the values it keeps outside its
-     * stack go to Teardown.
+     * and collected with its fiber) is as deep as its Lua stack was, and
+     * its frames may hold more coroutines (a chain of coroutines, each
+     * dead with the previous one in a register). So every frame goes to
+     * Teardown on its own, unlinked, with the values the coroutine keeps
+     * outside its stack; nothing is freed at this depth.
      */
     public function __destruct()
     {
-        if ($this->ci !== $this->baseCi) {
-            Calls::unlinkAbandonedFrames($this->ci, $this->baseCi);
-        }
-        foreach ($this->pendingCloses as [$abandonedTop, $protectedCi]) {
-            Calls::unlinkAbandonedFrames($abandonedTop, $protectedCi);
-        }
         if (
-            $this->body === null && $this->errorValue === null && $this->errfunc === null
+            $this->ci === $this->baseCi && $this->pendingCloses === []
+            && $this->body === null && $this->errorValue === null && $this->errfunc === null
             && $this->tailCallFunction === null && $this->tailCallArguments === []
         ) {
-            return;
+            return;  // finished, or closed: nothing leads further
         }
-        if (Teardown::$releasing) {
-            Teardown::$pending[] = $this->body;
-            Teardown::$pending[] = $this->errorValue;
-            Teardown::$pending[] = $this->errfunc;
-            Teardown::$pending[] = $this->tailCallFunction;
-            Teardown::$pending[] = $this->tailCallArguments;
-            return;
-        }
+        $releaseRunning = Teardown::$releasing;
         Teardown::$releasing = true;
+        self::handOverFrames($this->ci, $this->baseCi);
+        foreach ($this->pendingCloses as [$abandonedTop, $protectedCi]) {
+            self::handOverFrames($abandonedTop, $protectedCi);
+        }
+        unset($abandonedTop, $protectedCi);  // (they would keep a frame until after release())
+        Teardown::$pending[] = $this->body;
+        Teardown::$pending[] = $this->errorValue;
+        Teardown::$pending[] = $this->errfunc;
+        Teardown::$pending[] = $this->tailCallFunction;
+        Teardown::$pending[] = $this->tailCallArguments;
+        if ($releaseRunning) {
+            return;  // release() further up the C stack frees them
+        }
+        $this->ci = $this->baseCi;
+        $this->pendingCloses = [];
         $this->body = $this->errorValue = $this->errfunc = $this->tailCallFunction = null;
         $this->tailCallArguments = [];
         Teardown::release();
+    }
+
+    /**
+     * Teardown's protocol for a dropped coroutine's frames from $top down
+     * to (not including) $bottom: each goes to Teardown::$pending with its
+     * link to the frame below broken, so that release() frees one frame
+     * (its registers, varargs and function) at a time.
+     */
+    private static function handOverFrames(?CallInfo $top, CallInfo $bottom): void
+    {
+        $ci = $top;
+        while ($ci !== null && $ci !== $bottom) {
+            Teardown::$pending[] = $ci;
+            $previous = $ci->previous;
+            $ci->previous = null;
+            $ci = $previous;
+        }
     }
 
     /** lstate.c: lua_newstate: a new global state and its main thread */
@@ -246,9 +275,7 @@ final class Coroutine
         if ($base >= Lua::LUAI_MAXCCALLS) {
             return [Lua::LUA_ERRRUN, 'C stack overflow'];
         }
-        $base++;
-        $this->nCcalls += $base - $this->nCcallsBase;
-        $this->nCcallsBase = $base;
+        $this->nCcalls = $this->nCcallsBase = $base + 1;
         $this->status = Lua::LUA_OK;  // mark that it is running (again)
         try {
             if ($this->fiber === null) {  // starting a coroutine?
