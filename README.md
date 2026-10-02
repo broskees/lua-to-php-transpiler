@@ -16,7 +16,7 @@ php hello.php
 - PHP 8.4 or newer, from the command line. Developed on PHP 8.5; the official
   test suite also passes on 8.4. PHP 8.3 and older don't work.
 - PHP's ctype extension (on in almost every PHP build). Optional: opcache
-  (its tracing JIT runs the generated code 1.3 to 2 times faster), posix
+  (its tracing JIT runs the generated code 1.1 to 1.9 times faster), posix
   (the host C library's error texts) and pcntl (exit statuses of `io.popen`
   and `os.execute` without polling).
 - For running the tests: `lua5.4` and `luac5.4` (5.4.9). The tests compare
@@ -240,15 +240,25 @@ Architecture notes and conventions for contributors are in
 
 ## Performance
 
-Measured on the workloads in `bench/`, running the saved PHP with opcache,
-against `lua5.4`:
+Measured with `php bench/run.php` against `lua5.4` on PHP 8.5
+([bench/results/saved-php-38f79d7.md](bench/results/saved-php-38f79d7.md);
+[bench/README.md](bench/README.md) says how each number is taken):
 
-- Speed: roughly 5 to 25 times slower than `lua5.4`. String and table code is
-  at the fast end, code dominated by function calls at the slow end. PHP's
-  tracing JIT (`opcache.jit=tracing`) makes it 1.3 to 2 times faster.
-- Transpiling: about 30 ms per 1,000 lines of Lua, plus PHP's startup.
-- Memory: arrays and strings take about what Lua takes; tables and closures
-  1.5 to 2.5 times as much; a suspended coroutine about 10 KB.
+- Speed: the PHP that `bin/lua2php` saved, run with a warm opcache, is 4.8
+  to 25.9 times slower than `lua5.4`, process startup included. Table
+  constructors and string code are at the fast end (4.8 to 9.4 times),
+  function and method calls, iterators and coroutines at the slow end
+  (17.8 to 25.9 times). PHP's tracing JIT (`opcache.jit=tracing`) makes it
+  1.1 to 1.9 times faster (coroutines gain least): 2.6 to 20.5 times slower
+  than `lua5.4`.
+- Transpiling: `bin/lua2php` takes about 28 ms per 1,000 lines of Lua, and
+  about 15 ms for a small script. It runs once, before the program is
+  deployed, and is not part of the times above.
+- `bin/lua`, which transpiles while it runs, takes 33 times as long as
+  `lua5.4` for the official test suite.
+- Memory (under `bin/lua`, peak RSS minus PHP's startup): an array of
+  integers and strings take about what Lua takes; closures 1.5 times as
+  much, tables 1.9 to 4 times; a suspended coroutine about 10 KB.
 
 ## Compatibility and limits
 

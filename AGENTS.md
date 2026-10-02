@@ -829,8 +829,9 @@ interpreter `lua5.4` (5.4.9) and compiler `luac5.4`, both installed.
     tests/bytecode.sh [file...]  diff `bin/luac -l -l -p` vs `luac5.4 -l -l -p` for official test files
     tests/official.sh [name...]  run official test files one at a time through bin/lua with
                                  -e"_U=true _soft=true _port=true _nomsg=true"; PASS/FAIL per file
-    php bench/run.php <label>    memory/speed/virtual-memory benchmarks vs lua5.4 (not a test;
-                                 results in bench/results/<label>.md, see bench/README.md)
+    php bench/run.php <label>    benchmarks vs lua5.4 (not a test; results in bench/results/<label>.md,
+                                 see bench/README.md): speed of saved lua2php output with a warm
+                                 opcache (transpile time apart), memory and virtual memory under bin/lua
 
 - Differential cases live in `tests/diff/*.lua`: each runs under `lua5.4` and
   under `bin/lua` from `tests/diff`; exit status, stdout and stderr must match
