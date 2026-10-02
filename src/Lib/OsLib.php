@@ -19,7 +19,7 @@ use LuaPhp\Runtime\Vm;
 
 /**
  * Port of loslib.c: the os library. Dates and times go through CTime
- * (C's time.h as glibc behaves in the "C" locale).
+ * (C's time.h as glibc implements it).
  *
  * @internal
  */
@@ -28,6 +28,9 @@ final class OsLib
     // loslib.c: LUA_STRFTIMEOPTIONS (C99 specification)
     private const LUA_STRFTIMEOPTIONS = 'aAbBcCdDeFgGhHIjmMnprRStTuUVwWxXyYzZ%'
         . '||' . 'EcECExEXEyEY' . 'OdOeOHOIOmOMOSOuOUOVOwOWOy';
+
+    // loslib.c: SIZETIMEFMT (the buffer for the result of one conversion)
+    private const SIZETIMEFMT = 250;
 
     // loslib.c: LUA_TMPNAMTEMPLATE "/tmp/lua_XXXXXX" without the "XXXXXX"
     private const TMPNAM_TEMPLATE_PREFIX = '/tmp/lua_';
@@ -197,6 +200,21 @@ final class OsLib
     /** loslib.c: setallfields: set all fields from broken-down time $tm in $table */
     private static function setAllFields(Coroutine $L, LuaTable $table, array $tm): void
     {
+        if ($table->metatable === null) {
+            // fast path: lua_setfield of a table without a metatable is a raw set
+            $table->hash['year'] = $tm['year'] + 1900;
+            $table->hash['month'] = $tm['mon'] + 1;
+            $table->hash['day'] = $tm['mday'];
+            $table->hash['hour'] = $tm['hour'];
+            $table->hash['min'] = $tm['min'];
+            $table->hash['sec'] = $tm['sec'];
+            $table->hash['yday'] = $tm['yday'] + 1;
+            $table->hash['wday'] = $tm['wday'] + 1;
+            if ($tm['isdst'] >= 0) {
+                $table->hash['isdst'] = $tm['isdst'] > 0;
+            }
+            return;
+        }
         Vm::setTable($L, $table, 'year', $tm['year'] + 1900);
         Vm::setTable($L, $table, 'month', $tm['mon'] + 1);
         Vm::setTable($L, $table, 'day', $tm['mday']);
@@ -213,7 +231,8 @@ final class OsLib
     // loslib.c: getboolfield
     private static function getBoolField(Coroutine $L, LuaTable $table, string $key): int
     {
-        $value = Vm::getTable($L, $table, $key);
+        // (lua_getfield: a table without a metatable directly)
+        $value = $table->metatable === null ? ($table->hash[$key] ?? null) : Vm::getTable($L, $table, $key);
         if ($value === null) {
             return -1;
         }
@@ -223,8 +242,9 @@ final class OsLib
     // loslib.c: getfield
     private static function getField(Coroutine $L, LuaTable $table, string $key, int $default, int $delta): int
     {
-        $value = Vm::getTable($L, $table, $key);  // get field and its type
-        $result = Vm::toInteger($value);
+        // get field and its type (lua_getfield: a table without a metatable directly)
+        $value = $table->metatable === null ? ($table->hash[$key] ?? null) : Vm::getTable($L, $table, $key);
+        $result = \is_int($value) ? $value : Vm::toInteger($value);
         if ($result === null) {  // field is not an integer?
             if ($value !== null) {  // some other value?
                 Auxiliary::error($L, "field '$key' is not an integer");
@@ -287,6 +307,7 @@ final class OsLib
             return [$table];
         }
         $result = '';
+        $locale = CTime::timeLocale();  // (LC_TIME's names and formats)
         $capacity = MemoryLimit::CHECK_ABOVE;  // $result may grow to this length before the next check
         $length = \strlen($format);
         while ($position < $length) {
@@ -302,7 +323,7 @@ final class OsLib
             }
             $result .= substr($format, $position, $percentPosition - $position);
             $conversion = self::checkOption($L, $format, $percentPosition + 1);
-            $result .= CTime::strftime('%' . $conversion, $tm);
+            $result .= CTime::strftime('%' . $conversion, $tm, self::SIZETIMEFMT, $locale);
             $position = $percentPosition + 1 + \strlen($conversion);
         }
         return [$result];
@@ -387,7 +408,7 @@ final class OsLib
             Collector::closeState($L);
         }
         // exit: flush all streams, then end the process
-        CFile::flushAll($L->globalState);
+        CFile::flushAll();
         exit($status & 0xFF);
     }
 }

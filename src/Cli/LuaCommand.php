@@ -17,6 +17,7 @@ use LuaPhp\Runtime\LuaError;
 use LuaPhp\Runtime\LuaObject;
 use LuaPhp\Runtime\NativeFunction;
 use LuaPhp\Runtime\Standalone;
+use LuaPhp\Runtime\StandardError;
 
 /**
  * bin/lua: port of lua.c (Lua 5.4.9), the stand-alone interpreter: options
@@ -70,13 +71,13 @@ final class LuaCommand
     private static function printUsage(string $programName, string $badOption): void
     {
         Standalone::flushStdout();
-        fwrite(STDERR, "$programName: ");
+        StandardError::writeBytes("$programName: ");
         if (($badOption[1] ?? '') === 'e' || ($badOption[1] ?? '') === 'l') {
-            fwrite(STDERR, "'$badOption' needs argument\n");
+            StandardError::writeBytes("'$badOption' needs argument\n");
         } else {
-            fwrite(STDERR, "unrecognized option '$badOption'\n");
+            StandardError::writeBytes("unrecognized option '$badOption'\n");
         }
-        fwrite(STDERR, "usage: $programName [options] [script [args]]\n"
+        StandardError::writeBytes("usage: $programName [options] [script [args]]\n"
             . "Available options are:\n"
             . "  -e stat   execute string 'stat'\n"
             . "  -i        enter interactive mode after executing 'script'\n"
@@ -283,18 +284,26 @@ final class LuaCommand
                 Standalone::report(null, $status, $value);  // no 'progname' on errors in interactive mode
             }
         }
-        echo "\n";
+        Standalone::writeStdout("\n");  // lua_writeline
+        Standalone::flushStdout();
     }
 
     private static function readInputLine(string $prompt): ?string
     {
-        echo $prompt;
+        Standalone::writeStdout($prompt);  // lua.c: lua_readline: fputs(prompt, stdout), fflush(stdout)
         Standalone::flushStdout();
         $line = fgets(STDIN);
         if ($line === false) {
             return null;
         }
         return rtrim($line, "\n");
+    }
+
+    // lua.c: print_version (lua_writestring and lua_writeline: C's stdout)
+    private static function printVersion(): void
+    {
+        Standalone::writeStdout(Lua::LUA_COPYRIGHT . "\n");
+        Standalone::flushStdout();
     }
 
     // lua.c: pmain (runs as a C function in protected mode, as in lua.c)
@@ -307,7 +316,7 @@ final class LuaCommand
             return false;
         }
         if ($args & self::HAS_V) {  // option '-v'?
-            echo Lua::LUA_COPYRIGHT, "\n";
+            self::printVersion();
         }
         if ($args & self::HAS_CAPITAL_E) {  // option '-E'?
             $L->globalState->registry->hash['LUA_NOENV'] = true;  // signal for libraries to ignore env. vars.
@@ -333,7 +342,7 @@ final class LuaCommand
             self::doRepl($L);  // do read-eval-print loop
         } elseif ($script < 1 && !($args & (self::HAS_E | self::HAS_V))) {  // no active option?
             if (stream_isatty(STDIN)) {  // running in interactive mode?
-                echo Lua::LUA_COPYRIGHT, "\n";
+                self::printVersion();
                 self::doRepl($L);  // do read-eval-print loop
             } else {
                 // executes stdin as a file

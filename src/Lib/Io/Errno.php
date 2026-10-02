@@ -26,6 +26,7 @@ final class Errno
     public const EISDIR = 21;
     public const EINVAL = 22;
     public const ESPIPE = 29;
+    public const EPIPE = 32;
     public const ENAMETOOLONG = 36;
     public const ENOSYS = 38;
     public const ELOOP = 40;

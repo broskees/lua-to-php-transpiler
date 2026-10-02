@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace LuaPhp\Runtime;
 
+use LuaPhp\Lib\Io\CFile;
+use LuaPhp\Lib\Io\PipeSignal;
 use LuaPhp\Lib\StandardLibraries;
 use LuaPhp\Runtime\Gc\Collector;
 
@@ -18,11 +20,14 @@ final class Standalone
 {
     /**
      * PHP settings for running Lua: no PHP warning may leak into Lua's
-     * output (they become exceptions, i.e. crashes that show the bug),
-     * exception traces should not keep Lua values alive, and stdout is
-     * buffered like C's stdio. memory_limit stays as PHP was started
-     * (see raiseMemoryLimit for bin/lua): library functions raise Lua's
-     * "not enough memory" below it (MemoryLimit).
+     * output (they become exceptions, i.e. crashes that show the bug) and
+     * exception traces should not keep Lua values alive. Standard output
+     * needs no PHP output buffer: Lua writes it through C's stdout
+     * (Lib\Io\CFile::standardOutput, see StandardOutput), whose write
+     * errors Lua sees, where PHP's own output would end the process.
+     * memory_limit stays as PHP was started (see raiseMemoryLimit for
+     * bin/lua): library functions raise Lua's "not enough memory" below
+     * it (MemoryLimit).
      *
      * Hosts may disable ini_set (disable_functions); the host's values
      * then stay, which Lua cannot observe: traces with arguments only
@@ -38,7 +43,9 @@ final class Standalone
             ini_set('serialize_precision', '-1');
         }
         set_error_handler(PhpErrors::throwAsException(...));
-        ob_start(null, 8192);
+        // what stdout holds when PHP ends (also after a fatal error) is written, as C's exit writes it
+        register_shutdown_function(self::flushStdout(...));
+        PipeSignal::useDefaultDisposition();  // a C program run from a shell: SIGPIPE kills it
     }
 
     /**
@@ -120,14 +127,13 @@ final class Standalone
         return Calls::protectedCall($L, $function, $arguments, self::messageHandler());
     }
 
-    /** lua.c: l_message */
+    /** lua.c: l_message (to stderr, unbuffered; what stdout holds stays there) */
     public static function message(?string $programName, string $message): void
     {
-        self::flushStdout();
         if ($programName !== null) {
-            fwrite(STDERR, "$programName: ");
+            StandardError::writeBytes("$programName: ");
         }
-        fwrite(STDERR, "$message\n");
+        StandardError::writeBytes("$message\n");
     }
 
     /** lua.c: report: print a non-OK status's message */
@@ -289,11 +295,15 @@ final class Standalone
         ini_set('opcache.jit', 'tracing');
     }
 
+    /** lauxlib.h: lua_writestring: $bytes to C's stdout (a write error is ignored, as C's callers do) */
+    public static function writeStdout(string $bytes): void
+    {
+        CFile::standardOutput()->write($bytes);
+    }
+
+    /** fflush(stdout), as lua.c and C's exit do (a write error is ignored) */
     public static function flushStdout(): void
     {
-        while (ob_get_level() > 0) {
-            ob_end_flush();
-        }
-        ob_start(null, 8192);
+        CFile::standardOutput()->flush();
     }
 }

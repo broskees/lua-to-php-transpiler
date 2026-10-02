@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace LuaPhp\Lib;
 
+use LuaPhp\Lib\Io\CFile;
 use LuaPhp\Runtime\Auxiliary;
 use LuaPhp\Runtime\CallInfo;
 use LuaPhp\Runtime\Calls;
@@ -324,10 +325,9 @@ final class DebugLib
     private static function debug(Coroutine $L, array $args): array
     {
         while (true) {
-            $L->globalState->flushOutput();
-            $L->globalState->writeErrorOutput('lua_debug> ');  // lua_writestringerror
-            $line = @fgets(STDIN, 250);  // C: fgets(buffer, 250, stdin)
-            if ($line === false || $line === "cont\n") {
+            $L->globalState->writeErrorOutput('lua_debug> ');  // lua_writestringerror (stdout is not flushed)
+            $line = CFile::standardInput()->getLine(250);  // C: fgets(buffer, 250, stdin)
+            if ($line === null || $line === "cont\n") {
                 return [];
             }
             try {
@@ -341,7 +341,6 @@ final class DebugLib
             }
             if ($status !== Lua::LUA_OK) {
                 $message = DebugInfo::cString(Auxiliary::toLString($L, $value));
-                $L->globalState->flushOutput();
                 $L->globalState->writeErrorOutput("$message\n");
             }
         }

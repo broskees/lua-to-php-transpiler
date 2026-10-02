@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace LuaPhp\Lib;
 
+use LuaPhp\Lib\Io\CFile;
 use LuaPhp\Runtime\Auxiliary;
 use LuaPhp\Runtime\Calls;
 use LuaPhp\Runtime\ChunkLoader;
@@ -18,7 +19,6 @@ use LuaPhp\Runtime\LuaTable;
 use LuaPhp\Runtime\MemoryLimit;
 use LuaPhp\Runtime\MetaMethods;
 use LuaPhp\Runtime\NativeFunction;
-use LuaPhp\Runtime\Standalone;
 use LuaPhp\Runtime\StandardOutput;
 use LuaPhp\Runtime\StringToNumber;
 use LuaPhp\Runtime\Vm;
@@ -85,24 +85,27 @@ final class BaseLib
     private static function print(Coroutine $L, array $args): array
     {
         $G = $L->globalState;
-        // the command line (StandardOutput, no budget): echo as its write() does, without a call per piece
-        $echo = $G->budget === null && $G->output instanceof StandardOutput;
         $count = \count($args);
-        for ($i = 0; $i < $count; $i++) {
-            $text = Auxiliary::toLString($L, $args[$i]);  // convert it to string
-            $piece = $i > 0 ? "\t" . $text : $text;
-            if ($echo) {
-                echo $piece;
-            } else {
-                $G->writeOutput($piece);
+        if ($G->budget === null && $G->output instanceof StandardOutput) {
+            // the command line: C's stdout itself, as writeOutput and StandardOutput write and flush it
+            $stdout = CFile::standardOutput();
+            for ($i = 0; $i < $count; $i++) {
+                $text = Auxiliary::toLString($L, $args[$i]);  // (a __tostring may print: write as we go)
+                $piece = $i > 0 ? "\t" . $text : $text;
+                if (\strlen($piece) > MemoryLimit::CHECK_ABOVE) {
+                    MemoryLimit::reserve(\strlen($piece), null);
+                }
+                $stdout->write($piece);
             }
-        }
-        if ($echo) {
-            echo "\n";
-            Standalone::flushStdout();  // lauxlib.h: lua_writeline flushes stdout
+            $stdout->write("\n");
+            $stdout->flush();
             return [];
         }
-        $G->writeOutput("\n");
+        for ($i = 0; $i < $count; $i++) {
+            $text = Auxiliary::toLString($L, $args[$i]);  // convert it to string
+            $G->writeOutput($i > 0 ? "\t" . $text : $text);  // lua_writestring (a tab before all but the first)
+        }
+        $G->writeOutput("\n");  // lauxlib.h: lua_writeline writes a newline and flushes stdout
         $G->flushOutput();
         return [];
     }
