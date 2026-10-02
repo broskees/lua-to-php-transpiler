@@ -206,6 +206,18 @@ Lua string keys and integer keys distinct.
   commands of debug.debug() and a string LUA_INIT go through `load()` and
   its cache; `LUA_INIT=@file` loads the precompiled file.
   `bin/lua` still compiles files on the fly.
+  load(reader) is `ChunkLoader::loadFromReader` (lua_load with a ZIO):
+  the first piece decides binary or text (ldo.c f_parser), then the Lexer
+  or Undump asks for the next piece (`$readMore`) only when it needs the
+  next byte (lzio.c luaZ_fill), so the reader is called exactly as often
+  and in the same order as in C: a syntax error stops it, a binary chunk
+  is read to its last byte and no further, '' or nil ends it for good,
+  and a reader called while the parser is nested runs at the parser's
+  C-call depth (enterlevel counts in L->nCcalls). The Lexer holds only the
+  piece in hand (`fill()` runs only at the end of a piece or a memory
+  check: the per-byte path is one comparison). Its key known only then,
+  a reader's chunk is looked up in the cache after it compiled (a hit
+  skips emitting), a string's before.
   The load cache (`LoadCache`): key = chunk name + exact bytes. A hit undumps
   fresh Protos sharing equal strings like the lexer (not the source name;
   two loads look like two compiles to '%p') and is used only where
@@ -404,7 +416,8 @@ Lua string keys and integer keys distinct.
   Covered: string.rep/sub/upper/lower/reverse/format/gsub/pack, pattern
   captures, `..` (emitted code joins strings inline only up to 64 KB in
   all, else `Vm::concat`), table.concat, io reads ('a', lines, counts),
-  os.date, package.searchpath, load's reader, string.unpack's strings,
+  os.date, package.searchpath, load's reader (the chunk it gave, kept for
+  the cache's key), string.unpack's strings,
   output (print, io.write, warn: sinks copy it), messages that copy a
   string (a position prefix: luaL_error, luaG_runerror, error,
   coroutine.wrap; a `__name` in a type name or tostring; a module's name
@@ -415,6 +428,13 @@ Lua string keys and integer keys distinct.
   each, measured with the copy the next call makes). Compiling
   (`ChunkLoader::load`) checks as it goes: the Lexer every 16 KB of
   source (`Lexer::COMPILE_BYTES_PER_SOURCE_BYTE`, 64: measured 14 to 62),
+  also inside a token, plus the token's length (PHP moves a growing
+  string and copies the token once read: a single 24 MB token under 64M
+  is "not enough memory", as C's growing token buffer, llex.c save); with
+  a reader, the first piece's window covers that piece and every later
+  one a whole 16 KB. Undump reserves each long string before reading it,
+  as C allocates it first (one of 2^63 bytes or more is "not enough
+  memory" at once: sizes are unsigned in C, negative in PHP);
   `Emitter::emitChunk` before each function (`EMIT_BYTES_*`: its PHP
   about 4 times over, plus the code emitted so far, which appending may
   copy), and before PHP compiles emitted code
@@ -640,8 +660,9 @@ counting existed, and a state without a budget charges nothing.
   none) and starts a run; `Budget::start()` starts the next one. Limits:
   steps, memoryBytes, seconds, outputBytes, coroutines (alive at once),
   callDepth, sourceBytes (a chunk `ChunkLoader::load` may compile: a
-  bigger one is LimitReached('source') before anything else; compiling's
-  memory is checked as it goes, see Limits). Reaching one throws `LimitReached` (`->limit`), an
+  bigger one is LimitReached('source') before anything else, a reader's as
+  soon as what it gave passes it; compiling's memory is checked as it
+  goes, see Limits). Reaching one throws `LimitReached` (`->limit`), an
   `\Exception` that is neither LuaError nor `\Error`: no pcall, message
   handler, resume, `__close` or `__gc` sees it, so no Lua code runs after
   it and the state is unusable (abandon it). The step counter is the
@@ -678,7 +699,8 @@ counting existed, and a state without a budget charges nothing.
   (MatchState: bytes scanned per search, the port's match() calls in
   batches of 256), table concat, insert/remove shifts, move, unpack, sort
   (per partition), utf8 char/codepoint/len/offset/codes, load (a step per
-  byte compiled). Loops over ranges an argument sets charge as they go;
+  byte compiled; a reader's chunk as it is read, also when it then hits
+  the cache). Loops over ranges an argument sets charge as they go;
   others charge what they are about to do, after `MemoryLimit::reserve`
   (so a huge result is 'memory', not 'steps'). A fast path charges what
   its port charges. Every charge is `$L->globalState->budget?->...`: with

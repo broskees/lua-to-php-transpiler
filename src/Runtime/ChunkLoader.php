@@ -21,7 +21,9 @@ use LuaPhp\Lib\Io\Errno;
  * load(): source text goes through Compiler::compile, binary chunks
  * through Undump::undump; the Proto is emitted as PHP and eval'd. A chunk
  * loaded before comes from LoadCache instead (by its bytes and chunk
- * name, in memory or on disk), or from the state's own ChunkCache. PHP never frees eval'd code's runtime
+ * name, in memory or on disk), or from the state's own ChunkCache: a
+ * string is looked up before it is compiled, a chunk a reader gives once
+ * it is compiled (loadFromReader). PHP never frees eval'd code's runtime
  * caches, so factories are also cached by their PHP source: loading the
  * same code again reuses the compiled code.
  *
@@ -68,9 +70,10 @@ final class ChunkLoader
     public const PHP_COMPILE_BYTES_PER_BYTE = 20;
 
     /**
-     * lapi.c: lua_load. Returns the main function of $chunk with its first
-     * upvalue (_ENV) set to the global table, or throws
-     * LuaError(LUA_ERRSYNTAX) with Lua's message.
+     * lapi.c: lua_load of the string $chunk (lauxlib.c: luaL_loadbufferx).
+     * Returns the main function of $chunk with its first upvalue (_ENV) set
+     * to the global table, or throws LuaError(LUA_ERRSYNTAX) with Lua's
+     * message.
      */
     public static function load(Coroutine $L, string $chunk, string $chunkname, ?string $mode): LuaClosure
     {
@@ -78,53 +81,110 @@ final class ChunkLoader
         // current message handler for errors the parser raises as runtime
         // errors ("C stack overflow" and the like; PHP compiling the emitted
         // code can exhaust the C stack too, see Calls::cStackOverflowError)
-        $compile = static function () use ($L, $chunk, $chunkname, $mode): LuaClosure {
+        $parse = static function () use ($L, $chunk, $chunkname, $mode): LuaClosure {
             $isBinary = $chunk !== '' && $chunk[0] === Undump::LUA_SIGNATURE[0];
             self::checkMode($mode, $isBinary ? 'binary' : 'text');
             $budget = $L->globalState->budget;
             if ($budget?->sourceBytes !== null && \strlen($chunk) > $budget->sourceBytes) {
                 throw new LimitReached('source');
             }
-            $countSteps = $L->globalState->countSteps;
-            $key = LoadCache::key($chunk, $chunkname, $countSteps);
-            $cache = $L->globalState->chunkCache;  // (an embedded state's own, else LoadCache)
-            $cached = $cache === null
-                ? LoadCache::find($key, $L->nCcalls, $budget)
-                : $cache->find($key, $L->nCcalls, $budget);
+            $key = LoadCache::key($chunk, $chunkname, $L->globalState->countSteps);
+            $cached = self::findCached($L, $key);
             if ($cached !== null) {
                 [$protos, $factory] = $cached;
                 // fresh Protos, as a compile (one string per contents) or an undump makes
                 return self::instantiate(Undump::undump($protos ?? $chunk, $chunkname, !$isBinary), $factory);
             }
             $budget?->chargeSteps(\strlen($chunk));  // (compiling costs more than a step per byte)
-            // memory the compile would take beyond what is left is C's "not enough memory" (or the budget's limit)
-            $reserveMemory = static function (int $bytes) use ($budget): void {
-                MemoryLimit::reserve($bytes, $budget);
-            };
             $nesting = 0;
-            try {
-                $proto = $isBinary
-                    ? Undump::undump($chunk, $chunkname)
-                    : Compiler::compile($chunk, $chunkname, $L->nCcalls, $nesting, $reserveMemory);
-            } catch (CompileError $error) {
-                $status = match ($error->getCode()) {
-                    Lua::LUA_ERRRUN => Lua::LUA_ERRRUN,
-                    Lua::LUA_ERRERR => Lua::LUA_ERRERR,
-                    default => Lua::LUA_ERRSYNTAX,
-                };
-                throw new LuaError($error->getMessage(), $status);
-            }
-            $factorySource = Emitter::emitChunk($proto, $countSteps, $reserveMemory);
-            $factory = self::factoryForSource($factorySource, $budget);
-            $protos = $isBinary ? null : Dump::dump($proto, false);
-            if ($cache === null) {
-                LoadCache::store($key, $protos, $nesting, $factory, $factorySource);
-            } else {
-                $cache->store($key, $protos, $nesting, $factory, $factorySource);
-            }
-            return self::instantiate($proto, $factory);
+            $proto = self::compile($L, $chunk, $chunkname, $isBinary, $nesting, null);
+            return self::emitAndStore($L, $key, $proto, $isBinary, $nesting);
         };
-        [$status, $result] = Calls::protectedRun($L, $compile, $L->errfunc);
+        return self::protectedParse($L, $parse);
+    }
+
+    /**
+     * lapi.c: lua_load with a reader (lbaselib.c: load(func)). $reader
+     * returns the next piece of the chunk, null or '' at its end (a
+     * lua_Reader). As in C, a ZIO (lzio.c) reads the chunk: the first piece
+     * decides whether it is binary (ldo.c: f_parser), then the lexer, or
+     * undump, calls $reader only when it needs the next byte, and never
+     * after an error or the end. So a syntax error stops the reading, and a
+     * binary chunk is read up to its last byte. A reader called while the
+     * parser is nested runs at the parser's C-call depth (lparser.c:
+     * enterlevel counts in L->nCcalls). The bytes read are known only once
+     * the chunk compiled: then the load cache is asked for its code by
+     * them, and given it on a miss.
+     *
+     * As load() of a string: the chunk read so far is at most the budget's
+     * sourceBytes (LimitReached('source')), each piece charges a step per
+     * byte, and the chunk kept for the cache's key must fit in memory
+     * (MemoryLimit::grow), as the compile must (see compile).
+     *
+     * @param \Closure(): ?string $reader
+     */
+    public static function loadFromReader(Coroutine $L, \Closure $reader, string $chunkname, ?string $mode): LuaClosure
+    {
+        $parse = static function () use ($L, $reader, $chunkname, $mode): LuaClosure {
+            $budget = $L->globalState->budget;
+            $chunk = '';  // every byte read (the cache's key)
+            $capacity = MemoryLimit::CHECK_ABOVE;  // $chunk may grow to this length before the next check
+            $ended = false;
+            // lzio.c: luaZ_fill's call of the reader: the next piece, '' at the end (and from then on)
+            $readMore = static function (?int $parserNCcalls = null) use (
+                $L,
+                $reader,
+                $budget,
+                &$chunk,
+                &$capacity,
+                &$ended,
+            ): string {
+                if ($ended) {
+                    return '';
+                }
+                $nCcalls = $L->nCcalls;
+                $L->nCcalls = $parserNCcalls ?? $nCcalls;
+                $piece = $reader() ?? '';
+                $L->nCcalls = $nCcalls;  // (an error restores it: Calls::protectedRun)
+                if ($piece === '') {
+                    $ended = true;
+                    return '';
+                }
+                $length = \strlen($chunk) + \strlen($piece);
+                if ($budget?->sourceBytes !== null && $length > $budget->sourceBytes) {
+                    throw new LimitReached('source');
+                }
+                $budget?->chargeSteps(\strlen($piece));  // (compiling costs more than a step per byte)
+                if ($length > $capacity) {
+                    $capacity = MemoryLimit::grow($length, $budget);
+                }
+                $chunk .= $piece;
+                return $piece;
+            };
+            $firstPiece = $readMore();  // ldo.c: f_parser: read first character
+            $isBinary = $firstPiece !== '' && $firstPiece[0] === Undump::LUA_SIGNATURE[0];
+            self::checkMode($mode, $isBinary ? 'binary' : 'text');
+            $nesting = 0;
+            $proto = self::compile($L, $firstPiece, $chunkname, $isBinary, $nesting, $readMore);
+            $key = LoadCache::key($chunk, $chunkname, $L->globalState->countSteps);
+            $cached = self::findCached($L, $key);
+            if ($cached !== null) {
+                return self::instantiate($proto, $cached[1]);
+            }
+            return self::emitAndStore($L, $key, $proto, $isBinary, $nesting);
+        };
+        return self::protectedParse($L, $parse);
+    }
+
+    /**
+     * ldo.c: luaD_protectedparser: runs $parse (which returns the main
+     * function) in protected mode with the current message handler, and
+     * lapi.c: lua_load: sets the function's first upvalue to the global
+     * table. Errors are thrown as LuaError with their status.
+     */
+    private static function protectedParse(Coroutine $L, \Closure $parse): LuaClosure
+    {
+        [$status, $result] = Calls::protectedRun($L, $parse, $L->errfunc);
         if ($status !== Lua::LUA_OK) {
             throw new LuaError($result, $status);
         }
@@ -133,6 +193,78 @@ final class ChunkLoader
             $closure->getUpval(0)->v = $L->globalState->globals;  // set it to the global table
         }
         return $closure;
+    }
+
+    /**
+     * The Protos of a chunk, compiled from text or undumped: $chunk is all
+     * of it, or with $readMore its first piece (see loadFromReader). The
+     * memory the compile would take beyond what is left is C's "not enough
+     * memory" (or the budget's limit). Errors are LuaErrors with Lua's
+     * message and status; $nesting is set as Compiler::compile sets it.
+     */
+    private static function compile(
+        Coroutine $L,
+        string $chunk,
+        string $chunkname,
+        bool $isBinary,
+        int &$nesting,
+        ?\Closure $readMore,
+    ): Proto {
+        $budget = $L->globalState->budget;
+        $reserveMemory = static function (int $bytes) use ($budget): void {
+            MemoryLimit::reserve($bytes, $budget);
+        };
+        try {
+            return $isBinary
+                ? Undump::undump($chunk, $chunkname, false, $reserveMemory, $readMore)
+                : Compiler::compile($chunk, $chunkname, $L->nCcalls, $nesting, $reserveMemory, $readMore);
+        } catch (CompileError $error) {
+            $status = match ($error->getCode()) {
+                Lua::LUA_ERRRUN, Lua::LUA_ERRMEM, Lua::LUA_ERRERR => $error->getCode(),
+                default => Lua::LUA_ERRSYNTAX,
+            };
+            throw new LuaError($error->getMessage(), $status);
+        }
+    }
+
+    /**
+     * The cached Protos (a binary chunk, or null) and factory of the chunk
+     * with $key, or null: the state's own cache (an embedded state's), else
+     * LoadCache
+     *
+     * @return ?array{?string, \Closure}
+     */
+    private static function findCached(Coroutine $L, string $key): ?array
+    {
+        $cache = $L->globalState->chunkCache;
+        return $cache === null
+            ? LoadCache::find($key, $L->nCcalls, $L->globalState->budget)
+            : $cache->find($key, $L->nCcalls, $L->globalState->budget);
+    }
+
+    /** a load cache miss: emits the code of $proto, caches it with $key, and returns the main function */
+    private static function emitAndStore(
+        Coroutine $L,
+        string $key,
+        Proto $proto,
+        bool $isBinary,
+        int $nesting,
+    ): LuaClosure {
+        $budget = $L->globalState->budget;
+        // memory emitting would take beyond what is left is C's "not enough memory" (or the budget's limit)
+        $reserveMemory = static function (int $bytes) use ($budget): void {
+            MemoryLimit::reserve($bytes, $budget);
+        };
+        $factorySource = Emitter::emitChunk($proto, $L->globalState->countSteps, $reserveMemory);
+        $factory = self::factoryForSource($factorySource, $budget);
+        $protos = $isBinary ? null : Dump::dump($proto, false);
+        $cache = $L->globalState->chunkCache;
+        if ($cache === null) {
+            LoadCache::store($key, $protos, $nesting, $factory, $factorySource);
+        } else {
+            $cache->store($key, $protos, $nesting, $factory, $factorySource);
+        }
+        return self::instantiate($proto, $factory);
     }
 
     // ldo.c: checkmode
@@ -385,15 +517,7 @@ final class ChunkLoader
             }
             return self::instantiate($proto, $chunk['factory']);
         };
-        [$status, $result] = Calls::protectedRun($L, $load, $L->errfunc);
-        if ($status !== Lua::LUA_OK) {
-            throw new LuaError($result, $status);
-        }
-        $closure = $result;
-        if ($closure->proto->upvalues !== []) {  // does it have an upvalue?
-            $closure->getUpval(0)->v = $L->globalState->globals;  // set it to the global table
-        }
-        return $closure;
+        return self::protectedParse($L, $load);
     }
 
     /** sets the source of $proto and the functions in it (lparser.c: open_func gives them all the lexer's) */

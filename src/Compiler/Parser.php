@@ -71,12 +71,12 @@ final class Parser
         int $nCcallsAtEntry,
         ?int &$nesting = null,
         ?\Closure $reserveMemory = null,
+        ?\Closure $readMore = null,
     ): Proto {
         $chunkname = Lexer::asCString($chunkname);  // C receives the name as a 'const char *'
         $mainProto = new Proto();
         $mainProto->source = $chunkname;
-        $lexState = new Lexer($input, $chunkname, $nCcallsAtEntry);
-        $lexState->reserveMemory = $reserveMemory;
+        $lexState = new Lexer($input, $chunkname, $nCcallsAtEntry, $reserveMemory, $readMore);
         $parser = new self($lexState);
         try {
             $parser->mainfunc(new FuncState($mainProto, $lexState));

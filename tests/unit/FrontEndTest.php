@@ -141,3 +141,35 @@ function test_chunk_name_is_a_C_string(): void
         assertThrows(CompileError::class, fn () => Compiler::compile('x =', "=name\0ignored")),
     );
 }
+
+/**
+ * Escape sequences lex in linear time: llex.c removes the characters of an
+ * escape it saved for error messages by lowering the buffer's length
+ * (lzio.h: luaZ_buffremove), never by copying the buffer. A string of 4n
+ * escapes takes about 4 times as long as one of n (a copy per escape made
+ * it 11 to 16 times); the bound is generous, so a loaded machine passes.
+ */
+function test_escapes_lex_in_linear_time(): void
+{
+    $escapes = [
+        '\\n' => "\n", '\\x41' => 'A', '\\65' => 'A', '\\u{41}' => 'A', '\\u{7FFFFFFF}' => "\xFD\xBF\xBF\xBF\xBF\xBF",
+    ];
+    $count = 50000;
+    foreach ($escapes as $escape => $value) {
+        $seconds = [];
+        foreach ([$count, 4 * $count] as $n) {
+            $source = 'return "<' . str_repeat($escape, $n) . '>"';
+            $fastest = INF;
+            for ($run = 0; $run < 3; $run++) {
+                $start = hrtime(true);
+                $proto = Compiler::compile($source, '=escapes');
+                $fastest = min($fastest, (hrtime(true) - $start) / 1e9);
+            }
+            assertSame('<' . str_repeat($value, $n) . '>', $proto->k[0], "the string of $n '$escape'");
+            $seconds[] = $fastest;
+        }
+        $ratio = $seconds[1] / $seconds[0];
+        $message = sprintf("4 times as many '%s' take %.1f times as long (%.3f s)", $escape, $ratio, $seconds[1]);
+        assertTrue($ratio < 8, $message);
+    }
+}
