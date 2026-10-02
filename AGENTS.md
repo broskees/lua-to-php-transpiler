@@ -131,14 +131,21 @@ Lua string keys and integer keys distinct.
   with no body = dead). While suspended, `$co->ci` is the CallInfo of the
   native `coroutine.yield`; a coroutine that died with an error keeps its
   CallInfo chain as it was at the raise point, and its `errorValue`, until
-  closeThread (as C). While a pcall in a coroutine runs the `__close`
-  methods of frames an error abandoned (they may yield), those frames are
-  listed in `pendingCloses`; closeThread splices them back where C's stack
-  has them. A resume sets `$co->nCcalls` to the resumer's + 1
-  (nested resumes hit "C stack overflow" at LUAI_MAXCCALLS as in C); the PHP
-  frames of a suspended coroutine undo their own increments when they
-  return, so a resume shifts nCcalls by the change of `nCcallsBase` and saved
-  counts (protectedRun, closeProtected) are relative to it. Each fiber gets a
+  closeThread (as C). While the `__close` methods of frames an error
+  abandoned run, those frames are listed in `pendingCloses` (see Errors);
+  when a pcall in a coroutine runs them they may yield, and closeThread
+  splices the frames back where C's stack has them. A resume sets
+  `$co->nCcalls` and `nCcallsBase` to the resumer's + 1 (nested resumes
+  hit "C stack overflow" at LUAI_MAXCCALLS as in C), and an error a pcall
+  in a coroutine catches (a yieldable one) sets nCcalls back to
+  `nCcallsBase`: C unwinds its C calls there (the yield's longjmp, or
+  lua_resume's luaD_rawrunprotected catching the error before precover
+  finishes the pcall) and the continuations count no level, so a
+  coroutine may nest pcalls and metamethods past LUAI_MAXCCALLS across
+  yields. Our PHP frames from before survive; when one returns, every
+  call made since has returned, so it finds the count at `nCcallsBase`
+  and leaves it there (`Calls::callk`); other protected calls run with
+  nny > 0 (no yield inside) and restore their saved count. Each fiber gets a
   C stack of `Coroutine::FIBER_STACK_BYTES` = 256 KB of address space
   (embedded states keep the host's fiber.stack_size: Embedding conventions) (only
   touched pages cost memory: a suspended coroutine costs about 10 KB RSS,
@@ -175,9 +182,13 @@ Lua string keys and integer keys distinct.
   more Lua values has a destructor following `Teardown`'s protocol (hand
   the fields to `Teardown::$pending` when a release is running, else clear
   them and release the queue one value at a time): LuaTable, UpVal,
-  NativeFunction, Userdata, Coroutine (which also unlinks its CallInfo
-  chain, as `Calls::unlinkAbandonedFrames` does for frames an error
-  abandons). A LuaClosure leads only to UpVals; a LuaTable hands its
+  NativeFunction, Userdata, Coroutine (which hands over every frame of
+  its CallInfo chain and `pendingCloses` on its own, unlinked: a frame may
+  hold another coroutine, so a chain of coroutines dead with the previous
+  one in a register is freed one frame at a time; `Calls::unlinkAbandonedFrames`
+  unlinks the frames an error abandons). A value a destructor's local
+  still holds after the hand-over is freed after release(), with the
+  guard off: unset such locals first. A LuaClosure leads only to UpVals; a LuaTable hands its
   `LuaTableExtra` over whole; CallInfo chains hang only off their
   Coroutine. A new class that can hold Lua values needs such a
   destructor unless it always leads to one of these within a few steps.
@@ -369,8 +380,17 @@ Lua string keys and integer keys distinct.
   upvalues and pending `__close` variables of the abandoned frames and unlinks
   them (`Calls::closeProtected`: an error in a `__close` also goes through the
   handler; a pcall/xpcall in a yieldable coroutine closes with yieldable
-  calls, as C's precover/finishpcallk). `$L->errfunc` is the current message
-  handler (load's parser uses it).
+  calls, as C's precover/finishpcallk). While they close, in every unwind
+  (protected calls, closeThread, closeState), `$L->pendingCloses` lists
+  the abandoned frames with the frame and register being closed: C keeps
+  its stack up to that variable below each `__close` call (lfunc.c:
+  prepcallclosemth), so the collector marks the variables still to close
+  and the registers below them, and not what was above (see GC).
+  `$L->errfunc` is the current message handler (load's parser uses it).
+  Each new LuaError copies PHP's whole stack trace (PHP builds it when the
+  exception is created), so an error that n nested pcalls each catch and
+  raise again costs O(n²): 10,000 levels across yields take 31 s (lua5.4:
+  0.1 s).
   Variable names in messages come from ldebug.c's symbolic execution; helpers
   take "slots": register >= 0, `DebugInfo::upvalueSlot($i)`, or `NO_SLOT`.
   PHP's C-stack guard (`\Error` "Maximum call stack size of N bytes
@@ -484,7 +504,10 @@ Lua string keys and integer keys distinct.
   are light C functions. A native's Lua values must be in its `$upvalues`:
   PHP `use` captures are invisible to the GC. A thread is traced through
   its CallInfo chain (`func`, `R`, `varargs`), the abandoned frames in
-  `pendingCloses`, `tailCall*`, `errfunc`, `body`, `errorValue`. Liveness
+  `pendingCloses` from the one whose variable is being closed down (its
+  registers up to that variable: C's top is right above it while its
+  `__close` runs; the frames above are garbage), `tailCall*`, `errfunc`,
+  `body`, `errorValue`. Liveness
   is C's stack top: a Lua frame below the top whose `savedpc` is at
   OP_CALL/OP_TAILCALL (OP_TFORCALL) owns registers below A (A+4), unless
   `CIST_HOOKED`; the frame that triggered an automatic
@@ -501,7 +524,8 @@ Lua string keys and integer keys distinct.
   see Embedding conventions, Isolation). PHP's cycle collector is paused while
   tracing (every touched object becomes a root candidate). lua_close is
   `Collector::closeState` (bin/lua and lua2php scripts after the main chunk,
-  `os.exit(x, true)`): close the main thread's tbc variables, then finalize
+  `os.exit(x, true)`): reset the main thread to its base frame and close
+  its tbc variables (lstate.c: close_state), then finalize
   everything still marked; objects marked while closing are not.
 - **Hooks.** Per thread, on `Coroutine`: `hook` (C's lua_Hook: a closure
   `($L, $event, $line, $ci, $top)`, `$top` = C's L->top - base of the
@@ -524,6 +548,10 @@ Lua string keys and integer keys distinct.
   `Calls::callNative`; return hooks: `Hooks::retHook` in OP_RETURN* (before
   the results are collected), `Calls::callNative` (a native's results are
   appended to its `$ci->R`) and `Calls::tailCall` for a native callee.
+  Hooks run on the live frame, as C's on its stack: a native gets its
+  arguments from `$ci->R` after its call hook, and a return hook's results
+  go on from the frame's slots, so debug.setlocal changes them
+  (`Calls::callNonLua` inlines callNative: keep them alike).
   `Hooks::hook` (luaD_hook) marks the hooked CallInfo `CIST_HOOKED` (and
   `CIST_TRAN`, with the thread's `ftransfer`/`ntransfer`, for getinfo's
   'r': hooks do not nest, so they live on the Coroutine) and clears

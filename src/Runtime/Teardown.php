@@ -35,7 +35,8 @@ namespace LuaPhp\Runtime;
  * (about 60 ns for a table), so the classes freed most often keep these
  * paths short. Objects of other classes are safe links when they always
  * lead to one of these within a few steps (a LuaClosure's upvalues are
- * UpVals; a CallInfo chain is unlinked by its Coroutine's destructor).
+ * UpVals; a Coroutine's destructor hands its CallInfo chain over one
+ * frame at a time).
  *
  * Destructors run when PHP frees an object (reference counting, its cycle
  * collector, the unwinding of a destroyed suspended fiber, shutdown), never

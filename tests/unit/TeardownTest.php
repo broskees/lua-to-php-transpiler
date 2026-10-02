@@ -72,6 +72,23 @@ function buildChain(Coroutine $L, string $kind, int $length): object
                 $co->errorValue = $chain;
                 $chain = $co;
                 break;
+            case 'coroutine-frame':  // ... and the stack it died with
+                $co = Coroutine::newThread($L, null);
+                $co->status = Lua::LUA_ERRRUN;
+                $ci = new CallInfo();
+                $ci->previous = $co->ci;
+                $ci->R = [$chain];
+                $co->ci = $ci;
+                $chain = $co;
+                break;
+            case 'coroutine-pending-close':  // frames whose '__close' variables a pcall is closing
+                $co = Coroutine::newThread($L, null);
+                $ci = new CallInfo();
+                $ci->previous = $co->baseCi;
+                $ci->R = [$chain];
+                $co->pendingCloses[] = [$ci, $co->baseCi, $ci, -1];
+                $chain = $co;
+                break;
             case 'table-key':
                 $table = new LuaTable();
                 $table->set($chain, true);
@@ -114,6 +131,8 @@ function test_deep_chains_lua_cannot_build_are_freed_one_link_at_a_time(): void
         'userdata-metatable' => 200000,
         'native-upvalue' => 1000000,
         'coroutine-error' => 200000,
+        'coroutine-frame' => 200000,
+        'coroutine-pending-close' => 200000,
         'callinfo' => 1000000,
         'table-key' => 200000,
         'table-cursor' => 200000,
