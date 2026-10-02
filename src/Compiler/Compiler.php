@@ -46,6 +46,12 @@ final class Compiler
      * $reserveMemory, if given, is called with the memory the rest of the
      * compile may take as it reads the source (Lexer::$reserveMemory), and
      * raises what C's allocator would when it does not fit.
+     *
+     * $readMore, if given, reads the source after $source, its first
+     * piece: it returns the next piece, '' at the end (and from then on).
+     * It is called only when the lexer needs the next byte, as lua_load's
+     * ZIO calls a reader (lzio.c: luaZ_fill), with the parser's C-call
+     * depth, at which C runs the reader (Lexer::$readMore).
      */
     public static function compile(
         string $source,
@@ -53,7 +59,8 @@ final class Compiler
         int $nCcalls = self::MAIN_CHUNK_C_CALLS,
         ?int &$nesting = null,
         ?\Closure $reserveMemory = null,
+        ?\Closure $readMore = null,
     ): Proto {
-        return Parser::parse($source, $chunkname, $nCcalls, $nesting, $reserveMemory);
+        return Parser::parse($source, $chunkname, $nCcalls, $nesting, $reserveMemory, $readMore);
     }
 }

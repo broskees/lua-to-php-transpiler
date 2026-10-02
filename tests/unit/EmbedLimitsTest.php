@@ -390,6 +390,32 @@ function test_load_with_allow_load(): void
     assertThrows(SandboxClosed::class, static fn () => $sandbox->load('return 1'));
 }
 
+/**
+ * load(reader) in a sandbox: the reader is called only as the lexer needs
+ * more (a syntax error ends it at once), the chunk read so far is held to
+ * sourceBytes as it grows (an endless reader is LimitExceeded('source')),
+ * and what compiles goes into the Environment's cache, keyed by the bytes
+ * read.
+ */
+function test_load_from_a_reader_with_allow_load(): void
+{
+    $environment = new Environment(allowLoad: true, limits: new Limits(steps: 100_000, sourceBytes: 1000));
+    $sandbox = $environment->newSandbox();
+    $cache = (new \ReflectionProperty(Environment::class, 'cache'))->getValue($environment);
+    $before = $cache->memoryEntryCount();
+    $code = 'local i, pieces = 0, {"return ", "1 + ", "1"}
+        return load(function() i = i + 1 return pieces[i] end)()';
+    assertSame([2], $sandbox->load($code)->call());
+    assertSame($before + 2, $cache->memoryEntryCount(), 'the chunk and the chunk it read');
+    assertSame([2], $sandbox->load($code)->call());
+    assertSame($before + 2, $cache->memoryEntryCount(), 'both from the cache');
+    $syntaxError = 'local calls = 0
+        local f, message = load(function() calls = calls + 1 return "! " end)
+        return calls, f, message';
+    assertSame([1, null, "(load):1: unexpected symbol near '!'"], $sandbox->load($syntaxError)->call());
+    assertSame('source', limitOf(static fn () => $sandbox->load('load(function() return "  " end)')->call()));
+}
+
 function test_limits_are_per_run(): void
 {
     $environment = new Environment(

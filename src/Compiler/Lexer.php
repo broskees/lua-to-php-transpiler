@@ -18,8 +18,11 @@ use LuaPhp\Runtime\StringToNumber;
  * lobject.c's luaO_utf8esc is encodeUtf8 (utf8esc is llex.c's).
  *
  * Characters are ints (0..255) like C's 'current'; EOZ (-1) marks the end
- * of input. The token buffer is a byte string; error messages quote it as C
- * does, so an embedded '\0' ends the quoted text.
+ * of input. The input is a string, or comes in pieces from a reader as
+ * lua_load's ZIO reads them (lzio.c: luaZ_fill), only when the lexer needs
+ * the next byte. The token buffer is a byte string with a length, C's
+ * Mbuffer; error messages quote it as C does, so an embedded '\0' ends the
+ * quoted text.
  *
  * @internal
  */
@@ -148,8 +151,15 @@ final class Lexer
     /** the deepest $nCcalls enterlevel reached (see Compiler::compile's $nesting) */
     public int $deepestNCcalls;
 
-    /** buffer for tokens (C 'Mbuffer') */
+    /**
+     * buffer for tokens (C 'Mbuffer'): its first $bufferLength bytes; the
+     * bytes after them were removed (luaZ_buffremove) and are overwritten
+     * by the next ones saved
+     */
     private string $buffer = '';
+
+    /** lzio.h: luaZ_bufflen, the length of the token in $buffer */
+    private int $bufferLength = 0;
 
     /** input bytes read between two checks of the compile's memory (see $reserveMemory) */
     private const MEMORY_CHECK_BYTES = 16384;
@@ -163,31 +173,62 @@ final class Lexer
 
     /**
      * Called with the memory the next MEMORY_CHECK_BYTES of input (or the
-     * rest) may take to compile, each time that much was read (it raises
-     * the error of memory that does not fit, as C's allocator would), or
-     * null
+     * rest) may take to compile, plus a copy of the token being read, each
+     * time that much was read, also inside a token (it raises the error of
+     * memory that does not fit, as C's allocator would: llex.c save grows
+     * the token buffer with luaZ_resizebuffer), or null
      *
      * @var ?\Closure(int): void
      */
-    public ?\Closure $reserveMemory = null;
+    private ?\Closure $reserveMemory;
 
-    /** the input position at which $reserveMemory is called next */
-    private int $nextMemoryCheck = 0;
+    /** the input position (in the whole input) at which $reserveMemory is called next */
+    private int $nextMemoryCheck;
 
+    /**
+     * Returns the next piece of input once $input is used up, '' at the
+     * end of the input (and from then on): lzio.c luaZ_fill's reader. It
+     * gets the parser's C-call depth, at which the reader runs in C
+     * (lparser.c: enterlevel counts in L->nCcalls). Null: $input is all of
+     * the input.
+     *
+     * @var ?\Closure(int): string
+     */
+    private ?\Closure $readMore;
+
+    /** the piece of input in hand (all of it, without a reader) */
     private string $input;
 
+    /** the position in $input of the next byte */
     private int $inputPosition = 0;
 
+    /** strlen($input) */
     private int $inputLength;
+
+    /** where next() stops reading $input itself and asks fill(): its end, or the next memory check */
+    private int $inputEnd = 0;
+
+    /** the position in the whole input at which $input starts */
+    private int $inputStart = 0;
 
     /**
      * llex.c: luaX_setinput. $nCcallsAtEntry is the C-call depth at which
      * parsing starts (2 for load() called from a main chunk run by lua.c).
+     * $input is the whole input, or with $readMore its first piece (see
+     * $readMore and $reserveMemory).
      */
-    public function __construct(string $input, string $source, int $nCcallsAtEntry)
-    {
+    public function __construct(
+        string $input,
+        string $source,
+        int $nCcallsAtEntry,
+        ?\Closure $reserveMemory = null,
+        ?\Closure $readMore = null,
+    ) {
         $this->input = $input;
         $this->inputLength = strlen($input);
+        $this->readMore = $readMore;
+        $this->reserveMemory = $reserveMemory;
+        $this->nextMemoryCheck = $reserveMemory === null ? PHP_INT_MAX : 0;
         $this->source = $source;
         $this->nCcalls = $nCcallsAtEntry;
         $this->deepestNCcalls = $nCcallsAtEntry;
@@ -201,9 +242,42 @@ final class Lexer
     // llex.c: next (zgetc)
     private function next(): void
     {
-        $this->current = $this->inputPosition < $this->inputLength
+        $this->current = $this->inputPosition < $this->inputEnd
             ? ord($this->input[$this->inputPosition++])
-            : self::EOZ;
+            : $this->fill();
+    }
+
+    /**
+     * lzio.c: luaZ_fill, as next() calls it at $inputEnd: the next byte,
+     * EOZ at the end of the input. When $input is used up, the next piece
+     * comes from $readMore; and every MEMORY_CHECK_BYTES of input, the
+     * compile's memory is checked (see $reserveMemory).
+     */
+    private function fill(): int
+    {
+        if ($this->inputPosition >= $this->inputLength) {  // the piece in hand is used up
+            $piece = $this->readMore === null ? '' : ($this->readMore)($this->nCcalls);
+            if ($piece === '') {
+                return self::EOZ;
+            }
+            $this->inputStart += $this->inputLength;
+            $this->input = $piece;
+            $this->inputLength = strlen($piece);
+            $this->inputPosition = 0;
+        }
+        $position = $this->inputStart + $this->inputPosition;
+        if ($position >= $this->nextMemoryCheck) {
+            $inputLeft = $this->inputLength - $this->inputPosition;  // (all of it, without a reader)
+            if ($this->readMore !== null && $position > 0) {  // a reader may have more than its piece:
+                $inputLeft = self::MEMORY_CHECK_BYTES;  // after the first piece's window, a whole one
+            }
+            $ahead = min(self::MEMORY_CHECK_BYTES, $inputLeft + 1);
+            // a token PHP has to move as it grows, or copy once read (its string), takes its length again
+            ($this->reserveMemory)($ahead * self::COMPILE_BYTES_PER_SOURCE_BYTE + $this->bufferLength);
+            $this->nextMemoryCheck = $position + self::MEMORY_CHECK_BYTES;
+        }
+        $this->inputEnd = min($this->inputLength, $this->nextMemoryCheck - $this->inputStart);
+        return ord($this->input[$this->inputPosition++]);
     }
 
     // llex.c: currIsNewline
@@ -223,10 +297,10 @@ final class Lexer
         return $this->strings[$contents] ??= $contents;
     }
 
-    // llex.c: save
+    // llex.c: save (PHP grows the string when the byte goes at its end)
     private function save(int $c): void
     {
-        $this->buffer .= chr($c & 0xFF);
+        $this->buffer[$this->bufferLength++] = chr($c & 0xFF);
     }
 
     // llex.c: save_and_next
@@ -239,7 +313,22 @@ final class Lexer
     // lzio.h: luaZ_buffremove
     private function buffremove(int $count): void
     {
-        $this->buffer = substr($this->buffer, 0, strlen($this->buffer) - $count);
+        $this->bufferLength -= $count;
+    }
+
+    // lzio.h: luaZ_resetbuffer (a new string: the token's string may be the old one)
+    private function resetbuffer(): void
+    {
+        $this->buffer = '';
+        $this->bufferLength = 0;
+    }
+
+    /** lzio.h: luaZ_buffer's first luaZ_bufflen bytes, the token so far */
+    private function bufferContents(): string
+    {
+        return $this->bufferLength === strlen($this->buffer)
+            ? $this->buffer
+            : substr($this->buffer, 0, $this->bufferLength);
     }
 
     // llex.c: luaX_token2str
@@ -266,7 +355,7 @@ final class Lexer
             case self::TK_STRING:
             case self::TK_FLT:
             case self::TK_INT:
-                return "'" . self::asCString($this->buffer) . "'";
+                return "'" . self::asCString($this->bufferContents()) . "'";
             default:
                 return $this->token2str($token);
         }
@@ -346,7 +435,7 @@ final class Lexer
         if (self::lislalpha($this->current)) {  // is numeral touching a letter?
             $this->saveAndNext();  // force an error
         }
-        $number = StringToNumber::convert($this->buffer);
+        $number = StringToNumber::convert($this->bufferContents());
         if ($number === null) {  // format error?
             $this->lexerror('malformed number', self::TK_FLT);
         }
@@ -399,7 +488,7 @@ final class Lexer
                     $this->save(10);
                     $this->inclinenumber();
                     if ($token === null) {
-                        $this->buffer = '';  // avoid wasting space
+                        $this->resetbuffer();  // avoid wasting space
                     }
                     break;
                 default:
@@ -411,7 +500,7 @@ final class Lexer
             }
         }
         if ($token !== null) {
-            $token->seminfo = $this->newString(substr($this->buffer, $sep, strlen($this->buffer) - 2 * $sep));
+            $token->seminfo = $this->newString(substr($this->buffer, $sep, $this->bufferLength - 2 * $sep));
         }
     }
 
@@ -484,7 +573,10 @@ final class Lexer
     // llex.c: utf8esc
     private function utf8esc(): void
     {
-        $this->buffer .= self::encodeUtf8($this->readutf8esc());
+        $bytes = self::encodeUtf8($this->readutf8esc());
+        for ($i = 0; $i < strlen($bytes); $i++) {  // add 'bytes' to string
+            $this->save(ord($bytes[$i]));
+        }
     }
 
     // llex.c: readdecesc
@@ -587,13 +679,13 @@ final class Lexer
             }
         }
         $this->saveAndNext();  // skip delimiter
-        $token->seminfo = $this->newString(substr($this->buffer, 1, strlen($this->buffer) - 2));
+        $token->seminfo = $this->newString(substr($this->buffer, 1, $this->bufferLength - 2));
     }
 
     // llex.c: llex
     private function llex(Token $token): int
     {
-        $this->buffer = '';  // luaZ_resetbuffer
+        $this->resetbuffer();
         for (;;) {
             switch ($this->current) {
                 case 10:  // '\n'
@@ -615,10 +707,10 @@ final class Lexer
                     $this->next();
                     if ($this->current === 91) {  // long comment?
                         $sep = $this->skipSep();
-                        $this->buffer = '';  // 'skip_sep' may dirty the buffer
+                        $this->resetbuffer();  // 'skip_sep' may dirty the buffer
                         if ($sep >= 2) {
                             $this->readLongString(null, $sep);  // skip long comment
-                            $this->buffer = '';  // previous call may dirty the buff.
+                            $this->resetbuffer();  // previous call may dirty the buff.
                             break;
                         }
                     }
@@ -701,7 +793,7 @@ final class Lexer
                         do {
                             $this->saveAndNext();
                         } while (self::lislalnum($this->current));
-                        $name = $this->newString($this->buffer);
+                        $name = $this->newString($this->buffer);  // (the buffer is the name: nothing was removed)
                         $token->seminfo = $name;
                         return self::RESERVED_WORDS[$name] ?? self::TK_NAME;
                     }
@@ -716,11 +808,6 @@ final class Lexer
     // llex.c: luaX_next
     public function nextToken(): void
     {
-        if ($this->inputPosition >= $this->nextMemoryCheck && $this->reserveMemory !== null) {
-            $ahead = min(self::MEMORY_CHECK_BYTES, $this->inputLength - $this->inputPosition + 1);
-            ($this->reserveMemory)($ahead * self::COMPILE_BYTES_PER_SOURCE_BYTE);
-            $this->nextMemoryCheck = $this->inputPosition + self::MEMORY_CHECK_BYTES;
-        }
         $this->lastline = $this->linenumber;
         if ($this->lookahead->token !== self::TK_EOS) {  // is there a look-ahead token?
             $this->t->token = $this->lookahead->token;  // use this one

@@ -546,39 +546,27 @@ final class BaseLib
         // loading from a reader function
         $chunkname = Auxiliary::optString($L, $args, 2, '=(load)');
         Auxiliary::checkType($L, $args, 1, Lua::LUA_TFUNCTION);
-        $reader = $args[0];
-        // ldo.c: luaD_protectedparser runs the reader in protected mode,
-        // inside load's own frame, with the current message handler
-        $readAll = static function () use ($L, $reader): string {
-            $pieces = '';
-            $capacity = MemoryLimit::CHECK_ABOVE;  // $pieces may grow to this length before the next check
-            while (true) {  // lbaselib.c: generic_reader
-                $results = Calls::call($L, $reader, []);  // call it
-                $piece = $results[0] ?? null;
-                if ($piece === null) {
-                    break;
-                }
-                $piece = LuaObject::toStringCoerced($piece);
-                if ($piece === null) {
-                    Auxiliary::error($L, 'reader function must return a string');
-                }
-                if ($piece === '') {
-                    break;
-                }
-                if (\strlen($pieces) + \strlen($piece) > $capacity) {
-                    $capacity = MemoryLimit::grow(\strlen($pieces) + \strlen($piece), $L->globalState->budget);
-                }
-                $pieces .= $piece;
+        $readerFunction = $args[0];
+        // lbaselib.c: generic_reader, called by the lexer (or undump) in
+        // load's own frame, protected with the current message handler
+        // (ldo.c: luaD_protectedparser)
+        $reader = static function () use ($L, $readerFunction): ?string {
+            $results = Calls::call($L, $readerFunction, []);  // call it
+            $piece = $results[0] ?? null;
+            if ($piece === null) {
+                return null;
             }
-            return $pieces;
+            $piece = LuaObject::toStringCoerced($piece);
+            if ($piece === null) {
+                Auxiliary::error($L, 'reader function must return a string');
+            }
+            return $piece;
         };
-        return self::loadResult(static function () use ($L, $readAll, $chunkname, $mode): LuaClosure {
-            [$status, $result] = Calls::protectedRun($L, $readAll, $L->errfunc);
-            if ($status !== Lua::LUA_OK) {
-                throw new LuaError($result, $status);
-            }
-            return ChunkLoader::load($L, $result, $chunkname, $mode);
-        }, $args, 4);
+        return self::loadResult(
+            static fn (): LuaClosure => ChunkLoader::loadFromReader($L, $reader, $chunkname, $mode),
+            $args,
+            4,
+        );
     }
 
     // lbaselib.c: luaB_dofile

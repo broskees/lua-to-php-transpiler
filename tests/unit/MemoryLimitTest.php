@@ -274,6 +274,54 @@ function test_string_pointers_of_huge_strings_check_memory(): void
 }
 
 /**
+ * A single token as big as the memory left (a long string, a string or a
+ * name of 24 MB in a source of 24 MB, under 64 MB) is "not enough memory",
+ * as C's token buffer fails to grow (llex.c: save, luaZ_resizebuffer), and
+ * never PHP's fatal error: the lexer checks the memory as it reads, also
+ * inside a token (Lexer::$reserveMemory). lua5.4 runs in 64 MB of address
+ * space, bin/lua and bin/lua2php output under memory_limit=64M.
+ */
+function test_a_huge_token_is_not_enough_memory(): void
+{
+    $directory = scratchDirectory() . '/memory-limit-token';
+    mkdir($directory);
+    file_put_contents("$directory/token.lua", <<<'LUA'
+        local size, open, close = tonumber(arg[1]), arg[2], arg[3]
+        local s = "return " .. open .. ("a"):rep(size) .. close
+        print("source", #s)
+        local f, e = load(s, "=large")
+        print(f and #f() or e)
+        print(#load("return [[" .. ("a"):rep(1e5) .. "]]")())
+        print("after")
+
+        LUA);
+    [$status, , $errorOutput] = runCommand(['php', REPO_ROOT . '/bin/lua2php', 'token.lua'], '', $directory);
+    assertSame(0, $status, $errorOutput);
+    $size = '24000000';
+    foreach (['long string' => ['[[', ']]'], 'string' => ['"', '"'], 'name' => ['', '']] as $kind => [$open, $close]) {
+        $commands = [
+            'lua5.4' => ['sh', '-c', 'ulimit -v 65536 && exec lua5.4 "$@"', 'sh', 'token.lua', $size, $open, $close],
+            'bin/lua' => [
+                'php', '-d', 'memory_limit=64M', '-d', 'max_memory_limit=64M', REPO_ROOT . '/bin/lua', 'token.lua',
+                $size, $open, $close,
+            ],
+            'lua2php' => [
+                'php', ...OPCACHE_ON_NEW_FILES, '-d', 'memory_limit=64M', 'token.php', $size, $open, $close,
+            ],
+        ];
+        $sourceLength = 7 + \strlen($open) + (int) $size + \strlen($close);
+        foreach ($commands as $label => $command) {
+            [$status, $stdout, $stderr] = runCommand($command, '', $directory);
+            assertSame(
+                [0, "source\t$sourceLength\nnot enough memory\n100000\nafter\n", ''],
+                [$status, $stdout, substr($stderr, 0, 2000)],
+                "$kind under $label",
+            );
+        }
+    }
+}
+
+/**
  * Scripts bin/lua2php generates keep the memory_limit PHP was started
  * with; bin/lua raises it to 4G, or to max_memory_limit (PHP 8.5) when
  * that is lower, without the warning ini_set gives above the cap.
