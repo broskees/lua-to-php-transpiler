@@ -36,24 +36,35 @@ final class Undump
     private const INT_LIMIT_SHIFTED = 0x7FFFFFFF >> 7;
     private const SIZE_LIMIT_SHIFTED = (1 << 57) - 1;
 
+    // lua.h: LUA_ERRMEM, the code of the CompileError of a string C cannot allocate, and its message
+    public const LUA_ERRMEM = 4;
+    public const MEMERRMSG = 'not enough memory';
+
     private int $position = 1;
 
     /** @var array<string, string> contents -> the one string (see undump's $shareEqualStrings) */
     private array $sharedStrings = [];
 
     private function __construct(
-        private readonly string $bytes,
+        private string $bytes,
         private readonly string $nameForErrors,
         private readonly bool $shareEqualStrings,
+        private readonly ?\Closure $reserveMemory,
+        private readonly ?\Closure $readMore,
     ) {
     }
 
     /**
      * lundump.c: luaU_undump.
      *
-     * $bytes is the whole chunk. Its first byte is the ESC that the caller
-     * (ldo.c: f_parser) already used to decide the chunk is binary, so it is
-     * skipped unchecked, as in C. $chunkname only feeds error messages.
+     * $bytes is the whole chunk, or with $readMore its first piece:
+     * $readMore then returns the next piece, '' at the end (and from then
+     * on), and is called only when more bytes are needed, as lua_load's
+     * ZIO calls a reader (lzio.c: luaZ_read, zgetc), so a chunk is read up
+     * to its last byte and no further. The first byte is the ESC that the
+     * caller (ldo.c: f_parser) already used to decide the chunk is binary,
+     * so it is skipped unchecked, as in C. $chunkname only feeds error
+     * messages.
      *
      * Each string loaded is a new string, as C's long strings are
      * (loadStringN). $shareEqualStrings makes equal strings one string
@@ -61,11 +72,23 @@ final class Undump
      * name): for chunks whose binary chunk stands for the source it
      * compiled (bin/lua2php, LoadCache).
      *
-     * @throws CompileError "<name>: bad binary format (<why>)"
+     * $reserveMemory, if given, is called with the length of each long
+     * string before it is read, as C allocates it first (lstring.c:
+     * luaS_createlngstrobj), and raises what C's allocator would when it
+     * does not fit.
+     *
+     * @throws CompileError "<name>: bad binary format (<why>)", or
+     *         "not enough memory" (code LUA_ERRMEM) for a string of 2^63
+     *         bytes or more
      */
-    public static function undump(string $bytes, string $chunkname, bool $shareEqualStrings = false): Proto
-    {
-        $loadState = new self($bytes, self::nameForErrors($chunkname), $shareEqualStrings);
+    public static function undump(
+        string $bytes,
+        string $chunkname,
+        bool $shareEqualStrings = false,
+        ?\Closure $reserveMemory = null,
+        ?\Closure $readMore = null,
+    ): Proto {
+        $loadState = new self($bytes, self::nameForErrors($chunkname), $shareEqualStrings, $reserveMemory, $readMore);
         $loadState->checkHeader();
         // Number of upvalues of the main closure; the runtime takes it from
         // the Proto instead (C asserts both agree).
@@ -78,6 +101,10 @@ final class Undump
     /** lundump.c: luaU_undump: the name of chunk $chunkname in error messages ("<name>: bad binary format ...") */
     public static function nameForErrors(string $chunkname): string
     {
+        $nulPosition = strpos($chunkname, "\0");  // C receives the name as a 'const char *'
+        if ($nulPosition !== false) {
+            $chunkname = substr($chunkname, 0, $nulPosition);
+        }
         if ($chunkname !== '' && ($chunkname[0] === '@' || $chunkname[0] === '=')) {
             return substr($chunkname, 1);
         }
@@ -93,10 +120,27 @@ final class Undump
         throw new CompileError(sprintf('%s: bad binary format (%s)', $this->nameForErrors, $why));
     }
 
+    /**
+     * lzio.c: luaZ_fill, as luaZ_read and zgetc call it: reads the next
+     * pieces of the chunk ($readMore) until $size bytes are in hand; false
+     * if it ends before
+     */
+    private function fill(int $size): bool
+    {
+        while ($size > strlen($this->bytes) - $this->position) {
+            $piece = $this->readMore === null ? '' : ($this->readMore)();
+            if ($piece === '') {
+                return false;
+            }
+            $this->bytes .= $piece;
+        }
+        return true;
+    }
+
     // lundump.c: loadBlock
     private function loadBlock(int $size): string
     {
-        if ($size > strlen($this->bytes) - $this->position) {
+        if ($size > strlen($this->bytes) - $this->position && !$this->fill($size)) {
             $this->error('truncated chunk');
         }
         $block = substr($this->bytes, $this->position, $size);
@@ -107,19 +151,23 @@ final class Undump
     // lundump.c: loadByte
     private function loadByte(): int
     {
-        if ($this->position >= strlen($this->bytes)) {
+        if ($this->position >= strlen($this->bytes) && !$this->fill(1)) {
             $this->error('truncated chunk');
         }
         return ord($this->bytes[$this->position++]);
     }
 
-    // lundump.c: loadUnsigned ($limitShifted is C's 'limit >>= 7')
+    /**
+     * lundump.c: loadUnsigned ($limitShifted is C's 'limit >>= 7'). C's
+     * size_t is unsigned, PHP's int is not: a value of 2^63 or more is
+     * negative here, and over every limit.
+     */
     private function loadUnsigned(int $limitShifted): int
     {
         $value = 0;
         do {
             $byte = $this->loadByte();
-            if ($value >= $limitShifted) {
+            if ($value < 0 || $value >= $limitShifted) {
                 $this->error('integer overflow');
             }
             $value = ($value << 7) | ($byte & 0x7f);
@@ -128,9 +176,8 @@ final class Undump
     }
 
     /**
-     * lundump.c: loadSize. Values of 2^63 and above wrap negative in PHP;
-     * they can never be satisfied by the remaining bytes, and every caller
-     * treats them as a truncated chunk.
+     * lundump.c: loadSize. Values of 2^63 and above are negative (see
+     * loadUnsigned).
      */
     private function loadSize(): int
     {
@@ -164,13 +211,17 @@ final class Undump
     private function loadStringN(bool $lexerString = true): ?string
     {
         $size = $this->loadSize();
-        if ($size === 0) {
+        if ($size === 0) {  // no string?
             return null;
         }
-        if ($size < 0) {
-            $this->error('truncated chunk');
+        if ($size < 0) {  // 2^63 bytes or more: C cannot allocate it (lstring.c: luaS_createlngstrobj)
+            throw new CompileError(self::MEMERRMSG, self::LUA_ERRMEM);
         }
-        $string = $this->loadBlock($size - 1);
+        $length = $size - 1;
+        if ($length > self::LUAI_MAXSHORTLEN && $this->reserveMemory !== null) {  // long string?
+            ($this->reserveMemory)($length);  // C allocates it before it reads it
+        }
+        $string = $this->loadBlock($length);
         if ($this->shareEqualStrings && $lexerString) {
             return $this->sharedStrings[$string] ??= $string;
         }

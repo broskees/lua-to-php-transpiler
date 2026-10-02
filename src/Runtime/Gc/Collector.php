@@ -251,11 +251,12 @@ final class Collector
     {
         $G = $L->globalState;
         $L = $G->mainThread;  // only the main thread can be closed
-        if ($L->ci !== $L->baseCi) {
-            Calls::closeProtected($L, $L->ci, $L->baseCi, Lua::LUA_OK, null);  // close all upvalues
-            $L->ci = $L->baseCi;  // unwind CallInfo list
-        }
+        $abandonedCi = $L->ci;
+        $L->ci = $L->baseCi;  // unwind CallInfo list
         $L->errfunc = null;  // stack unwind can "throw away" the error function
+        if ($abandonedCi !== $L->baseCi) {
+            Calls::closeProtected($L, $abandonedCi, $L->baseCi, Lua::LUA_OK, null);  // close all upvalues
+        }
         $G->gcstp = self::GCSTPCLS;  // no extra finalizers after here
         $G->gckind = self::KGC_INC;
         self::separateToBeFnz($G, null);  // separate all objects with finalizers
@@ -693,13 +694,24 @@ final class Collector
             $this->markValues($ci->varargs);
             $limit = $ci->previous === null ? -1 : self::liveRegisters($ci->previous);
         }
-        // frames abandoned by an error whose '__close' variables a pcall is
-        // still closing (C keeps them on the stack until precover ends)
-        foreach ($thread->pendingCloses as [$abandonedTop, $protectedCi]) {
-            for ($ci = $abandonedTop; $ci !== null && $ci !== $protectedCi; $ci = $ci->previous) {
+        // frames abandoned by an error whose '__close' variables are being
+        // closed (Calls::closeProtected): C keeps them on the stack below the
+        // running '__close' method up to the variable it closes (lfunc.c:
+        // prepcallclosemth); the frames above that variable are garbage
+        foreach ($thread->pendingCloses as [, $protectedCi, $closingCi, $limit]) {
+            for ($ci = $closingCi; $ci !== null && $ci !== $protectedCi; $ci = $ci->previous) {
                 $this->markValue($ci->func);
-                $this->markValues($ci->R);
+                if ($limit < 0) {
+                    $this->markValues($ci->R);
+                } else {
+                    foreach ($ci->R as $register => $value) {
+                        if ($register < $limit) {
+                            $this->markValue($value);
+                        }
+                    }
+                }
                 $this->markValues($ci->varargs);
+                $limit = $ci->previous === null ? -1 : self::liveRegisters($ci->previous);
             }
         }
         $this->markValue($thread->tailCallFunction);

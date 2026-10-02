@@ -212,37 +212,62 @@ final class TableLib
         return $string;
     }
 
+    /**
+     * table.concat joins its pieces this many at a time into parts, and the
+     * parts at the end, so what it holds on the way is the parts and the
+     * result, as C's luaL_Buffer holds its buffer and the result. Joining
+     * all pieces in one implode needed about 64 bytes per piece besides the
+     * result (the list, each integer's string, implode's own 16 bytes per
+     * piece): 96 MB for 1.5 million integers, and PHP's fatal error.
+     */
+    private const PIECES_PER_PART = 1024;
+
     // ltablib.c: tconcat
     private static function concat(Coroutine $L, array $args): array
     {
         $table = $args[0] ?? null;
         $separator = $args[1] ?? '';
+        $budget = $L->globalState->budget;
         // Fast path for table.concat(t[, sep]) with a string separator on a
         // table without a metatable: checktab passes, the range is 1 to the
         // raw border, lua_geti is raw, and strings and integers are added
         // as addfield adds them. Any other element takes the path below.
         if ($table instanceof LuaTable && $table->metatable === null && \count($args) <= 2 && \is_string($separator)) {
             $last = $table->length();
+            $parts = [];
             $pieces = [];
-            $length = 0;
-            for ($index = 1; $index <= $last; $index++) {
-                $value = $table->arr[$index] ?? null;
-                if (\is_string($value)) {
-                    $pieces[] = $value;
-                    $length += \strlen($value);
-                } elseif (\is_int($value)) {
-                    $pieces[] = $piece = (string) $value;
-                    $length += \strlen($piece);
-                } else {
-                    $pieces = null;
-                    break;
+            $length = 0;  // of the pieces, without separators
+            $capacity = MemoryLimit::CHECK_ABOVE;  // the parts may grow to this length before the next check
+            // (a loop per part: a check per piece made a list of 1000 strings 11% slower to join)
+            for ($partFirst = 1; $partFirst <= $last; $partFirst += self::PIECES_PER_PART) {
+                $partLast = min($last, $partFirst + self::PIECES_PER_PART - 1);
+                for ($index = $partFirst; $index <= $partLast; $index++) {
+                    $value = $table->arr[$index] ?? null;
+                    if (\is_string($value)) {
+                        $pieces[] = $value;
+                        $length += \strlen($value);
+                    } elseif (\is_int($value)) {
+                        $pieces[] = $piece = (string) $value;
+                        $length += \strlen($piece);
+                    } else {
+                        $pieces = null;
+                        break 2;
+                    }
+                }
+                if ($partLast < $last) {  // a whole part, with more to come: join it
+                    $bytes = $length + \strlen($separator) * $partLast;
+                    if ($bytes > $capacity) {
+                        $capacity = MemoryLimit::grow($bytes, $budget);
+                    }
+                    $parts[] = implode($separator, $pieces);
+                    $pieces = [];
                 }
             }
             if ($pieces !== null) {
                 $bytes = $length + \strlen($separator) * max(0, $last - 1);
-                MemoryLimit::reserve($bytes, $L->globalState->budget);
-                $L->globalState->budget?->chargeSteps($last + intdiv($bytes, Budget::BYTES_PER_STEP));
-                return [implode($separator, $pieces)];
+                MemoryLimit::reserve($bytes, $budget);
+                $budget?->chargeSteps($last + intdiv($bytes, Budget::BYTES_PER_STEP));
+                return [$parts === [] ? implode($separator, $pieces) : implode($separator, [...$parts, ...$pieces])];
             }
         }
         $last = self::lengthOf($L, $args, 1, self::TAB_R);
@@ -250,13 +275,21 @@ final class TableLib
         $index = Auxiliary::optInteger($L, $args, 3, 1);
         $last = Auxiliary::optInteger($L, $args, 4, $last);
         $table = $args[0];
+        $parts = [];
         $pieces = [];
         $length = 0;
-        $budget = $L->globalState->budget;
+        $capacity = MemoryLimit::CHECK_ABOVE;  // the parts may grow to this length before the next check
         for (; $index < $last; $index++) {
             $budget?->chargeSteps(1);
             $pieces[] = $piece = self::field($L, $table, $index);
             $length += \strlen($piece) + \strlen($separator);
+            if (\count($pieces) === self::PIECES_PER_PART) {
+                if ($length > $capacity) {
+                    $capacity = MemoryLimit::grow($length, $budget);
+                }
+                $parts[] = implode($separator, $pieces);
+                $pieces = [];
+            }
         }
         if ($index === $last) {  // add last value (if interval was not empty)
             $budget?->chargeSteps(1);
@@ -265,7 +298,7 @@ final class TableLib
         }
         MemoryLimit::reserve($length, $budget);
         $budget?->chargeSteps(intdiv($length, Budget::BYTES_PER_STEP));
-        return [implode($separator, $pieces)];
+        return [$parts === [] ? implode($separator, $pieces) : implode($separator, [...$parts, ...$pieces])];
     }
 
     // ltablib.c: tpack

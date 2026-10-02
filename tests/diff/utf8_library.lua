@@ -101,6 +101,11 @@ show(iterator("héllo", 2), iterator("héllo", 3))
 try(utf8.codes)
 try(utf8.codes, {})
 try(iterator)
+-- luaL_checkstring converts a number argument in place: the state returned is the string
+local numberIterator, numberState, numberControl = utf8.codes(123)
+show(type(numberState), numberState, numberControl, numberIterator(numberState, numberControl))
+local _, laxState = utf8.codes(4.5, true)
+show(type(laxState), laxState)
 
 -- charpattern
 local count = 0

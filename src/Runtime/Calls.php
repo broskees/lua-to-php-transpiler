@@ -193,7 +193,9 @@ final class Calls
             } else {
                 $results = self::callNonLua($L, $function, $arguments);
             }
-            $L->nCcalls--;
+            if ($L->nCcalls !== $L->nCcallsBase) {  // (see callk)
+                $L->nCcalls--;
+            }
             return $results;
         }
         $L->nny++;
@@ -220,7 +222,12 @@ final class Calls
         } else {
             $results = self::callNonLua($L, $function, $arguments);
         }
-        $L->nCcalls--;
+        // a call made before the coroutine yielded (or before a pcall in it
+        // recovered from an error) finds the count of the resume: C unwound
+        // the call then and counts it no more (see Coroutine::$nCcallsBase)
+        if ($L->nCcalls !== $L->nCcallsBase) {
+            $L->nCcalls--;
+        }
         return $results;
     }
 
@@ -262,10 +269,11 @@ final class Calls
             $ci->R = $arguments;
             if ($L->hookmask & Lua::LUA_MASKCALL) {
                 Hooks::hook($L, Lua::LUA_HOOKCALL, -1, 1, \count($arguments), \count($arguments));
+                $arguments = $ci->R;  // (see callNative)
             }
             $results = ($function->function)($L, $arguments);
             if ($L->hookmask !== 0) {  // ldo.c: luaD_poscall
-                self::nativeReturnHook($L, $ci, $results);
+                $results = self::nativeReturnHook($L, $ci, $results);
             }
             $L->ci = $ci->previous;
             return $results;
@@ -331,10 +339,13 @@ final class Calls
         $ci->R = $arguments;
         if ($L->hookmask & Lua::LUA_MASKCALL) {
             Hooks::hook($L, Lua::LUA_HOOKCALL, -1, 1, \count($arguments), \count($arguments));
+            // as the hook left them (debug.setlocal): the C function reads
+            // its arguments from the stack the hook ran on
+            $arguments = $ci->R;
         }
         $results = ($function->function)($L, $arguments);
         if ($L->hookmask !== 0) {  // ldo.c: luaD_poscall
-            self::nativeReturnHook($L, $ci, $results);
+            $results = self::nativeReturnHook($L, $ci, $results);
         }
         $L->ci = $ci->previous;
         return $results;
@@ -345,16 +356,24 @@ final class Calls
      * slots of its stack; here they are appended to its arguments, so the
      * hook can read them with debug.getlocal (the slot numbers can differ
      * from C's, which depend on what the C function left on its stack).
+     * Returns the results as the hook left them (debug.setlocal): C moves
+     * them to the caller from the stack afterwards (ldo.c: moveresults).
      *
      * @param list<mixed> $results
+     * @return list<mixed>
      */
-    private static function nativeReturnHook(Coroutine $L, CallInfo $ci, array $results): void
+    private static function nativeReturnHook(Coroutine $L, CallInfo $ci, array $results): array
     {
         $firstResult = \count($ci->R) + 1;
         foreach ($results as $result) {
             $ci->R[] = $result;
         }
-        Hooks::retHook($L, $ci, $firstResult, \count($results));
+        $resultCount = \count($results);
+        Hooks::retHook($L, $ci, $firstResult, $resultCount);
+        for ($i = 0; $i < $resultCount; $i++) {
+            $results[$i] = $ci->R[$firstResult - 1 + $i];
+        }
+        return $results;
     }
 
     /**
@@ -391,10 +410,14 @@ final class Calls
         if ($function instanceof NativeFunction) {
             $results = self::callNative($L, $function, $arguments, 0);
             if ($L->hookmask !== 0) {  // luaD_poscall of the caller: its return hook
-                foreach ($results as $i => $result) {
-                    $ci->R[$functionRegister + $i] = $result;
+                $resultCount = \count($results);
+                for ($i = 0; $i < $resultCount; $i++) {
+                    $ci->R[$functionRegister + $i] = $results[$i];
                 }
-                Hooks::retHook($L, $ci, $functionRegister + 1, \count($results));
+                Hooks::retHook($L, $ci, $functionRegister + 1, $resultCount);
+                for ($i = 0; $i < $resultCount; $i++) {  // as the hook left them (see nativeReturnHook)
+                    $results[$i] = $ci->R[$functionRegister + $i];
+                }
             }
             $L->ci = $ci->previous;  // caller returns after the tail call
             return $results;
@@ -493,9 +516,11 @@ final class Calls
      * upvalues and to-be-closed variables of the abandoned frames.
      *
      * $yieldable: a pcall with a continuation in a yieldable thread. C
-     * does not protect such a call itself: lua_resume catches the error
+     * does not protect such a call itself (lapi.c: lua_pcallk): lua_resume
+     * catches the error, which restores the C-call count of the resume,
      * and finishes the pcall (ldo.c: precover -> finishpcallk), where the
-     * '__close' methods may yield.
+     * '__close' methods may yield. Other protected calls run with nny > 0,
+     * so nothing in them yields.
      *
      * Returns [Lua::LUA_OK, $body's result] or [error status, error value].
      *
@@ -508,8 +533,7 @@ final class Calls
         bool $yieldable = false,
     ): array {
         $oldCi = $L->ci;
-        // relative: a coroutine may yield and be resumed from elsewhere in between
-        $oldnCcalls = $L->nCcalls - $L->nCcallsBase;
+        $oldnCcalls = $L->nCcalls;
         $oldnny = $L->nny;
         $oldAllowhook = $L->allowhook;
         $oldErrfunc = $L->errfunc;
@@ -528,8 +552,8 @@ final class Calls
                 [$status, $value] = self::callMessageHandler($L, $messageHandler, $value);
             }
             $errorCi = $L->ci;
-            // ldo.c: luaD_rawrunprotected / luaD_pcall
-            $L->nCcalls = $L->nCcallsBase + $oldnCcalls;
+            // ldo.c: luaD_rawrunprotected / luaD_pcall (lua_resume's for a yieldable pcall)
+            $L->nCcalls = $yieldable ? $L->nCcallsBase : $oldnCcalls;
             $L->nny = $oldnny;
             $L->ci = $oldCi;
             $L->allowhook = $oldAllowhook;
@@ -586,6 +610,12 @@ final class Calls
      * first. With $yieldable (see protectedRun) the methods may yield
      * (lfunc.c: luaF_close with yy = 1).
      *
+     * The frames are no longer in the thread's CallInfo chain, but C keeps
+     * them on its stack below each '__close' method it calls, up to the
+     * variable being closed (lfunc.c: prepcallclosemth puts the error
+     * object right above it): Coroutine::$pendingCloses lists them, with
+     * that progress, for the collector and for closeThread.
+     *
      * @return array{int, mixed}
      */
     public static function closeProtected(
@@ -598,9 +628,8 @@ final class Calls
         bool $yieldable = false,
     ): array {
         $oldCi = $L->ci;
-        if ($yieldable) {  // a '__close' may yield: closeThread must find these frames
-            $L->pendingCloses[] = [$fromCi, $oldCi];
-        }
+        $pendingClose = \count($L->pendingCloses);
+        $L->pendingCloses[] = [$fromCi, $oldCi, $fromCi, -1];
         for ($ci = $fromCi; $ci !== null && $ci !== $downTo; $ci = $ci->previous) {
             if ($ci->openupval !== []) {
                 Upvalues::closeUpvalues($ci, 0);
@@ -609,7 +638,11 @@ final class Calls
         for ($ci = $fromCi; $ci !== null && $ci !== $downTo; $ci = $ci->previous) {
             while ($ci->tbclist !== []) {
                 $register = array_pop($ci->tbclist);
-                $oldnCcalls = $L->nCcalls - $L->nCcallsBase;  // relative, as in protectedRun
+                // the frames above this variable are garbage now; it and the
+                // registers below it stay (the variable is the method's 'self')
+                $L->pendingCloses[$pendingClose][2] = $ci;
+                $L->pendingCloses[$pendingClose][3] = $register + 1;
+                $oldnCcalls = $L->nCcalls;
                 $oldnny = $L->nny;
                 $oldAllowhook = $L->allowhook;
                 try {
@@ -625,7 +658,7 @@ final class Calls
                     }
                     $errorCi = $L->ci;
                     $L->ci = $oldCi;
-                    $L->nCcalls = $L->nCcallsBase + $oldnCcalls;
+                    $L->nCcalls = $yieldable ? $L->nCcallsBase : $oldnCcalls;  // (as in protectedRun)
                     $L->nny = $oldnny;
                     $L->allowhook = $oldAllowhook;
                     [$status, $value] = self::closeProtected(
@@ -641,9 +674,7 @@ final class Calls
                 }
             }
         }
-        if ($yieldable) {
-            array_pop($L->pendingCloses);
-        }
+        array_pop($L->pendingCloses);
         return [$status, $value];
     }
 

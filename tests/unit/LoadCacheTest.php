@@ -106,6 +106,52 @@ function test_a_warm_cache_compiles_nothing(): void
     assertSame([], glob(scratchDirectory() . '/cache-warm-tmp/*'), 'bin/lua writes no cache without LUAPHP_CACHE_DIR');
 }
 
+/**
+ * load(reader) compiles while it reads (the reader is called when the lexer
+ * or undump needs more, as in C), so its key is known only once the chunk
+ * is read: a load that succeeds then looks it up by the bytes read, and a
+ * hit emits nothing. A warm run with a guard against the emitter shows it.
+ */
+function test_a_warm_cache_serves_reader_loads(): void
+{
+    $directory = newDirectory('cache-reader');
+    file_put_contents("$directory/reader.lua", <<<'LUA'
+        local function reader(pieces)
+          local i = 0
+          return function() i = i + 1 return pieces[i] end
+        end
+        local text = load(reader({"local a = ...\n", "return a * 2, ", "'text'"}), "=text")
+        local dumped = string.dump(load("return 'binary', ..."))
+        local pieces = {}
+        for i = 1, #dumped, 7 do pieces[#pieces + 1] = dumped:sub(i, i + 6) end
+        local binary = load(reader(pieces), "=binary", "b")
+        print(text(21))
+        print(binary(1))
+        LUA);
+    $guard = "$directory/emitter-guard.php";
+    file_put_contents($guard, <<<'PHP'
+        <?php
+        spl_autoload_register(static function (string $className): void {
+            if (str_starts_with($className, 'LuaPhp\\Emitter\\')) {
+                fwrite(STDERR, "GUARD: $className loaded at run time\n");
+                exit(97);
+            }
+        });
+        PHP);
+    $expected = [0, "42\ttext\nbinary\t1\n", ''];
+    assertSame($expected, runLua('reader.lua', $directory, "$directory/cache"));
+    $warm = runCommand([
+        'env', "LUAPHP_CACHE_DIR=$directory/cache",
+        'php', ...OPCACHE_ON_NEW_FILES, '-d', "auto_prepend_file=$guard", REPO_ROOT . '/bin/lua', 'reader.lua',
+    ], '', $directory);
+    assertSame($expected, $warm, 'a warm run emits nothing');
+    // the guard works: without the cache, the loads emit their code
+    $cold = runCommand([
+        'env', '-u', 'LUAPHP_CACHE_DIR', 'php', '-d', "auto_prepend_file=$guard", REPO_ROOT . '/bin/lua', 'reader.lua',
+    ], '', $directory);
+    assertSame(97, $cold[0], 'a cold run emits');
+}
+
 function test_corrupt_entries_are_misses(): void
 {
     $directory = newDirectory('cache-corrupt');

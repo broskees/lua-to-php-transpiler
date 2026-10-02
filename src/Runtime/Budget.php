@@ -239,6 +239,7 @@ final class Budget
                     unset($this->liveCoroutines[$counted]);
                 }
             }
+            unset($counted);  // (the loop's last coroutine: the collection below may free it)
             if (\count($this->liveCoroutines) >= $this->coroutines) {
                 gc_collect_cycles();  // (a WeakMap entry goes with its coroutine)
                 if (\count($this->liveCoroutines) >= $this->coroutines) {

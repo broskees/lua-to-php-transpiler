@@ -59,6 +59,17 @@ function cases(): array
             LUA,
             NO_MEMORY . NO_MEMORY . NO_MEMORY . "true\t#10000000\n",
         ],
+        'table_concat_many' => [
+            // many small pieces: what joining them needs on the way is checked too, not only the result
+            <<<'LUA'
+            local integers = {}
+            for i = 1, 1500000 do integers[i] = i end
+            try(table.concat, integers)
+            try(table.concat, integers, ", ")
+            try(table.concat, integers, "", 1, #integers)
+            LUA,
+            "true\t#9388896\ntrue\t#12388894\ntrue\t#9388896\n",
+        ],
         'format' => [
             <<<'LUA'
             try(string.format, ("%s"):rep(1000), table.unpack(refs))
@@ -219,6 +230,95 @@ function test_huge_results_are_a_catchable_not_enough_memory_error(): void
         }
     }
     assertSame([], $failures);
+}
+
+/**
+ * string.format('%p') tells long strings apart by reading reference
+ * counts from debug_zval_dump, which costs twice the string's length for
+ * a moment (StringFormat::PROBE_BYTES_PER_BYTE): it is checked first, so
+ * a string too big to look at is "not enough memory" (lua5.4, which
+ * prints a pointer, prints true there), and the collector, which looks at
+ * every long string '%p' has numbered, keeps those it has no room to look
+ * at. Never PHP's fatal error.
+ */
+function test_string_pointers_of_huge_strings_check_memory(): void
+{
+    $directory = scratchDirectory() . '/memory-limit-pointer';
+    mkdir($directory);
+    file_put_contents("$directory/pointer.lua", <<<'LUA'
+        local big = string.rep("x", 48 * 1024 * 1024)
+        local address = string.format("%p", big)  -- (the first one is only numbered)
+        print(pcall(function () return address == string.format("%p", big) end))
+        collectgarbage()
+        local small = string.rep("y", 8 * 1024 * 1024)
+        print(string.format("%p", small) == string.format("%p", small), string.format("%p", small) ~= address)
+        big = nil
+        collectgarbage()
+        print("after")
+
+        LUA);
+    [$status, , $errorOutput] = runCommand(['php', REPO_ROOT . '/bin/lua2php', 'pointer.lua'], '', $directory);
+    assertSame(0, $status, $errorOutput);
+    $commands = [
+        'lua2php' => ['php', ...OPCACHE_ON_NEW_FILES, '-d', 'memory_limit=128M', 'pointer.php'],
+        'bin/lua' => [
+            'php', '-d', 'memory_limit=128M', '-d', 'max_memory_limit=128M', REPO_ROOT . '/bin/lua', 'pointer.lua',
+        ],
+    ];
+    foreach ($commands as $label => $command) {
+        // (through files: PHP's fatal error would print a trace too long for a pipe)
+        $result = finishProcess(startProcess($command, $directory));
+        $result[2] = substr($result[2], 0, 2000);
+        assertSame([0, NO_MEMORY . "true\ttrue\nafter\n", ''], $result, $label);
+    }
+}
+
+/**
+ * A single token as big as the memory left (a long string, a string or a
+ * name of 24 MB in a source of 24 MB, under 64 MB) is "not enough memory",
+ * as C's token buffer fails to grow (llex.c: save, luaZ_resizebuffer), and
+ * never PHP's fatal error: the lexer checks the memory as it reads, also
+ * inside a token (Lexer::$reserveMemory). lua5.4 runs in 64 MB of address
+ * space, bin/lua and bin/lua2php output under memory_limit=64M.
+ */
+function test_a_huge_token_is_not_enough_memory(): void
+{
+    $directory = scratchDirectory() . '/memory-limit-token';
+    mkdir($directory);
+    file_put_contents("$directory/token.lua", <<<'LUA'
+        local size, open, close = tonumber(arg[1]), arg[2], arg[3]
+        local s = "return " .. open .. ("a"):rep(size) .. close
+        print("source", #s)
+        local f, e = load(s, "=large")
+        print(f and #f() or e)
+        print(#load("return [[" .. ("a"):rep(1e5) .. "]]")())
+        print("after")
+
+        LUA);
+    [$status, , $errorOutput] = runCommand(['php', REPO_ROOT . '/bin/lua2php', 'token.lua'], '', $directory);
+    assertSame(0, $status, $errorOutput);
+    $size = '24000000';
+    foreach (['long string' => ['[[', ']]'], 'string' => ['"', '"'], 'name' => ['', '']] as $kind => [$open, $close]) {
+        $commands = [
+            'lua5.4' => ['sh', '-c', 'ulimit -v 65536 && exec lua5.4 "$@"', 'sh', 'token.lua', $size, $open, $close],
+            'bin/lua' => [
+                'php', '-d', 'memory_limit=64M', '-d', 'max_memory_limit=64M', REPO_ROOT . '/bin/lua', 'token.lua',
+                $size, $open, $close,
+            ],
+            'lua2php' => [
+                'php', ...OPCACHE_ON_NEW_FILES, '-d', 'memory_limit=64M', 'token.php', $size, $open, $close,
+            ],
+        ];
+        $sourceLength = 7 + \strlen($open) + (int) $size + \strlen($close);
+        foreach ($commands as $label => $command) {
+            [$status, $stdout, $stderr] = runCommand($command, '', $directory);
+            assertSame(
+                [0, "source\t$sourceLength\nnot enough memory\n100000\nafter\n", ''],
+                [$status, $stdout, substr($stderr, 0, 2000)],
+                "$kind under $label",
+            );
+        }
+    }
 }
 
 /**

@@ -48,11 +48,12 @@ use LuaPhp\Runtime\PhpErrors;
  * exception that is not a Lua error stops the sandbox: it is closed and
  * abandoned (no more '__gc' or '__close'), and the exception goes on
  * unchanged. A call from PHP outside any run of this sandbox starts a run
- * (startRun: the budget, the output collected); a call from a PHP function
- * the run called is part of that run. Lua code runs on the thread whose
- * Lua code called the PHP function running now (runningThread), else on
- * the main thread, as protected calls whose message handler takes the
- * traceback; a Lua error there is a RuntimeError.
+ * (startRun: the budget, the output collected) before it converts its
+ * arguments; a call from a PHP function the run called is part of that
+ * run. Lua code runs on the thread whose Lua code called the PHP function
+ * running now (runningThread), else on the main thread, as protected calls
+ * whose message handler takes the traceback; a Lua error there is a
+ * RuntimeError.
  *
  * PHP functions called from Lua run through callHost: a ScriptError is a
  * Lua error; a RuntimeError of this sandbox that a PHP function let
@@ -60,9 +61,10 @@ use LuaPhp\Runtime\PhpErrors;
  * else stops the run. Whatever it threw, a run stopped meanwhile stays
  * stopped (a PHP function that catches LimitExceeded cannot turn it into
  * a Lua error), and time and memory are checked (its time counts) before
- * its error or results reach Lua code. A limit reached anywhere stops the
- * run at once (limitExceeded), so there is nothing a PHP function could
- * catch and hide.
+ * its error or results reach Lua code (checkAfterHostCode; the host's
+ * output callback gets the same after each write: Sink). A limit reached
+ * anywhere stops the run at once (limitExceeded), so there is nothing a
+ * PHP function could catch and hide.
  *
  * Handles register their values in a table the collector marks
  * ($G->libraryState), as luaL_ref would, so a value PHP holds stays alive
@@ -83,6 +85,12 @@ final class State
     public ?\Throwable $stoppedBy = null;
 
     public bool $closed = false;
+
+    /**
+     * Bytes conversions built since the memory was last checked for them
+     * (Convert::charge): across values and calls, so many small ones add up.
+     */
+    public int $conversionBytes = 0;
 
     private readonly ?Budget $budget;
 
@@ -127,7 +135,7 @@ final class State
         $this->raisedErrors = new \WeakMap();
         $this->hostFunctions = new \WeakMap();
         $this->context = new RunContext($context, $this);
-        $this->sink = new Sink($output);
+        $this->sink = new Sink($output, $this);
         $L = Coroutine::newState();
         $this->L = $L;
         $G = $L->globalState;
@@ -273,8 +281,8 @@ final class State
     public function run(Source $source, array $arguments): array
     {
         $this->ensureOpen();
+        $this->startRun();  // (before the arguments: their conversion is part of the run)
         $luaArguments = $this->argumentsToLua($arguments);
-        $this->startRun();
         $outputStart = \strlen($this->sink->collected);
         $results = $this->callLua($this->compileSource($source), $luaArguments);
         $values = $this->resultsToPhp($results);
@@ -296,8 +304,8 @@ final class State
     public function callWithPhpValues(mixed $function, array $arguments): array
     {
         $this->ensureOpen();
+        $this->startRun();  // (before the arguments: their conversion is part of the run)
         $luaArguments = $this->argumentsToLua($arguments);
-        $this->startRun();
         $values = $this->resultsToPhp($this->callLua($function, $luaArguments));
         if ($this->depth === 0) {
             $this->sink->collected = '';  // (only runs return what they printed)
@@ -323,13 +331,7 @@ final class State
         } finally {
             $this->runningThread = $previousThread;
         }
-        // before its error or results reach Lua code: a run stopped
-        // meanwhile (it caught what stopped the run, or closed the sandbox)
-        // runs no more Lua code, and the time it took counts
-        if ($this->closed) {
-            throw $this->stoppedBy ?? new SandboxClosed('the sandbox was closed while it ran');
-        }
-        $this->budget?->checkLimits();
+        $this->checkAfterHostCode();  // (before its error or results reach Lua code)
         if ($error instanceof ScriptError) {
             if ($error->hasValue()) {
                 LuaError::raise(Convert::toLua($error->getValue(), 'ScriptError::value()', $this));
@@ -341,6 +343,26 @@ final class State
             throw new LuaError($value, $status);
         }
         return $result;
+    }
+
+    /**
+     * PHP code of the host ran in a run of this sandbox (a PHP function,
+     * an output callback): before Lua code goes on, a run stopped
+     * meanwhile (the host code caught what stopped it, or closed the
+     * sandbox) stays stopped, and the time it took counts.
+     */
+    public function checkAfterHostCode(): void
+    {
+        if ($this->depth === 0) {
+            // not in a run: no Lua code of this sandbox goes on (a buffered
+            // io.stderr flushed by another state's io.popen, as C's
+            // fflush(NULL), or by its own destructor)
+            return;
+        }
+        if ($this->closed) {
+            throw $this->stoppedBy ?? new SandboxClosed('the sandbox was closed while it ran');
+        }
+        $this->budget?->checkLimits();
     }
 
     /** the Lua function of PHP Closure $closure in this sandbox: the same one every time */

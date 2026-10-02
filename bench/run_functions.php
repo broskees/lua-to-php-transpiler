@@ -55,6 +55,34 @@ function median(array $values): float
     return $count % 2 === 1 ? $values[intdiv($count, 2)] : ($values[$count / 2 - 1] + $values[$count / 2]) / 2;
 }
 
+/**
+ * The median wall seconds of $runs runs of $command, after one untimed run
+ * (it fills opcache's file cache and the page cache), or null when a run
+ * fails.
+ *
+ * @param list<string> $command
+ */
+function medianWallSeconds(array $command, string $workingDirectory, int $runs): ?float
+{
+    $times = [];
+    for ($run = 0; $run <= $runs; $run++) {
+        [$status, , $seconds] = runCommand($command, $workingDirectory);
+        if ($status !== 0) {
+            return null;
+        }
+        if ($run > 0) {
+            $times[] = $seconds;
+        }
+    }
+    return median($times);
+}
+
+/** "-" unless both are known */
+function ratio(?float $seconds, ?float $referenceSeconds): string
+{
+    return $seconds === null || $referenceSeconds === null ? '-' : sprintf('%.1f', $seconds / $referenceSeconds);
+}
+
 /** @param list<string> $interpreter */
 function allLuaPasses(array $interpreter, ?int $virtualKilobytes): array
 {

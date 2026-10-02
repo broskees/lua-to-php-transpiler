@@ -131,14 +131,21 @@ Lua string keys and integer keys distinct.
   with no body = dead). While suspended, `$co->ci` is the CallInfo of the
   native `coroutine.yield`; a coroutine that died with an error keeps its
   CallInfo chain as it was at the raise point, and its `errorValue`, until
-  closeThread (as C). While a pcall in a coroutine runs the `__close`
-  methods of frames an error abandoned (they may yield), those frames are
-  listed in `pendingCloses`; closeThread splices them back where C's stack
-  has them. A resume sets `$co->nCcalls` to the resumer's + 1
-  (nested resumes hit "C stack overflow" at LUAI_MAXCCALLS as in C); the PHP
-  frames of a suspended coroutine undo their own increments when they
-  return, so a resume shifts nCcalls by the change of `nCcallsBase` and saved
-  counts (protectedRun, closeProtected) are relative to it. Each fiber gets a
+  closeThread (as C). While the `__close` methods of frames an error
+  abandoned run, those frames are listed in `pendingCloses` (see Errors);
+  when a pcall in a coroutine runs them they may yield, and closeThread
+  splices the frames back where C's stack has them. A resume sets
+  `$co->nCcalls` and `nCcallsBase` to the resumer's + 1 (nested resumes
+  hit "C stack overflow" at LUAI_MAXCCALLS as in C), and an error a pcall
+  in a coroutine catches (a yieldable one) sets nCcalls back to
+  `nCcallsBase`: C unwinds its C calls there (the yield's longjmp, or
+  lua_resume's luaD_rawrunprotected catching the error before precover
+  finishes the pcall) and the continuations count no level, so a
+  coroutine may nest pcalls and metamethods past LUAI_MAXCCALLS across
+  yields. Our PHP frames from before survive; when one returns, every
+  call made since has returned, so it finds the count at `nCcallsBase`
+  and leaves it there (`Calls::callk`); other protected calls run with
+  nny > 0 (no yield inside) and restore their saved count. Each fiber gets a
   C stack of `Coroutine::FIBER_STACK_BYTES` = 256 KB of address space
   (embedded states keep the host's fiber.stack_size: Embedding conventions) (only
   touched pages cost memory: a suspended coroutine costs about 10 KB RSS,
@@ -175,9 +182,13 @@ Lua string keys and integer keys distinct.
   more Lua values has a destructor following `Teardown`'s protocol (hand
   the fields to `Teardown::$pending` when a release is running, else clear
   them and release the queue one value at a time): LuaTable, UpVal,
-  NativeFunction, Userdata, Coroutine (which also unlinks its CallInfo
-  chain, as `Calls::unlinkAbandonedFrames` does for frames an error
-  abandons). A LuaClosure leads only to UpVals; a LuaTable hands its
+  NativeFunction, Userdata, Coroutine (which hands over every frame of
+  its CallInfo chain and `pendingCloses` on its own, unlinked: a frame may
+  hold another coroutine, so a chain of coroutines dead with the previous
+  one in a register is freed one frame at a time; `Calls::unlinkAbandonedFrames`
+  unlinks the frames an error abandons). A value a destructor's local
+  still holds after the hand-over is freed after release(), with the
+  guard off: unset such locals first. A LuaClosure leads only to UpVals; a LuaTable hands its
   `LuaTableExtra` over whole; CallInfo chains hang only off their
   Coroutine. A new class that can hold Lua values needs such a
   destructor unless it always leads to one of these within a few steps.
@@ -206,6 +217,18 @@ Lua string keys and integer keys distinct.
   commands of debug.debug() and a string LUA_INIT go through `load()` and
   its cache; `LUA_INIT=@file` loads the precompiled file.
   `bin/lua` still compiles files on the fly.
+  load(reader) is `ChunkLoader::loadFromReader` (lua_load with a ZIO):
+  the first piece decides binary or text (ldo.c f_parser), then the Lexer
+  or Undump asks for the next piece (`$readMore`) only when it needs the
+  next byte (lzio.c luaZ_fill), so the reader is called exactly as often
+  and in the same order as in C: a syntax error stops it, a binary chunk
+  is read to its last byte and no further, '' or nil ends it for good,
+  and a reader called while the parser is nested runs at the parser's
+  C-call depth (enterlevel counts in L->nCcalls). The Lexer holds only the
+  piece in hand (`fill()` runs only at the end of a piece or a memory
+  check: the per-byte path is one comparison). Its key known only then,
+  a reader's chunk is looked up in the cache after it compiled (a hit
+  skips emitting), a string's before.
   The load cache (`LoadCache`): key = chunk name + exact bytes. A hit undumps
   fresh Protos sharing equal strings like the lexer (not the source name;
   two loads look like two compiles to '%p') and is used only where
@@ -369,8 +392,17 @@ Lua string keys and integer keys distinct.
   upvalues and pending `__close` variables of the abandoned frames and unlinks
   them (`Calls::closeProtected`: an error in a `__close` also goes through the
   handler; a pcall/xpcall in a yieldable coroutine closes with yieldable
-  calls, as C's precover/finishpcallk). `$L->errfunc` is the current message
-  handler (load's parser uses it).
+  calls, as C's precover/finishpcallk). While they close, in every unwind
+  (protected calls, closeThread, closeState), `$L->pendingCloses` lists
+  the abandoned frames with the frame and register being closed: C keeps
+  its stack up to that variable below each `__close` call (lfunc.c:
+  prepcallclosemth), so the collector marks the variables still to close
+  and the registers below them, and not what was above (see GC).
+  `$L->errfunc` is the current message handler (load's parser uses it).
+  Each new LuaError copies PHP's whole stack trace (PHP builds it when the
+  exception is created), so an error that n nested pcalls each catch and
+  raise again costs O(n²): 10,000 levels across yields take 31 s (lua5.4:
+  0.1 s).
   Variable names in messages come from ldebug.c's symbolic execution; helpers
   take "slots": register >= 0, `DebugInfo::upvalueSlot($i)`, or `NO_SLOT`.
   PHP's C-stack guard (`\Error` "Maximum call stack size of N bytes
@@ -403,9 +435,17 @@ Lua string keys and integer keys distinct.
   checked. Lua's own limits come first ("resulting string too large").
   Covered: string.rep/sub/upper/lower/reverse/format/gsub/pack, pattern
   captures, `..` (emitted code joins strings inline only up to 64 KB in
-  all, else `Vm::concat`), table.concat, io reads ('a', lines, counts),
-  os.date, package.searchpath, load's reader, string.unpack's strings,
-  output (print, io.write, warn: sinks copy it), messages that copy a
+  all, else `Vm::concat`), table.concat (pieces joined
+  `TableLib::PIECES_PER_PART` (1024) at a time, the parts checked as they
+  grow like a luaL_Buffer: one implode of all pieces needed 64 bytes per
+  piece besides the result), string.format('%p') of a long string equal
+  to one it numbered (reading reference counts dumps the whole string,
+  twice its length: `StringFormat::PROBE_BYTES_PER_BYTE`, so a huge one is
+  "not enough memory" where lua5.4 prints a pointer; the collector keeps
+  a numbered string it has no room to look at), io reads ('a', lines,
+  counts), os.date, package.searchpath, load's reader (the chunk it
+  gave, kept for the cache's key), string.unpack's strings, output
+  (print, io.write, warn: sinks copy it), messages that copy a
   string (a position prefix: luaL_error, luaG_runerror, error,
   coroutine.wrap; a `__name` in a type name or tostring; a module's name
   from package.loaded in a traceback or argument error; require's
@@ -415,6 +455,13 @@ Lua string keys and integer keys distinct.
   each, measured with the copy the next call makes). Compiling
   (`ChunkLoader::load`) checks as it goes: the Lexer every 16 KB of
   source (`Lexer::COMPILE_BYTES_PER_SOURCE_BYTE`, 64: measured 14 to 62),
+  also inside a token, plus the token's length (PHP moves a growing
+  string and copies the token once read: a single 24 MB token under 64M
+  is "not enough memory", as C's growing token buffer, llex.c save); with
+  a reader, the first piece's window covers that piece and every later
+  one a whole 16 KB. Undump reserves each long string before reading it,
+  as C allocates it first (one of 2^63 bytes or more is "not enough
+  memory" at once: sizes are unsigned in C, negative in PHP);
   `Emitter::emitChunk` before each function (`EMIT_BYTES_*`: its PHP
   about 4 times over, plus the code emitted so far, which appending may
   copy), and before PHP compiles emitted code
@@ -520,7 +567,10 @@ Lua string keys and integer keys distinct.
   are light C functions. A native's Lua values must be in its `$upvalues`:
   PHP `use` captures are invisible to the GC. A thread is traced through
   its CallInfo chain (`func`, `R`, `varargs`), the abandoned frames in
-  `pendingCloses`, `tailCall*`, `errfunc`, `body`, `errorValue`. Liveness
+  `pendingCloses` from the one whose variable is being closed down (its
+  registers up to that variable: C's top is right above it while its
+  `__close` runs; the frames above are garbage), `tailCall*`, `errfunc`,
+  `body`, `errorValue`. Liveness
   is C's stack top: a Lua frame below the top whose `savedpc` is at
   OP_CALL/OP_TAILCALL (OP_TFORCALL) owns registers below A (A+4), unless
   `CIST_HOOKED`; the frame that triggered an automatic
@@ -537,7 +587,8 @@ Lua string keys and integer keys distinct.
   see Embedding conventions, Isolation). PHP's cycle collector is paused while
   tracing (every touched object becomes a root candidate). lua_close is
   `Collector::closeState` (bin/lua and lua2php scripts after the main chunk,
-  `os.exit(x, true)`): close the main thread's tbc variables, then finalize
+  `os.exit(x, true)`): reset the main thread to its base frame and close
+  its tbc variables (lstate.c: close_state), then finalize
   everything still marked; objects marked while closing are not.
 - **Hooks.** Per thread, on `Coroutine`: `hook` (C's lua_Hook: a closure
   `($L, $event, $line, $ci, $top)`, `$top` = C's L->top - base of the
@@ -560,6 +611,10 @@ Lua string keys and integer keys distinct.
   `Calls::callNative`; return hooks: `Hooks::retHook` in OP_RETURN* (before
   the results are collected), `Calls::callNative` (a native's results are
   appended to its `$ci->R`) and `Calls::tailCall` for a native callee.
+  Hooks run on the live frame, as C's on its stack: a native gets its
+  arguments from `$ci->R` after its call hook, and a return hook's results
+  go on from the frame's slots, so debug.setlocal changes them
+  (`Calls::callNonLua` inlines callNative: keep them alike).
   `Hooks::hook` (luaD_hook) marks the hooked CallInfo `CIST_HOOKED` (and
   `CIST_TRAN`, with the thread's `ftransfer`/`ntransfer`, for getinfo's
   'r': hooks do not nest, so they live on the Coroutine) and clears
@@ -676,8 +731,9 @@ counting existed, and a state without a budget charges nothing.
   none) and starts a run; `Budget::start()` starts the next one. Limits:
   steps, memoryBytes, seconds, outputBytes, coroutines (alive at once),
   callDepth, sourceBytes (a chunk `ChunkLoader::load` may compile: a
-  bigger one is LimitReached('source') before anything else; compiling's
-  memory is checked as it goes, see Limits). Reaching one throws `LimitReached` (`->limit`), an
+  bigger one is LimitReached('source') before anything else, a reader's as
+  soon as what it gave passes it; compiling's memory is checked as it
+  goes, see Limits). Reaching one throws `LimitReached` (`->limit`), an
   `\Exception` that is neither LuaError nor `\Error`: no pcall, message
   handler, resume, `__close` or `__gc` sees it, so no Lua code runs after
   it and the state is unusable (abandon it). The step counter is the
@@ -710,11 +766,13 @@ counting existed, and a state without a budget charges nothing.
   `GlobalState::$countSteps` makes load() compile so, and LoadCache keys
   include the flag. Libraries charge in proportion to their work, a step
   per element or per `Budget::BYTES_PER_STEP` (64) bytes: rep, upper,
-  lower, reverse, byte, char, format, pack, find/match/gmatch/gsub
+  lower, reverse, byte, char, format (and the dumps of '%p' of a long
+  string), pack, find/match/gmatch/gsub
   (MatchState: bytes scanned per search, the port's match() calls in
   batches of 256), table concat, insert/remove shifts, move, unpack, sort
   (per partition), utf8 char/codepoint/len/offset/codes, load (a step per
-  byte compiled). Loops over ranges an argument sets charge as they go;
+  byte compiled; a reader's chunk as it is read, also when it then hits
+  the cache). Loops over ranges an argument sets charge as they go;
   others charge what they are about to do, after `MemoryLimit::reserve`
   (so a huge result is 'memory', not 'steps'). A fast path charges what
   its port charges. Every charge is `$L->globalState->budget?->...`: with
@@ -782,7 +840,10 @@ handles wrap them. Its internals are `LuaPhp\Embed\Internal`.
   `$G->countSteps` when `Limits::needStepCounting()` (steps, memory,
   seconds or call depth set), `setsFiberStackSize` false, one `Sink` as
   both `$output` and `$errorOutput` (collects per run for
-  `Result::$output`, or the host's callable/`StdoutSink`), and a Budget
+  `Result::$output`, or the host's callable/`StdoutSink`, host code like
+  a PHP function: `State::checkAfterHostCode` after each write, which
+  checks only during a run of the state, not when another state's
+  io.popen or a destructor flushes its buffered io.stderr), and a Budget
   from the Limits with `hostMemoryIsLimit` (none for `Limits::none()`:
   nothing charged, Usage then has only time and output).
 - **Calls into Lua** (`State::compileSource`, `callLua`) go through
@@ -794,7 +855,8 @@ handles wrap them. Its internals are `LuaPhp\Embed\Internal`.
   handler or `__close` sees it. Later uses are `SandboxClosed` (previous:
   that exception). A call from PHP outside any run (`State::$depth` 0)
   starts one (`startRun`: `Budget::start`, the output collected so far
-  dropped); calls from a PHP function the run called are part of it. Lua
+  dropped) before it converts its arguments; calls from a PHP function the
+  run called are part of it. Lua
   code runs on `State::$runningThread` (the thread whose Lua code called
   the PHP function running now) or the main thread, as protected calls
   whose message handler takes the traceback. A Lua error is a
@@ -809,9 +871,10 @@ handles wrap them. Its internals are `LuaPhp\Embed\Internal`.
 - **PHP functions** (`Internal\HostFunction`): a Closure's signature is
   read once (a WeakMap by Closure) into luaL_check* rules per parameter;
   `bind` makes the NativeFunction of one sandbox. Its body runs through
-  `State::callHost`: whatever it returned or threw, first a closed sandbox
-  (it caught what stopped the run) rethrows what stopped it, then
-  `Budget::checkLimits` (its time counts), and only then ScriptError ->
+  `State::callHost`: whatever it returned or threw, first
+  `State::checkAfterHostCode` (a closed sandbox rethrows what stopped it,
+  so catching that hides nothing; then `Budget::checkLimits`: its time
+  counts), and only then ScriptError ->
   Lua error (message with luaL_error's position, or a value) and a
   RuntimeError of the same sandbox the PHP code let through -> the Lua
   error it was (as lua_call); another sandbox's stops the run. Each call charges a step
@@ -820,9 +883,11 @@ handles wrap them. Its internals are `LuaPhp\Embed\Internal`.
 - **Values** (`Internal\Convert`): see its class comment for the rules
   (lists 1..n <-> 0-based, raw contents, depth 100, paths). Paths use the
   keys of the side the value comes from, made only for an error from the
-  keys on the way (long keys shortened). A conversion counts what it
-  builds (a table repeated in a value becomes copies: 20 levels of
-  `t = {t, t}` are a million arrays) and every 64 KB of it asks
+  keys on the way (long keys shortened). Conversions count what they
+  build (a table repeated in a value becomes copies: 20 levels of
+  `t = {t, t}` are a million arrays) in `State::$conversionBytes`, which
+  goes on across values and calls (a list of 8000 results of 16 KB each
+  adds up as one value does), and every 64 KB of it asks
   `State::reserveConversionMemory` (the budget, or without one the
   host's room): over it LimitExceeded('memory'). A handle registers its value in
   a table under `$G->libraryState['embed.handles']` (luaL_ref), so Lua's
@@ -859,8 +924,9 @@ interpreter `lua5.4` (5.4.9) and compiler `luac5.4`, both installed.
     tests/bytecode.sh [file...]  diff `bin/luac -l -l -p` vs `luac5.4 -l -l -p` for official test files
     tests/official.sh [name...]  run official test files one at a time through bin/lua with
                                  -e"_U=true _soft=true _port=true _nomsg=true"; PASS/FAIL per file
-    php bench/run.php <label>    memory/speed/virtual-memory benchmarks vs lua5.4 (not a test;
-                                 results in bench/results/<label>.md, see bench/README.md)
+    php bench/run.php <label>    benchmarks vs lua5.4 (not a test; results in bench/results/<label>.md,
+                                 see bench/README.md): speed of saved lua2php output with a warm
+                                 opcache (transpile time apart), memory and virtual memory under bin/lua
 
 - Differential cases live in `tests/diff/*.lua`: each runs under `lua5.4` and
   under `bin/lua` from `tests/diff`; exit status, stdout and stderr must match

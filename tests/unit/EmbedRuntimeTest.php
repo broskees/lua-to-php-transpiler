@@ -559,6 +559,8 @@ function test_library_functions_charge_in_proportion_to_their_work(): void
         'string.char' => 'local s = string.char(table.unpack(list(10000, 65)))',
         'string.byte' => 'local n = select("#", string.byte(bigString(20000, "x"), 1, -1))',
         'string.format' => 'local s = string.format("%s", bigString(1e6, "x"))',
+        // (the second '%p' of a long string reads its reference count from a dump of the whole string)
+        'string.format %p' => 'local s = bigString(2^20, "x") local p = string.format("%p %p", s, s)',
         'string.upper' => 'local s = bigString(1e6, "x"):upper()',
         'string.pack' => 'local s = string.pack("z", bigString(1e6, "x"))',
         'load' => 'load(bigString(20000, " "))',
@@ -658,6 +660,18 @@ function test_coroutines_alive_at_once_are_limited_and_finished_ones_do_not_coun
         end
         LUA . "\n");
     assertSame('', $printed);
+
+    // at the limit, the one suspended coroutine nothing reaches any more is freed for the new one
+    $L = embeddedState(SAFE, new Budget(coroutines: 1));
+    $printed = printedBy($L, <<<'LUA'
+        local function spawn()
+          local co = coroutine.create(function() coroutine.yield() end)
+          assert(coroutine.resume(co))
+        end
+        spawn()
+        print(type(coroutine.create(function() end)))
+        LUA);
+    assertSame("thread\n", $printed);
 }
 
 function test_call_depth_is_lua_s_catchable_stack_overflow(): void
