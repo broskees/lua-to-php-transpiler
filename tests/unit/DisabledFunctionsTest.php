@@ -444,3 +444,29 @@ function test_the_embedding_api_runs_on_a_shared_host(): void
         assertTrue(glob("$directory/cache/*.php") !== [], "$label: the cache directory was used");
     }
 }
+
+function test_os_date_without_nl_langinfo_uses_the_c_locale(): void
+{
+    // a host that disabled nl_langinfo: os.date keeps the "C" locale's names and formats
+    $directory = scratchDirectory() . '/disabled-functions';
+    @mkdir($directory);
+    $format = '"!%c|%x|%X|%r|%a|%A|%b|%B|%p|%Ec|%EY|%Od"';
+    $script = "print(os.setlocale('en_US.utf8', 'time'))\nprint(os.date($format, 1700000000))\n";
+    $transpiled = writeAndTranspile($directory, 'date_locale.lua', $script);
+    $expected = [
+        0,
+        "en_US.utf8\nTue Nov 14 22:13:20 2023|11/14/23|22:13:20|10:13:20 PM|Tue|Tuesday|Nov|November|PM"
+            . "|Tue Nov 14 22:13:20 2023|2023|14\n",
+        '',
+    ];
+    $reference = runCommand(['lua5.4', '-e', "print('en_US.utf8') print(os.date($format, 1700000000))"]);
+    assertSame($expected, $reference, 'lua5.4 in the C locale');
+    foreach ([[realpath(REPO_ROOT . '/bin/lua'), 'date_locale.lua'], [$transpiled]] as $arguments) {
+        $result = runCommand(
+            ['php', ...OPCACHE_ON_NEW_FILES, ...disabling(['nl_langinfo']), ...$arguments],
+            '',
+            $directory,
+        );
+        assertSame($expected, $result, basename($arguments[0]));
+    }
+}

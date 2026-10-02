@@ -167,7 +167,7 @@ final class GlobalState
 
     /**
      * lauxlib.h: lua_writestring: $bytes to standard output, charged to the
-     * budget first (a sink copies them: PHP's output buffer, a collector)
+     * budget first (a sink copies them: C's stdout buffer, a collector)
      */
     public function writeOutput(string $bytes): void
     {
@@ -188,7 +188,7 @@ final class GlobalState
         $this->errorOutput->write($bytes);
     }
 
-    /** fflush(stdout): only the process's standard output has a buffer to flush */
+    /** fflush(stdout): only the process's standard output (C's stdout) has a buffer to flush */
     public function flushOutput(): void
     {
         if ($this->output instanceof StandardOutput) {

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace LuaPhp\Lib;
 
+use LuaPhp\Lib\Io\CFile;
 use LuaPhp\Runtime\Auxiliary;
 use LuaPhp\Runtime\Budget;
 use LuaPhp\Runtime\Calls;
@@ -240,13 +241,17 @@ final class PackageLib
     ** =======================================================
     */
 
-    // loadlib.c: readable
+    /**
+     * loadlib.c: readable. $filename is a plain path, as for C's fopen:
+     * never a PHP stream wrapper ("php://memory" names a file in a
+     * directory "php:", see CFile::plainPath).
+     */
     private static function readable(string $filename): bool
     {
         if ($filename === '') {
             return false;  // fopen("") fails (PHP's fopen throws instead)
         }
-        $file = @fopen($filename, 'r');  // try to open file
+        $file = @fopen(CFile::plainPath($filename), 'r');  // try to open file
         if ($file === false) {
             return false;  // open failed
         }

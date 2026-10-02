@@ -19,7 +19,7 @@ use LuaPhp\Runtime\Vm;
 
 /**
  * Port of loslib.c: the os library. Dates and times go through CTime
- * (C's time.h as glibc behaves in the "C" locale).
+ * (C's time.h as glibc implements it).
  *
  * @internal
  */
@@ -28,6 +28,9 @@ final class OsLib
     // loslib.c: LUA_STRFTIMEOPTIONS (C99 specification)
     private const LUA_STRFTIMEOPTIONS = 'aAbBcCdDeFgGhHIjmMnprRStTuUVwWxXyYzZ%'
         . '||' . 'EcECExEXEyEY' . 'OdOeOHOIOmOMOSOuOUOVOwOWOy';
+
+    // loslib.c: SIZETIMEFMT (the buffer for the result of one conversion)
+    private const SIZETIMEFMT = 250;
 
     // loslib.c: LUA_TMPNAMTEMPLATE "/tmp/lua_XXXXXX" without the "XXXXXX"
     private const TMPNAM_TEMPLATE_PREFIX = '/tmp/lua_';
@@ -302,7 +305,7 @@ final class OsLib
             }
             $result .= substr($format, $position, $percentPosition - $position);
             $conversion = self::checkOption($L, $format, $percentPosition + 1);
-            $result .= CTime::strftime('%' . $conversion, $tm);
+            $result .= CTime::strftime('%' . $conversion, $tm, self::SIZETIMEFMT);
             $position = $percentPosition + 1 + \strlen($conversion);
         }
         return [$result];

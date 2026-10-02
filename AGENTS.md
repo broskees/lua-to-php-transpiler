@@ -530,10 +530,14 @@ Lua string keys and integer keys distinct.
   `allowhook` while the hook runs; `Calls::protectedRun` restores it.
 - **PHP hygiene.** `Standalone::configurePhp()`: PHP warnings become
   exceptions (a crash, never output; the handler is
-  `PhpErrors::throwAsException`), exception traces drop arguments, stdout
-  is buffered (PHP's output buffer is C's stdout buffer: `print` writes to
-  `StandardOutput` and then flushes, like lua_writeline;
-  `Standalone::flushStdout()` before stderr/exit). Embedded code gets none
+  `PhpErrors::throwAsException`), exception traces drop arguments, and
+  PHP's shutdown (also after a fatal error) flushes C's stdout. No PHP
+  output buffer and no echo: C's stdout is `CFile::standardOutput()` (see
+  Files and processes), which `print` (`StandardOutput`, then a flush, like
+  lua_writeline), io.stdout and lua.c's own output (`Standalone::
+  writeStdout/flushStdout`) share; PHP's own output would end the process
+  (exit status 255) at a write error Lua must see. lua.c's messages go to
+  stderr without flushing stdout, as l_message does. Embedded code gets none
   of this process-wide (see Embedding conventions). It leaves memory_limit alone: lua2php output and any PHP
   that embeds the runtime keep the limit PHP was started with. bin/lua,
   bin/lua2php (a build tool; in directory mode a file that fails is
@@ -569,8 +573,23 @@ Lua string keys and integer keys distinct.
 - **Files and processes.** A file handle is a `Userdata` (metatable
   registry["FILE*"]) whose payload is `Lib\Io\LuaStream` (luaL_Stream) holding
   a `Lib\Io\CFile`, the emulated C `FILE *` with glibc's buffering rules
-  (Lua can observe them through a second handle). Standard output writes go
-  to the state's output sink like `print` (see Embedding conventions). C's `errno` is `Lib\Io\Errno`
+  (Lua can observe them through a second handle): `_IO_file_doallocate`'s
+  st_blksize buffer, line buffering on a terminal (isatty), setvbuf, a
+  read flushing what was written first, and a line buffered stdout flushed
+  before a terminal's stdin reads (getc and line reads). The process has
+  one C stdout, `CFile::standardOutput()` on descriptor 1 (PHP's STDOUT
+  stream; seek and tell use the descriptor itself); a state's io.stdout
+  acts on it while the state's output is `StandardOutput`, else it writes
+  to the state's sink like `print` (see Embedding conventions). A failed
+  write or flush is the Lua error C reports (ENOSPC, EPIPE, EBADF...;
+  `StandardOutputTest`); print ignores it, and the exit status stays the
+  script's. PHP ignores SIGPIPE (php_cli.c), so a closed pipe is EPIPE, as
+  for lua5.4 started with SIGPIPE ignored (from a shell lua5.4 dies of the
+  signal instead). Lua-supplied file names are plain paths, never PHP
+  stream wrappers: every PHP file function on one goes through
+  `CFile::plainPath` ("php://memory" is a file in a directory "php:";
+  fopen, package.searchpath's readable, loadfile and lua2php's precompiled
+  files; `file_names_are_plain_paths.lua`). C's `errno` is `Lib\Io\Errno`
   (recovered from PHP's warning text); `Errno::fileResult/execResult` are
   luaL_fileresult/luaL_execresult. PHP's fopen and file_get_contents
   resolve paths themselves first and report any failure there as ENOENT
@@ -592,8 +611,22 @@ Lua string keys and integer keys distinct.
   Never pass PHP's STDIN/STDOUT/STDERR to
   `proc_open`: PHP seeks the descriptor to that stream's cached position;
   leave the descriptors out so the child inherits them. Dates/times:
-  `Lib\Os\CTime` (glibc gmtime/localtime/mktime/strftime, zone from TZ or
-  /etc/localtime, never PHP's default zone).
+  `Lib\Os\CTime` (glibc gmtime/localtime/mktime: mktime.c's
+  `__mktime_internal`, with its offset guess kept between calls; strftime:
+  strftime_l.c), never PHP's default zone or zone database. The zone is
+  `Lib\Os\TimeZone`, glibc's tzset.c and tzfile.c with their process-wide
+  state: TZ (or /etc/localtime) as a TZif file (":" ignored, absolute or
+  under TZDIR or /usr/share/zoneinfo; leap seconds, the POSIX TZ string
+  after the last transition), else a POSIX TZ string (no rule: posixrules'
+  transitions, read again at every mktime), else UTC under the name given;
+  C's int arithmetic wraps where glibc's does (`TimeZoneTest` compares
+  lua5.4 over many TZ values). strftime takes names and the %c %x %X %r
+  formats of the LC_TIME locale (os.setlocale) from nl_langinfo ("C" and
+  "POSIX", or no nl_langinfo: the C locale's); PHP's nl_langinfo gives
+  only the first era and no alternative digits (a list in C, cut at the
+  first NUL), so %E conversions outside the first era and %O conversions
+  of locales with alternative digits (ja_JP, fa_IR) differ from lua5.4
+  (`OsDateLocaleTest` builds locales with localedef under LOCPATH).
 
 ## Embedding conventions
 
@@ -605,14 +638,14 @@ their emitted code is byte-identical to code compiled before step
 counting existed, and a state without a budget charges nothing.
 
 - **Output.** `OutputSink::write($bytes)`; `GlobalState::$output`
-  (stdout) and `$errorOutput` (stderr) default to `StandardOutput` (PHP's
-  output buffer, flushed like lua_writeline) and `StandardError`, which
-  is the command line's behavior. Every write the runtime does for Lua
+  (stdout) and `$errorOutput` (stderr) default to `StandardOutput` (C's
+  stdout, `CFile::standardOutput()`, flushed like lua_writeline) and
+  `StandardError`, which is the command line's behavior. Every write the runtime does for Lua
   (print, io.write, io.stdout, io.stderr, warn, debug.debug) goes through
   `$G->writeOutput()` / `writeErrorOutput()`, which charge the budget
   first (over the limit nothing is written), and flushes through
-  `$G->flushOutput()`, which flushes only `StandardOutput` (it ends every
-  PHP output buffer: command line only). io.stdout/io.stderr are CFiles
+  `$G->flushOutput()`, which flushes only `StandardOutput` (command line
+  only: it writes the process's descriptor 1). io.stdout/io.stderr are CFiles
   bound to their state; on another sink their seek fails with ESPIPE,
   while io.stderr on `StandardError` still writes its own stream (write
   errors are seen). Never echo or write to STDOUT/STDERR for Lua directly.
@@ -709,7 +742,9 @@ counting existed, and a state without a budget charges nothing.
   tables and translations: pure functions of their keys), LightUserdata's
   WeakMap and `DebugInfo::$hookedFrames` (keyed by one state's objects),
   `Errno::$errno` (set and read within one library call, with no Lua or
-  host code in between), Teardown's queue. Process-wide and observable, so
+  host code in between), Teardown's queue, the time zone (TZ is the
+  process's; `Lib\Os\TimeZone` and mktime's offset guess keep glibc's
+  process-wide state). Process-wide and observable, so
   never in a sandbox profile: os.setlocale (the PHP process's locale),
   CFile's open files (io.popen and os.execute flush every state's files,
   as C's fflush(NULL) does), os.exit (ends PHP), io.read/debug.debug
