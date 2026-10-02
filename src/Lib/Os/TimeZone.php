@@ -74,6 +74,14 @@ final class TimeZone
     /** PHP's zone of the zone file open_basedir forbids to read (see useBundledZone) */
     private static ?\DateTimeZone $bundledZone = null;
 
+    /**
+     * convert()'s last local zone and the times that have it, [from,
+     * until, zone]: a zone file's interval between two transitions, or the
+     * part of a year between a POSIX rule's changes (none with leap
+     * seconds); forgotten whenever the zone changes
+     */
+    private static ?array $lastLocal = null;
+
     /** C's int: $value wrapped to 32 bits, as gcc's arithmetic on int wraps */
     private static function int32(int $value): int
     {
@@ -89,6 +97,10 @@ final class TimeZone
     /** time.h: tzset (tzset.c: __tzset, tzset_internal (1)) */
     public static function tzset(): void
     {
+        $tz = getenv('TZ');
+        if (\is_string($tz) && $tz === self::$oldTz && $tz !== '' && $tz[0] !== ':') {
+            return;  // tzset_internal's "no change" (a plain value, as it was)
+        }
         self::tzsetInternal(true);
     }
 
@@ -96,29 +108,39 @@ final class TimeZone
      * tzset.c: __tz_convert's time zone part for $timer (C's localtime_r
      * and gmtime_r: tzset_internal (0)): [UTC offset, isdst, zone name,
      * leap second correction, extra leap seconds] for local time, or for
-     * UTC [0, 0, "GMT", correction, extra]. $utcYear is the year of $timer
-     * in UTC (null: not representable: __offtime failed). Null when the
-     * time cannot be converted.
+     * UTC [0, 0, "GMT", correction, extra]. Null when the time cannot be
+     * converted (__offtime failed for a POSIX rule's year; the caller's
+     * breakdown fails for the same times in UTC).
      *
      * @return array{int, int, string, int, int}|null
      */
-    public static function convert(int $timer, bool $useLocaltime, ?int $utcYear): ?array
+    public static function convert(int $timer, bool $useLocaltime): ?array
     {
-        self::tzsetInternal(false);
+        if (!self::$isInitialized) {
+            self::tzsetInternal(false);
+        }
+        if (!$useLocaltime) {
+            if (self::$useTzfile && self::$leaps !== []) {
+                return [0, 0, 'GMT', ...self::leapCorrection($timer)];
+            }
+            return [0, 0, 'GMT', 0, 0];
+        }
+        $last = self::$lastLocal;
+        if ($last !== null && $timer >= $last[0] && $timer < $last[1]) {
+            return $last[2];
+        }
         if (self::$useTzfile) {
-            [$offset, $isdst, $zone, $leapCorrection, $leapHit] = self::tzfileCompute($timer, $useLocaltime, $utcYear);
+            [$from, $until, $zone] = self::tzfileCompute($timer);
         } else {
+            $utcYear = CTime::utcYear($timer);
             if ($utcYear === null) {
                 return null;
             }
-            [$isdst, $zone, $offset] = self::tzCompute($timer, $utcYear);
-            $leapCorrection = 0;
-            $leapHit = 0;
+            [$isdst, $name, $offset, $from, $until] = self::tzCompute($timer, $utcYear);
+            $zone = [$offset, $isdst, $name, 0, 0];
         }
-        if (!$useLocaltime) {
-            return [0, 0, 'GMT', $leapCorrection, $leapHit];
-        }
-        return [$offset, $isdst, $zone, $leapCorrection, $leapHit];
+        self::$lastLocal = [$from, $until, $zone];
+        return $zone;
     }
 
     /** tzset.c: tzset_internal: read TZ (again only if $always and it changed) */
@@ -142,6 +164,7 @@ final class TimeZone
             return;  // no change, simply return
         }
         $tz ??= self::TZDEFAULT;  // no user specification; use the site-wide default
+        self::$lastLocal = null;
         self::$rules[0]['name'] = null;
         self::$rules[1]['name'] = null;
         self::$oldTz = $tz;  // save the value of 'tz'
@@ -379,6 +402,7 @@ final class TimeZone
     private static function tzsetParseTz(string $tz): void
     {
         // clear out old state and reset to unnamed UTC
+        self::$lastLocal = null;
         self::$rules = [self::zeroRule(''), self::zeroRule('')];
         $position = 0;
         // the standard time zone abbreviation and offset
@@ -480,9 +504,10 @@ final class TimeZone
 
     /**
      * tzset.c: __tz_compute for local time: [isdst, zone name, offset]
-     * of $timer, whose year in UTC is $utcYear
+     * of $timer, whose year in UTC is $utcYear, and the times of that year
+     * with the same result: from, until
      *
-     * @return array{int, string, int}
+     * @return array{int, string, int, int, int}
      */
     private static function tzCompute(int $timer, int $utcYear): array
     {
@@ -496,7 +521,20 @@ final class TimeZone
         } else {
             $isdst = $timer >= $start && $timer < $end ? 1 : 0;
         }
-        return [$isdst, self::$rules[$isdst]['name'] ?? '', self::$rules[$isdst]['offset']];
+        // the part of the year between the changes that holds $timer
+        $from = CTime::utcYearStart($utcYear);
+        $until = CTime::utcYearStart($utcYear + 1);
+        foreach ([$start, $end] as $change) {
+            if ($change <= $timer) {
+                $from = max($from, $change);
+            } else {
+                $until = min($until, $change);
+            }
+        }
+        if ($timer < $from || $timer >= $until) {  // (a year wrapped like C's int: no such part)
+            $from = $until = $timer;
+        }
+        return [$isdst, self::$rules[$isdst]['name'] ?? '', self::$rules[$isdst]['offset'], $from, $until];
     }
 
     /* }====================================================== */
@@ -513,6 +551,7 @@ final class TimeZone
         $wasUsingTzfile = self::$useTzfile;
         self::$useTzfile = false;
         self::$bundledZone = null;
+        self::$lastLocal = null;
         if ($file === '') {
             return;  // the empty string: UTC with no leap seconds
         }
@@ -572,6 +611,7 @@ final class TimeZone
             return;
         }
         self::$bundledZone = new \DateTimeZone($name);
+        self::$leaps = [];
         self::$useTzfile = true;
     }
 
@@ -768,6 +808,7 @@ final class TimeZone
             self::$useTzfile = false;
             return;
         }
+        self::$lastLocal = null;
         // correct the transition times for the user's standard and daylight offsets
         $isdst = false;
         foreach (self::$transitions as $i => $transition) {
@@ -794,68 +835,87 @@ final class TimeZone
     }
 
     /**
-     * tzfile.c: __tzfile_compute: [offset, isdst, zone name, leap second
-     * correction, extra leap seconds] at $timer
+     * tzfile.c: __tzfile_compute for local time: [from, until, [offset,
+     * isdst, zone name, leap second correction, extra leap seconds]] at
+     * $timer, from and until bounding the times with the same zone (none
+     * with leap seconds, or from PHP's zone database)
      *
-     * @return array{int, int, string, int, int}
+     * @return array{int, int, array{int, int, string, int, int}}
      */
-    private static function tzfileCompute(int $timer, bool $useLocaltime, ?int $utcYear): array
+    private static function tzfileCompute(int $timer): array
     {
         if (self::$bundledZone !== null) {
-            if (!$useLocaltime) {
-                return [0, 0, '', 0, 0];
-            }
             // PHP's zone database, as getTransitions gives the transition in force at $timer
             $transition = self::$bundledZone->getTransitions($timer, $timer)[0] ?? null;
             if ($transition === null) {
-                return [0, 0, 'UTC', 0, 0];
+                return [$timer, $timer, [0, 0, 'UTC', 0, 0]];
             }
-            return [$transition['offset'], $transition['isdst'] ? 1 : 0, $transition['abbr'], 0, 0];
+            return [$timer, $timer, [$transition['offset'], $transition['isdst'] ? 1 : 0, $transition['abbr'], 0, 0]];
         }
-        $offset = 0;
-        $isdst = 0;
-        $zone = '';
         $transitionCount = \count(self::$transitions);
-        if ($useLocaltime) {
-            if ($transitionCount === 0 || $timer < self::$transitions[0]) {
-                // before any transition: the first non-DST type (or the first if all are DST)
-                $type = 0;
-                $typeCount = \count(self::$types);
-                while ($type < $typeCount && self::$types[$type]['isdst']) {
-                    $type++;
-                }
-                if ($type === $typeCount) {
-                    $type = 0;
-                }
-            } elseif ($timer >= self::$transitions[$transitionCount - 1]) {
-                $type = self::$typeIndexes[$transitionCount - 1];  // use the last...
-                if (self::$tzspec !== null) {
-                    // ...unless the file ends with a POSIX TZ string: its rules
-                    self::tzsetParseTz(self::$tzspec);
-                    if ($utcYear !== null) {
-                        [$isdst, $zone, $offset] = self::tzCompute($timer, $utcYear);
-                        return [$offset, $isdst, $zone, ...self::leapCorrection($timer)];
-                    }
-                }
-            } else {
-                // the type of the last transition at or before $timer
-                $low = 0;
-                $high = $transitionCount - 1;
-                while ($low + 1 < $high) {
-                    $middle = intdiv($low + $high, 2);
-                    if ($timer < self::$transitions[$middle]) {
-                        $high = $middle;
-                    } else {
-                        $low = $middle;
-                    }
-                }
-                $type = self::$typeIndexes[$low];
+        if ($transitionCount === 0 || $timer < self::$transitions[0]) {
+            // before any transition: the first non-DST type (or the first if all are DST)
+            $type = 0;
+            $typeCount = \count(self::$types);
+            while ($type < $typeCount && self::$types[$type]['isdst']) {
+                $type++;
             }
-            $offset = self::$types[$type]['offset'] ?? 0;
-            $isdst = self::$types[$type]['isdst'] ?? 0;
-            $zone = self::zoneName(self::$types[$type]['idx'] ?? 0);
+            if ($type === $typeCount) {
+                $type = 0;
+            }
+            [$from, $until] = [PHP_INT_MIN, self::$transitions[0] ?? PHP_INT_MAX];
+        } elseif ($timer >= self::$transitions[$transitionCount - 1]) {
+            $type = self::$typeIndexes[$transitionCount - 1];  // use the last...
+            [$from, $until] = [self::$transitions[$transitionCount - 1], PHP_INT_MAX];
+            if (self::$tzspec !== null) {
+                // ...unless the file ends with a POSIX TZ string: its rules
+                self::tzsetParseTz(self::$tzspec);
+                $utcYear = CTime::utcYear($timer);
+                if ($utcYear !== null) {
+                    [$isdst, $zone, $offset, $ruleFrom, $ruleUntil] = self::tzCompute($timer, $utcYear);
+                    return self::withLeapSeconds($timer, max($from, $ruleFrom), $ruleUntil, $offset, $isdst, $zone);
+                }
+                [$from, $until] = [$timer, $timer];
+            }
+        } else {
+            // the type of the last transition at or before $timer
+            $low = 0;
+            $high = $transitionCount - 1;
+            while ($low + 1 < $high) {
+                $middle = intdiv($low + $high, 2);
+                if ($timer < self::$transitions[$middle]) {
+                    $high = $middle;
+                } else {
+                    $low = $middle;
+                }
+            }
+            $type = self::$typeIndexes[$low];
+            [$from, $until] = [self::$transitions[$low], self::$transitions[$low + 1]];
         }
-        return [$offset, $isdst, $zone, ...self::leapCorrection($timer)];
+        $offset = self::$types[$type]['offset'] ?? 0;
+        $isdst = self::$types[$type]['isdst'] ?? 0;
+        $zone = self::zoneName(self::$types[$type]['idx'] ?? 0);
+        return self::withLeapSeconds($timer, $from, $until, $offset, $isdst, $zone);
+    }
+
+    /**
+     * tzfileCompute's result with the leap second correction at $timer
+     * (with leap seconds the zone holds for $timer only)
+     *
+     * @return array{int, int, array{int, int, string, int, int}}
+     */
+    private static function withLeapSeconds(
+        int $timer,
+        int $from,
+        int $until,
+        int $offset,
+        int $isdst,
+        string $zone,
+    ): array {
+        if (self::$leaps === []) {
+            return [$from, $until, [$offset, $isdst, $zone, 0, 0]];
+        }
+        return [$timer, $timer, [$offset, $isdst, $zone, ...self::leapCorrection($timer)]];
     }
 
     /**

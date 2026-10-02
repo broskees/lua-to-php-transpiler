@@ -231,7 +231,7 @@ final class ChunkLoader
             $filename = DebugInfo::cString($filename);  // C's fopen and "@%s" see a C string
             $chunkname = '@' . $filename;
             $file = self::openFile($filename);
-            $contents = $file->readAll();
+            $contents = $file->readAll(8192);  // (lauxlib.c: getF reads BUFSIZ bytes at a time)
             $readFailed = $file->error;  // (a directory: C's fopen succeeds, its reads fail with EISDIR)
             $file->close();
             if ($readFailed) {

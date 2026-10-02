@@ -564,7 +564,7 @@ final class IoLib
                         [$success, $results[]] = self::readLine($f, false);
                         break;
                     case 'a':  // file
-                        $results[] = $f->readAll();  // read entire file
+                        $results[] = $f->readAll(self::LUAL_BUFFERSIZE);  // read entire file (liolib.c: read_all)
                         $success = true;  // always success
                         break;
                     default:

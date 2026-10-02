@@ -578,11 +578,21 @@ Lua string keys and integer keys distinct.
   (Lua can observe them through a second handle): `_IO_file_doallocate`'s
   st_blksize buffer, line buffering on a terminal (isatty), setvbuf, a
   read flushing what was written first, and a line buffered stdout flushed
-  before a terminal's stdin reads (getc and line reads). The process has
-  one C stdout, `CFile::standardOutput()` on descriptor 1 (PHP's STDOUT
-  stream; seek and tell use the descriptor itself); a state's io.stdout
+  when a line buffered stdin refills its buffer (`_IO_file_xsgetn`: getc,
+  lines and counts smaller than the buffer; a bigger count reads directly,
+  "a" refills from its second piece on; PHP's stream buffer stands for
+  glibc's). fflush(NULL) (`CFile::flushAll`: exit, os.exit, io.popen)
+  walks glibc's list of streams: the newest first, stdout last. The
+  process has one C stdout, `CFile::standardOutput()` on descriptor 1
+  (PHP's STDOUT stream), with glibc's own idea of its position (`_offset`:
+  unknown until a seek, then moved by its writes, not by other writers of
+  the descriptor; seeks use the descriptor itself); a state's io.stdout
   acts on it while the state's output is `StandardOutput`, else it writes
-  to the state's sink like `print` (see Embedding conventions). A failed
+  to the state's sink like `print` (see Embedding conventions). C's stdin
+  is one CFile too (`CFile::standardInput()`): every state's io.stdin, and
+  debug.debug's fgets (`getLine`). PHP's fopen cannot open
+  /proc/self/fd/N links to pipes or sockets (/dev/stdout on a pipe), which
+  Linux opens itself: `CFile::open` opens them as php://fd/N. A failed
   write or flush is the Lua error C reports (ENOSPC, EPIPE, EBADF...;
   `StandardOutputTest`); print ignores it, and the exit status stays the
   script's. SIGPIPE (decided 2026-10-02): bin/lua and lua2php scripts are C
@@ -627,7 +637,9 @@ Lua string keys and integer keys distinct.
   leave the descriptors out so the child inherits them. Dates/times:
   `Lib\Os\CTime` (glibc gmtime/localtime/mktime: mktime.c's
   `__mktime_internal`, with its offset guess kept between calls; strftime:
-  strftime_l.c), never PHP's default zone or zone database. The zone is
+  strftime_l.c, done directly for loslib.c's conversions in the "C" locale,
+  else by `Lib\Os\Strftime`, which only other locales load), never PHP's
+  default zone or zone database. The zone is
   `Lib\Os\TimeZone`, glibc's tzset.c and tzfile.c with their process-wide
   state: TZ (or /etc/localtime) as a TZif file (":" ignored, absolute or
   under TZDIR or /usr/share/zoneinfo; leap seconds, the POSIX TZ string
@@ -641,7 +653,15 @@ Lua string keys and integer keys distinct.
   that zone stands in (`TimeZone::useBundledZone`: PHP's transitions, no
   leap seconds); a file it does not name stays missing, as for glibc, and
   TZ unset is UTC there (readlink of /etc/localtime is forbidden too, as it
-  was before). strftime takes names and the %c %x %X %r
+  was before). Speed (within 5% of PHP's DateTimeZone before, or faster):
+  `TimeZone::convert` keeps the last local zone with the times it holds for
+  (between two transitions, or a POSIX rule's part of a year; none with
+  leap seconds), localtime breaks a time down once, os.date asks for the
+  LC_TIME locale once per call, strftime formats loslib.c's conversions
+  in the "C" locale directly (`os_date_conversions.lua` pins them all
+  against lua5.4), and os.time/os.date("*t") read and write a table
+  without a metatable directly (`fastpath_os_time_fields.lua`). strftime
+  takes names and the %c %x %X %r
   formats of the LC_TIME locale (os.setlocale) from nl_langinfo ("C" and
   "POSIX", or no nl_langinfo: the C locale's); PHP's nl_langinfo gives
   only the first era and no alternative digits (a list in C, cut at the
