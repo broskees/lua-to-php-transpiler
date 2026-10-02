@@ -497,6 +497,13 @@ Lua string keys and integer keys distinct.
   by-reference array functions leave the property a PHP reference (+32
   bytes), which `endTraversal` undoes. Light userdata:
   `LightUserdata::pointingTo($obj)`.
+- **String order.** `Vm::lessThan/lessEqual` (all string `<`/`<=`, so also
+  table.sort and math.min/max) follow lvm.c l_strcmp: strcoll per segment
+  between embedded '\0's (`Vm::compareStrings`), or strcmp while
+  `Vm::$collationIsByteOrder` (LC_COLLATE "C" or "POSIX": a C program
+  starts in "C"). os.setlocale sets it when it changes LC_COLLATE (or
+  LC_ALL); a host that changes the locale with PHP's setlocale() is not
+  seen, and without strcoll (disabled) strings compare as bytes.
 - **Patterns.** `Lib\String\MatchState` ports lstrlib.c's matcher; the
   drivers (str_find_aux, gmatch_aux, str_gsub) stay C's and ask it only
   `nextCandidate`/`matchAt`, which run the pattern's exactly equivalent
@@ -768,7 +775,8 @@ counting existed, and a state without a budget charges nothing.
   WeakMap and `DebugInfo::$hookedFrames` (keyed by one state's objects),
   `Errno::$errno` (set and read within one library call, with no Lua or
   host code in between), Teardown's queue. Process-wide and observable, so
-  never in a sandbox profile: os.setlocale (the PHP process's locale),
+  never in a sandbox profile: os.setlocale (the PHP process's locale, and
+  with it string order: `Vm::$collationIsByteOrder`),
   CFile's open files (io.popen and os.execute flush every state's files,
   as C's fflush(NULL) does), os.exit (ends PHP), io.read/debug.debug
   (the process's stdin). collectgarbage("count") of an embedded state is

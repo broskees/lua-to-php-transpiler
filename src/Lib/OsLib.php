@@ -362,6 +362,12 @@ final class OsLib
             $locale = DebugInfo::cString($locale);
             // PHP reads "0" as a query; for C it is just an unknown locale name
             $result = $locale === '0' ? false : \setlocale($categories[$option], $locale);
+            if ($result !== false && ($categories[$option] === LC_ALL || $categories[$option] === LC_COLLATE)) {
+                // string order (Vm::compareStrings) follows LC_COLLATE; without strcoll, byte order is all there is
+                $collation = \setlocale(LC_COLLATE, '0');
+                Vm::$collationIsByteOrder = $collation === 'C' || $collation === 'POSIX'
+                    || !\function_exists('strcoll');
+            }
         }
         return [$result === false ? null : $result];
     }
