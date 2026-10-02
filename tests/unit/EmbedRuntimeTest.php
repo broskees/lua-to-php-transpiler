@@ -559,6 +559,8 @@ function test_library_functions_charge_in_proportion_to_their_work(): void
         'string.char' => 'local s = string.char(table.unpack(list(10000, 65)))',
         'string.byte' => 'local n = select("#", string.byte(bigString(20000, "x"), 1, -1))',
         'string.format' => 'local s = string.format("%s", bigString(1e6, "x"))',
+        // (the second '%p' of a long string reads its reference count from a dump of the whole string)
+        'string.format %p' => 'local s = bigString(2^20, "x") local p = string.format("%p %p", s, s)',
         'string.upper' => 'local s = bigString(1e6, "x"):upper()',
         'string.pack' => 'local s = string.pack("z", bigString(1e6, "x"))',
         'load' => 'load(bigString(20000, " "))',

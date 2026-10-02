@@ -308,6 +308,6 @@ final class Utf8Lib
         $lax = ($args[1] ?? null) !== null && ($args[1] ?? null) !== false;
         $s = Auxiliary::checkString($L, $args, 1);
         Auxiliary::argCheck($L, !self::isContinuation($s, 0), 1, self::MSG_INVALID);
-        return [$lax ? $laxIterator : $strictIterator, $args[0], 0];
+        return [$lax ? $laxIterator : $strictIterator, $s, 0];  // (luaL_checkstring converted a number in place)
     }
 }

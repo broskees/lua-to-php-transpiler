@@ -259,6 +259,21 @@ const SCENARIOS = <<<'PHP'
             . ' if n == 0 then error("deep") end return (package.loaded[name].f(n - 1)) end}'
             . ' package.loaded[name].f(15)'
         ),
+        // ('%p' of a long string reads reference counts from a dump of the whole string)
+        'format-pointer-host-data' => static fn () => script(
+            'local a = string.format("%p", data) return a == string.format("%p", data)',
+            LIMITS,
+            $hostData(str_repeat('x', 48 << 20)),
+        ),
+        'format-pointer-collect' => static fn () => script(
+            'local a = string.format("%p", data) collectgarbage() return 1',
+            LIMITS,
+            $hostData(str_repeat('x', 48 << 20)),
+        ),
+        'concat-many-integers' => static fn () => script(
+            'local t = {} for i = 1, 1500000 do t[i] = i end return #table.concat(t), #table.concat(t, "", 1, #t)',
+            ['seconds' => 60.0],
+        ),
         // 5. compiling big scripts
         'compile-large' => static fn () => script(
             large(),
@@ -394,6 +409,11 @@ function test_library_calls_check_big_string_copies(): void
         'print-host-data' => ['limit', 'memory'],
         // a traceback names functions after their module in package.loaded
         'traceback-module-name' => ['limit', 'memory'],
+        'format-pointer-host-data' => ['limit', 'memory'],
+        // the collector keeps a numbered string it has no room to look at
+        'format-pointer-collect' => ['result', [[1], '']],
+        // joining many small pieces: what they need on the way fits, as it does in lua5.4
+        'concat-many-integers' => ['result', [[9388896, 9388896], '']],
     ]);
 }
 

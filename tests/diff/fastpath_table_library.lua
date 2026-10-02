@@ -107,6 +107,25 @@ local big = {}
 for i = 1, 10000 do big[i] = i % 10 end
 print(#table.concat(big), #table.concat(big, ", "))
 print(table.concat({"a\0b", "c"}, "\0") == "a\0b\0c")
+-- long lists, joined a part at a time (as a luaL_Buffer grows): around each part's end
+for _, n in ipairs{1023, 1024, 1025, 2049, 4095, 4096, 4097, 8193} do
+  local t = {}
+  for i = 1, n do t[i] = i % 7 == 0 and "s" .. i or i end
+  local plain, separated, port = table.concat(t), table.concat(t, ", "), table.concat(t, "-", 1, n)
+  print(n, #plain, #separated, #port, plain:sub(-12), separated:sub(-12), port:sub(1015 * 5, 1035 * 5))
+  print(separated:sub(4088 * 6, 4108 * 6), table.concat(t, "+", 1020, 1030), table.concat(t, "", n - 3))
+end
+local mixed = {}
+for i = 1, 5000 do mixed[i] = i end
+mixed[4500] = {}  -- found after some parts were joined: the port's error
+try(table.concat, mixed)
+mixed[4500] = 1.5  -- a float: the port joins it
+print(#table.concat(mixed), table.concat(mixed, ",", 4495, 4505))
+local empties = {}
+for i = 1, 5000 do empties[i] = "" end
+print(#table.concat(empties), #table.concat(empties, "ab"), #table.concat(empties, "ab", 2, 4999))
+local viaIndex = setmetatable({}, {__index = function (_, i) return i end, __len = function () return 5000 end})
+print(#table.concat(viaIndex, ";"), table.concat(viaIndex, ";", 4094, 4098))
 
 print("-- unpack")
 show(table.unpack({1, 2, 3}))

@@ -403,9 +403,16 @@ Lua string keys and integer keys distinct.
   checked. Lua's own limits come first ("resulting string too large").
   Covered: string.rep/sub/upper/lower/reverse/format/gsub/pack, pattern
   captures, `..` (emitted code joins strings inline only up to 64 KB in
-  all, else `Vm::concat`), table.concat, io reads ('a', lines, counts),
-  os.date, package.searchpath, load's reader, string.unpack's strings,
-  output (print, io.write, warn: sinks copy it), messages that copy a
+  all, else `Vm::concat`), table.concat (pieces joined
+  `TableLib::PIECES_PER_PART` (1024) at a time, the parts checked as they
+  grow like a luaL_Buffer: one implode of all pieces needed 64 bytes per
+  piece besides the result), string.format('%p') of a long string equal
+  to one it numbered (reading reference counts dumps the whole string,
+  twice its length: `StringFormat::PROBE_BYTES_PER_BYTE`, so a huge one is
+  "not enough memory" where lua5.4 prints a pointer; the collector keeps
+  a numbered string it has no room to look at), io reads ('a', lines,
+  counts), os.date, package.searchpath, load's reader, string.unpack's
+  strings, output (print, io.write, warn: sinks copy it), messages that copy a
   string (a position prefix: luaL_error, luaG_runerror, error,
   coroutine.wrap; a `__name` in a type name or tostring; a module's name
   from package.loaded in a traceback or argument error; require's
@@ -674,7 +681,8 @@ counting existed, and a state without a budget charges nothing.
   `GlobalState::$countSteps` makes load() compile so, and LoadCache keys
   include the flag. Libraries charge in proportion to their work, a step
   per element or per `Budget::BYTES_PER_STEP` (64) bytes: rep, upper,
-  lower, reverse, byte, char, format, pack, find/match/gmatch/gsub
+  lower, reverse, byte, char, format (and the dumps of '%p' of a long
+  string), pack, find/match/gmatch/gsub
   (MatchState: bytes scanned per search, the port's match() calls in
   batches of 256), table concat, insert/remove shifts, move, unpack, sort
   (per partition), utf8 char/codepoint/len/offset/codes, load (a step per

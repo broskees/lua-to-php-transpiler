@@ -44,6 +44,14 @@ final class StringFormat
     private const QUOTED_SPECIALS = "\"\\\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f"
         . "\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f\x7f";
 
+    /**
+     * Reading a long string's reference count (referenceCount) costs twice
+     * its length for a moment: debug_zval_dump writes the whole string into
+     * an output buffer, which ob_get_clean copies (measured: 2.0 times).
+     * PHP has no other way to read it, so the memory is checked first.
+     */
+    private const PROBE_BYTES_PER_BYTE = 2;
+
     /** holds a string while isSameString counts references */
     private static ?string $extraCopy = null;
 
@@ -412,6 +420,9 @@ final class StringFormat
      * a new string make a new PHP string. (Exceptions: PHP functions that
      * return an unchanged argument, such as substr of a whole string, so
      * string.sub(s, 1) keeps the address of a long s, where C makes a copy.)
+     * Telling an equal string apart costs memory and time in proportion to
+     * its length (PROBE_BYTES_PER_BYTE), where C only prints a pointer: a
+     * string too big to look at is "not enough memory".
      */
     private static function stringAddress(GlobalState $G, string $s): string
     {
@@ -419,7 +430,12 @@ final class StringFormat
             return sprintf('0x5556%08x', crc32($s));
         }
         foreach ($G->addressedLongStrings as $index => $addressedString) {
-            if ($addressedString === $s && self::isSameString($addressedString, $s)) {
+            if ($addressedString !== $s) {
+                continue;
+            }
+            MemoryLimit::reserve(self::PROBE_BYTES_PER_BYTE * \strlen($s), $G->budget);
+            $G->budget?->chargeSteps(intdiv(2 * \strlen($s), Budget::BYTES_PER_STEP));  // (isSameString's two dumps)
+            if (self::isSameString($addressedString, $s)) {
                 return sprintf('0x5557%08x', $index * 16);
             }
         }
@@ -430,7 +446,9 @@ final class StringFormat
     /**
      * Drop the long strings that nothing but the address table refers to
      * any more. The collector calls this at every cycle: C frees such a
-     * string, so keeping it would only leak memory.
+     * string, so keeping it would only leak memory. A string there is no
+     * room to look at now (PROBE_BYTES_PER_BYTE) is kept until a cycle
+     * that has it: the collector cannot fail.
      */
     public static function forgetUnreferencedStrings(GlobalState $G): void
     {
@@ -442,6 +460,13 @@ final class StringFormat
         $countWhenUnreferenced = self::referenceCount($G->addressedLongStrings['probe']);
         unset($G->addressedLongStrings['probe']);
         foreach (array_keys($G->addressedLongStrings) as $index) {
+            $probeBytes = self::PROBE_BYTES_PER_BYTE * \strlen($G->addressedLongStrings[$index]);
+            if (
+                $probeBytes > MemoryLimit::CHECK_ABOVE
+                && !(MemoryLimit::fits($probeBytes) && ($G->budget?->memoryFits($probeBytes) ?? true))
+            ) {
+                continue;
+            }
             if (self::referenceCount($G->addressedLongStrings[$index]) === $countWhenUnreferenced) {
                 unset($G->addressedLongStrings[$index]);
             }
