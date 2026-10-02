@@ -12,7 +12,7 @@ namespace Tests\EmbedHostSafetyTest;
  * a review found around the limits: '__call' cycles, host functions that
  * catch what stopped the run, converting huge values to PHP, library
  * calls that copy big strings, compiling big scripts, single calls with
- * many results.
+ * many results, many values each too small to check on its own.
  */
 
 /** runs scenario $name (see SCENARIOS); its outcome */
@@ -56,7 +56,7 @@ const SCENARIOS = <<<'PHP'
     declare(strict_types=1);
     require $argv[1] . '/src/autoload.php';
 
-    use LuaPhp\Embed\{Environment, Limits, LimitExceeded, LuaFunction, RunContext, ScriptError};
+    use LuaPhp\Embed\{Environment, Limits, LimitExceeded, Lua, LuaFunction, RunContext, ScriptError};
     use LuaPhp\Embed\Loader\ArrayLoader;
 
     const LIMITS = ['steps' => 10_000_000, 'memoryBytes' => 32 << 20, 'seconds' => 2.0];
@@ -69,6 +69,11 @@ const SCENARIOS = <<<'PHP'
     }
     const LONG_KEY_CHAIN = 'local k = string.rep("k", 1000000) local t = {} local c = t'
         . ' for i = 1, 90 do c[k] = {} c = c[k] end ';
+    /** r: $n times one list of 1000 integers, each a copy of 16 KB in PHP (under the 64 KB between checks) */
+    function sharedLists(int $n): string
+    {
+        return "local t = {} for i = 1, 1000 do t[i] = i end local r = {} for i = 1, $n do r[i] = t end ";
+    }
 
     /**
      * runs script $code in a new sandbox (after $setup($sandbox)) of an
@@ -297,6 +302,41 @@ const SCENARIOS = <<<'PHP'
             . ' local function keep(...) for i = 1, 1000 do kept[i] = {...} end end'
             . ' keep(table.unpack(big)) return #kept'
         ),
+        // 7. many values, each too small to check on its own
+        'many-results' => static fn () => script(sharedLists(8000) . 'return table.unpack(r)'),
+        'many-results-over-budget' => static fn () => script(sharedLists(2000) . 'return table.unpack(r)'),
+        'many-host-arguments' => static fn () => script(
+            sharedLists(8000) . 'return take(table.unpack(r))',
+            LIMITS,
+            static function ($sandbox): void {
+                $sandbox->setGlobal('take', static fn (array ...$lists): int => \count($lists));
+            },
+        ),
+        'many-host-results' => static fn () => script(
+            'return select("#", many())',
+            LIMITS,
+            static function ($sandbox): void {
+                $sandbox->setGlobal('many', static fn () => Lua::multiple(...array_fill(0, 8000, range(1, 1000))));
+            },
+        ),
+        'many-arguments' => static fn () => withSandbox(LIMITS, static function ($sandbox): array {
+            return $sandbox->load('return select("#", ...)')->call(...array_fill(0, 8000, range(1, 1000)));
+        }),
+        'get-global-many-times' => static fn () => withSandbox(LIMITS, static function ($sandbox): string {
+            $sandbox->load('t = {} for i = 1, 1000 do t[i] = i end')->call();
+            $kept = [];
+            for ($i = 0; $i < 8000; $i++) {
+                $kept[] = $sandbox->getGlobal('t');
+            }
+            return 'kept ' . \count($kept);
+        }),
+        'set-global-many-times' => static fn () => withSandbox(LIMITS, static function ($sandbox): string {
+            $list = range(1, 1000);
+            for ($i = 0; $i < 8000; $i++) {
+                $sandbox->setGlobal("t$i", $list);
+            }
+            return 'set';
+        }),
     ];
     echo json_encode(($scenarios[$argv[2]])(), JSON_INVALID_UTF8_SUBSTITUTE | JSON_PARTIAL_OUTPUT_ON_ERROR);
     PHP;
@@ -382,5 +422,20 @@ function test_single_calls_with_many_results_check_memory(): void
         'require-name-8m' => ['limit', 'memory'],
         // copying many values in one instruction ('...') counts them as steps, so the memory is checked
         'vararg-copies' => ['limit', 'memory'],
+    ]);
+}
+
+function test_many_small_conversions_add_up_to_the_memory_limit(): void
+{
+    assertOutcomes([
+        // results, arguments of PHP functions, their results, arguments from PHP: one list is one conversion
+        'many-results' => ['limit', 'memory'],
+        'many-results-over-budget' => ['limit', 'memory'],
+        'many-host-arguments' => ['limit', 'memory'],
+        'many-host-results' => ['limit', 'memory'],
+        'many-arguments' => ['limit', 'memory'],
+        // what PHP converts call by call (and keeps) counts on until the host's memory runs short
+        'get-global-many-times' => ['limit', 'memory'],
+        'set-global-many-times' => ['limit', 'memory'],
     ]);
 }

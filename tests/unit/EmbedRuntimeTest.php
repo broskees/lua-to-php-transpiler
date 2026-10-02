@@ -658,6 +658,18 @@ function test_coroutines_alive_at_once_are_limited_and_finished_ones_do_not_coun
         end
         LUA . "\n");
     assertSame('', $printed);
+
+    // at the limit, the one suspended coroutine nothing reaches any more is freed for the new one
+    $L = embeddedState(SAFE, new Budget(coroutines: 1));
+    $printed = printedBy($L, <<<'LUA'
+        local function spawn()
+          local co = coroutine.create(function() coroutine.yield() end)
+          assert(coroutine.resume(co))
+        end
+        spawn()
+        print(type(coroutine.create(function() end)))
+        LUA);
+    assertSame("thread\n", $printed);
 }
 
 function test_call_depth_is_lua_s_catchable_stack_overflow(): void

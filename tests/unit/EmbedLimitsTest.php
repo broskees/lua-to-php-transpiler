@@ -231,6 +231,79 @@ function test_host_sinks(): void
     assertSame('disk full', assertThrows(\RuntimeException::class, static fn () => $failing->run('p.lua')));
 }
 
+function test_an_output_callback_cannot_let_a_stopped_run_go_on(): void
+{
+    // the callback catches the LimitExceeded that stopped the run: the run still ends with it
+    $caught = null;
+    $written = '';
+    $sandbox = null;
+    $environment = new Environment(
+        loader: new ArrayLoader(['x.lua' => 'print(123) print(456) return 42']),
+        limits: new Limits(steps: 10000, memoryBytes: 8 << 20, seconds: 1, sourceBytes: 1000),
+        output: static function (string $bytes) use (&$caught, &$written, &$sandbox): void {
+            $written .= $bytes;
+            if ($caught !== null) {
+                return;
+            }
+            try {
+                $sandbox->load(str_repeat(' ', 1001));
+            } catch (LimitExceeded $exceeded) {
+                $caught = $exceeded;
+            }
+        },
+    );
+    $sandbox = $environment->newSandbox();
+    $thrown = null;
+    try {
+        $sandbox->run('x.lua');
+    } catch (LimitExceeded $thrown) {
+    }
+    assertSame('source', $caught?->limit);
+    assertSame('source', $thrown?->limit, 'the run ends with what stopped it');
+    assertTrue($thrown === $caught, 'the same LimitExceeded');
+    assertSame('123', $written, 'nothing ran after it (print writes its newline apart)');
+    assertTrue($sandbox->isClosed());
+    // the time the callback took counts, checked as soon as it returns
+    $written = '';
+    $slow = new Environment(
+        loader: new ArrayLoader(['x.lua' => 'print(1) print(2) return 3']),
+        limits: new Limits(seconds: 0.05),
+        output: static function (string $bytes) use (&$written): void {
+            $written .= $bytes;
+            usleep(100_000);
+        },
+    );
+    assertSame('seconds', limitOf(static fn () => $slow->run('x.lua')));
+    assertSame('1', $written);
+    // outside its runs it stops nothing: another state's io.popen flushes every file (as C's fflush(NULL)),
+    // and a sandbox dropped after a stopped run flushes its own (a fully buffered io.stderr keeps one byte,
+    // as glibc's: stderr's buffer is one byte)
+    $written = '';
+    $buffering = new Environment(
+        libraries: Libraries::ALL,
+        limits: new Limits(steps: 10000, seconds: 0.01),
+        output: static function (string $bytes) use (&$written): void {
+            $written .= $bytes;
+        },
+    );
+    $writeAndKeepOneByte = 'io.stderr:setvbuf("full") io.stderr:write(...) io.stderr:write("!")';
+    $live = $buffering->newSandbox();
+    $live->load($writeAndKeepOneByte)->call('live');
+    assertSame('live', $written);
+    usleep(20_000);  // (its time is up)
+    $flushing = (new Environment(libraries: Libraries::ALL))->newSandbox();
+    assertSame([true, 'exit', 0], $flushing->load('return io.popen("true"):close()')->call());
+    assertSame('live!', $written);
+    $stopped = $buffering->newSandbox();
+    $spin = $stopped->load($writeAndKeepOneByte . ' while true do end');
+    assertSame('steps', limitOf(static fn () => $spin->call('stop')));
+    unset($spin);
+    assertSame('live!stop', $written);
+    unset($stopped);
+    gc_collect_cycles();
+    assertSame('live!stop!', $written);
+}
+
 function test_the_safe_profile_leaves_out_what_the_brief_lists(): void
 {
     $cases = [
@@ -336,6 +409,23 @@ function test_limits_are_per_run(): void
     assertSame('steps', limitOf(static fn () => $a->run('spin.lua', [1_000_000])));
     assertTrue($a->isClosed() && !$b->isClosed());
     assertSame([10], $b->run('spin.lua', [10])->values);
+}
+
+function test_arguments_are_converted_in_the_run_they_start(): void
+{
+    // memory the host allocated between two runs is not the next run's: its arguments (a list big enough to
+    // check the memory) count from its own start, in a script run and in a call
+    $environment = new Environment(
+        loader: new ArrayLoader(['count.lua' => 'return #...']),
+        limits: new Limits(memoryBytes: 8 << 20),
+    );
+    $sandbox = $environment->newSandbox();
+    $function = $sandbox->load('return 42');
+    $hostOnly = str_repeat('x', 16 << 20);
+    assertSame([2000], $sandbox->run('count.lua', [range(1, 2000)])->values);
+    $moreHostOnly = str_repeat('y', 16 << 20);
+    assertSame([42], $function->call(range(1, 2000)));
+    assertSame([16 << 20, 16 << 20], [\strlen($hostOnly), \strlen($moreHostOnly)], '(kept alive until here)');
 }
 
 function test_a_sandbox_run_from_another_keeps_its_own_limits(): void

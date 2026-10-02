@@ -176,7 +176,8 @@ functions); `LuaPhp\Embed\Lua::run('return 1 + 1')` is the one-liner.
   are a `ConversionError` naming the path (`result[1].tags[3]`). A table
   that holds the same subtable twice comes back as two copies, so
   converting counts against the memory limit (results, error values,
-  `getGlobal`, `toArray`, `array` parameters): a value too big is
+  arguments, `getGlobal`, `toArray`, `array` parameters; many small values
+  add up as one big one does): a value too big is
   `LimitExceeded('memory')`, also with `Limits::none()`, never a PHP
   fatal error.
 - **Limits** (`Limits`; `Limits::none()` for none): steps (about one per
@@ -187,7 +188,7 @@ functions); `LuaPhp\Embed\Lua::run('return 1 + 1')` is the one-liner.
   script, module or `load()` chunk: 2 MB by default, a bigger one is
   `LimitExceeded('source')` before it is compiled). Going over one is
   `LimitExceeded` (`->limit`, `->usage`); no Lua code runs after it, even
-  if a PHP function catches it.
+  if a PHP function or the output callable catches it.
 - **Compiling counts.** A script is compiled the first time its exact
   bytes appear, and that takes memory: up to about 64 bytes per byte of
   Lua, then 20 times the size of the PHP it becomes (almost nothing for a
