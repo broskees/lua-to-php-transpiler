@@ -35,9 +35,12 @@ use LuaPhp\Runtime\NativeFunction;
  *
  * A table that holds the same subtable twice becomes two copies, so a
  * small value can make a huge one (t = {t, t} twenty times: a million
- * arrays). A conversion counts what it builds (TABLE_BYTES per table,
- * ELEMENT_BYTES per element) and, every CHECK_BYTES of it, asks the
- * sandbox for the memory (State::reserveConversionMemory: past the run's
+ * arrays). Conversions count what they build (TABLE_BYTES per table,
+ * ELEMENT_BYTES per element) in the sandbox's State::$conversionBytes,
+ * which goes on from one value and one call to the next, so many small
+ * values (a list of results or arguments, values PHP reads one at a time)
+ * add up as one big value does; every CHECK_BYTES of it, the sandbox is
+ * asked for the memory (State::reserveConversionMemory: past the run's
  * memory limit or what memory_limit leaves, LimitExceeded('memory')).
  * Paths are made only for an error, from the keys on the way (strings
  * are shared, not copied, while converting), and show at most
@@ -72,8 +75,7 @@ final class Convert
             return self::scalarOrObjectToLua($value, $path, $state);
         }
         $keys = [];
-        $bytes = 0;
-        return self::arrayToLua($value, $path, $state, $keys, $bytes);
+        return self::arrayToLua($value, $path, $state, $keys);
     }
 
     /** the Lua value $value of sandbox $state as a PHP value (tables copied) */
@@ -85,8 +87,7 @@ final class Convert
         if ($value instanceof RuntimeTable) {
             $tablesOnPath = [];
             $keys = [];
-            $bytes = 0;
-            return self::tableToPhp($value, $path, $state, $tablesOnPath, $keys, $bytes);
+            return self::tableToPhp($value, $path, $state, $tablesOnPath, $keys);
         }
         return self::toHandle($value, $state);
     }
@@ -145,7 +146,6 @@ final class Convert
         string $path,
         ?State $state,
         array &$keys,
-        int &$bytes,
     ): RuntimeTable {
         if (\count($keys) >= self::MAX_DEPTH) {
             throw new ConversionError(
@@ -154,7 +154,7 @@ final class Convert
             );
         }
         if ($state !== null) {
-            self::charge($state, $bytes, \count($array));
+            self::charge($state, \count($array));
         }
         $isList = array_is_list($array);
         // (a list as a constructor sizes it: lua_createtable)
@@ -162,7 +162,7 @@ final class Convert
         foreach ($array as $key => $item) {
             if (\is_array($item)) {
                 $keys[] = $key;
-                $item = self::arrayToLua($item, $path, $state, $keys, $bytes);
+                $item = self::arrayToLua($item, $path, $state, $keys);
                 array_pop($keys);
             } elseif (!\is_scalar($item)) {
                 $keys[] = $key;
@@ -193,7 +193,6 @@ final class Convert
         State $state,
         array &$tablesOnPath,
         array &$keys,
-        int &$bytes,
     ): array {
         $id = spl_object_id($table);
         if (isset($tablesOnPath[$id])) {
@@ -221,7 +220,7 @@ final class Convert
         $arr = $table->arr;
         $hash = $table->hash;
         $count = \count($arr);
-        self::charge($state, $bytes, $count + \count($hash));
+        self::charge($state, $count + \count($hash));
         $tablesOnPath[$id] = true;
         $isList = $hash === [];
         for ($key = 1; $isList && $key <= $count; $key++) {
@@ -232,13 +231,13 @@ final class Convert
             for ($key = 1; $key <= $count; $key++) {
                 $item = $arr[$key];
                 $result[] = \is_object($item)
-                    ? self::elementToPhp($item, $key, $path, $state, $tablesOnPath, $keys, $bytes)
+                    ? self::elementToPhp($item, $key, $path, $state, $tablesOnPath, $keys)
                     : $item;
             }
         } else {
             foreach ($arr as $key => $item) {
                 $result[$key] = \is_object($item)
-                    ? self::elementToPhp($item, $key, $path, $state, $tablesOnPath, $keys, $bytes)
+                    ? self::elementToPhp($item, $key, $path, $state, $tablesOnPath, $keys)
                     : $item;
             }
             foreach ($hash as $key => $item) {
@@ -247,7 +246,7 @@ final class Convert
                     throw new ConversionError("table has both $key and \"$key\" as keys", self::luaPath($path, $keys));
                 }
                 $result[$key] = \is_object($item)
-                    ? self::elementToPhp($item, $key, $path, $state, $tablesOnPath, $keys, $bytes)
+                    ? self::elementToPhp($item, $key, $path, $state, $tablesOnPath, $keys)
                     : $item;
             }
         }
@@ -266,24 +265,23 @@ final class Convert
         State $state,
         array &$tablesOnPath,
         array &$keys,
-        int &$bytes,
     ): mixed {
         if (!($item instanceof RuntimeTable)) {
             return self::toHandle($item, $state);
         }
         $keys[] = $key;
-        $result = self::tableToPhp($item, $path, $state, $tablesOnPath, $keys, $bytes);
+        $result = self::tableToPhp($item, $path, $state, $tablesOnPath, $keys);
         array_pop($keys);
         return $result;
     }
 
     /** a table or array of $elements elements is about to be built: every CHECK_BYTES, the sandbox's memory is checked */
-    private static function charge(State $state, int &$bytes, int $elements): void
+    private static function charge(State $state, int $elements): void
     {
-        $bytes += self::TABLE_BYTES + self::ELEMENT_BYTES * $elements;
-        if ($bytes >= self::CHECK_BYTES) {
-            $state->reserveConversionMemory($bytes);
-            $bytes = 0;
+        $state->conversionBytes += self::TABLE_BYTES + self::ELEMENT_BYTES * $elements;
+        if ($state->conversionBytes >= self::CHECK_BYTES) {
+            $state->reserveConversionMemory($state->conversionBytes);
+            $state->conversionBytes = 0;
         }
     }
 

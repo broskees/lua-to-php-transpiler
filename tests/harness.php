@@ -56,6 +56,10 @@ function assertThrows(string $exceptionClass, callable $callback): string
 /**
  * Run a command (argument list, no shell); returns [exit code, stdout, stderr].
  *
+ * The child's stdin, stdout and stderr are pipes (IoLibTest relies on it),
+ * served together: a pipe holds 64 KB, so a child that fills stderr while
+ * we write its input or wait for its stdout would otherwise block forever.
+ *
  * @param list<string> $command
  * @return array{int, string, string}
  */
@@ -70,13 +74,41 @@ function runCommand(array $command, string $standardInput = '', ?string $working
     if ($process === false) {
         throw new \RuntimeException('cannot run ' . implode(' ', $command));
     }
-    fwrite($pipes[0], $standardInput);
-    fclose($pipes[0]);
-    $standardOutput = stream_get_contents($pipes[1]);
-    $standardError = stream_get_contents($pipes[2]);
-    fclose($pipes[1]);
-    fclose($pipes[2]);
-    return [proc_close($process), $standardOutput, $standardError];
+    foreach ($pipes as $pipe) {
+        stream_set_blocking($pipe, false);
+    }
+    $inputPipe = $pipes[0];
+    $outputPipes = [1 => $pipes[1], 2 => $pipes[2]];
+    $outputs = [1 => '', 2 => ''];
+    $bytesWritten = 0;
+    if ($standardInput === '') {
+        fclose($inputPipe);
+        $inputPipe = null;
+    }
+    while ($inputPipe !== null || $outputPipes !== []) {
+        $readable = $outputPipes;
+        $writable = $inputPipe === null ? [] : [$inputPipe];
+        $unused = null;
+        stream_select($readable, $writable, $unused, null);
+        if ($writable !== []) {
+            // false: the child closed its stdin without reading all of it
+            $written = @fwrite($inputPipe, substr($standardInput, $bytesWritten, 65536));
+            $bytesWritten += $written === false ? 0 : $written;
+            if ($written === false || $bytesWritten === strlen($standardInput)) {
+                fclose($inputPipe);
+                $inputPipe = null;
+            }
+        }
+        foreach ($readable as $pipe) {
+            $descriptor = array_search($pipe, $outputPipes, true);
+            $outputs[$descriptor] .= (string) fread($pipe, 65536);
+            if (feof($pipe)) {
+                fclose($pipe);
+                unset($outputPipes[$descriptor]);
+            }
+        }
+    }
+    return [proc_close($process), $outputs[1], $outputs[2]];
 }
 
 function scratchDirectory(): string

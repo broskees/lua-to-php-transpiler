@@ -13,7 +13,9 @@ use LuaPhp\Runtime\OutputSink;
  * once "@on", io.stderr: one sink, as the brief has them): collected for
  * Result::$output, or handed to the host's callable (Environment's
  * output). The budget charges every write first (GlobalState::
- * writeOutput), so nothing past outputBytes arrives here.
+ * writeOutput), so nothing past outputBytes arrives here. The host's
+ * callable is host code a run calls, as a PHP function is: after it,
+ * State::checkAfterHostCode.
  *
  * @internal
  */
@@ -31,6 +33,7 @@ final class Sink implements OutputSink
     public function __construct(
         /** the host's sink (a callable, or StdoutSink::write), or null to collect */
         private readonly ?\Closure $host,
+        private readonly State $state,
     ) {
     }
 
@@ -44,5 +47,6 @@ final class Sink implements OutputSink
             return;
         }
         ($this->host)($bytes);
+        $this->state->checkAfterHostCode();
     }
 }

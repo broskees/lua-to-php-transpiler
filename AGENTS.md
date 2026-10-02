@@ -780,7 +780,10 @@ handles wrap them. Its internals are `LuaPhp\Embed\Internal`.
   `$G->countSteps` when `Limits::needStepCounting()` (steps, memory,
   seconds or call depth set), `setsFiberStackSize` false, one `Sink` as
   both `$output` and `$errorOutput` (collects per run for
-  `Result::$output`, or the host's callable/`StdoutSink`), and a Budget
+  `Result::$output`, or the host's callable/`StdoutSink`, host code like
+  a PHP function: `State::checkAfterHostCode` after each write, which
+  checks only during a run of the state, not when another state's
+  io.popen or a destructor flushes its buffered io.stderr), and a Budget
   from the Limits with `hostMemoryIsLimit` (none for `Limits::none()`:
   nothing charged, Usage then has only time and output).
 - **Calls into Lua** (`State::compileSource`, `callLua`) go through
@@ -792,7 +795,8 @@ handles wrap them. Its internals are `LuaPhp\Embed\Internal`.
   handler or `__close` sees it. Later uses are `SandboxClosed` (previous:
   that exception). A call from PHP outside any run (`State::$depth` 0)
   starts one (`startRun`: `Budget::start`, the output collected so far
-  dropped); calls from a PHP function the run called are part of it. Lua
+  dropped) before it converts its arguments; calls from a PHP function the
+  run called are part of it. Lua
   code runs on `State::$runningThread` (the thread whose Lua code called
   the PHP function running now) or the main thread, as protected calls
   whose message handler takes the traceback. A Lua error is a
@@ -807,9 +811,10 @@ handles wrap them. Its internals are `LuaPhp\Embed\Internal`.
 - **PHP functions** (`Internal\HostFunction`): a Closure's signature is
   read once (a WeakMap by Closure) into luaL_check* rules per parameter;
   `bind` makes the NativeFunction of one sandbox. Its body runs through
-  `State::callHost`: whatever it returned or threw, first a closed sandbox
-  (it caught what stopped the run) rethrows what stopped it, then
-  `Budget::checkLimits` (its time counts), and only then ScriptError ->
+  `State::callHost`: whatever it returned or threw, first
+  `State::checkAfterHostCode` (a closed sandbox rethrows what stopped it,
+  so catching that hides nothing; then `Budget::checkLimits`: its time
+  counts), and only then ScriptError ->
   Lua error (message with luaL_error's position, or a value) and a
   RuntimeError of the same sandbox the PHP code let through -> the Lua
   error it was (as lua_call); another sandbox's stops the run. Each call charges a step
@@ -818,9 +823,11 @@ handles wrap them. Its internals are `LuaPhp\Embed\Internal`.
 - **Values** (`Internal\Convert`): see its class comment for the rules
   (lists 1..n <-> 0-based, raw contents, depth 100, paths). Paths use the
   keys of the side the value comes from, made only for an error from the
-  keys on the way (long keys shortened). A conversion counts what it
-  builds (a table repeated in a value becomes copies: 20 levels of
-  `t = {t, t}` are a million arrays) and every 64 KB of it asks
+  keys on the way (long keys shortened). Conversions count what they
+  build (a table repeated in a value becomes copies: 20 levels of
+  `t = {t, t}` are a million arrays) in `State::$conversionBytes`, which
+  goes on across values and calls (a list of 8000 results of 16 KB each
+  adds up as one value does), and every 64 KB of it asks
   `State::reserveConversionMemory` (the budget, or without one the
   host's room): over it LimitExceeded('memory'). A handle registers its value in
   a table under `$G->libraryState['embed.handles']` (luaL_ref), so Lua's
@@ -857,8 +864,9 @@ interpreter `lua5.4` (5.4.9) and compiler `luac5.4`, both installed.
     tests/bytecode.sh [file...]  diff `bin/luac -l -l -p` vs `luac5.4 -l -l -p` for official test files
     tests/official.sh [name...]  run official test files one at a time through bin/lua with
                                  -e"_U=true _soft=true _port=true _nomsg=true"; PASS/FAIL per file
-    php bench/run.php <label>    memory/speed/virtual-memory benchmarks vs lua5.4 (not a test;
-                                 results in bench/results/<label>.md, see bench/README.md)
+    php bench/run.php <label>    benchmarks vs lua5.4 (not a test; results in bench/results/<label>.md,
+                                 see bench/README.md): speed of saved lua2php output with a warm
+                                 opcache (transpile time apart), memory and virtual memory under bin/lua
 
 - Differential cases live in `tests/diff/*.lua`: each runs under `lua5.4` and
   under `bin/lua` from `tests/diff`; exit status, stdout and stderr must match
