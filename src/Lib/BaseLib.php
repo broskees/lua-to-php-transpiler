@@ -411,15 +411,41 @@ final class BaseLib
     private static function next(Coroutine $L, array $args): array
     {
         $table = $args[0] ?? null;
-        // Fast path: luaL_checktype passes for a table
+        // Fast path: luaL_checktype passes for a table, and a pairs() step of the
+        // traversal holding the table's internal pointers is LuaTable::next's
+        // fast path, inline (a PHP call less per step)
         if ($table instanceof LuaTable) {
-            $entry = $table->next($args[1] ?? null);
+            $key = $args[1] ?? null;
+            $caller = $L->ci->previous;
+            $traversal = $table->extra?->traversal;
+            if (
+                $traversal?->holderPc === $caller->savedpc && $traversal->cursorKey === $key
+                && $traversal->holderFrameBytes === $caller->frameBytes && $traversal->holderThread === $L
+            ) {
+                if (\is_int($key)) {
+                    $nextKey = key($table->arr);
+                    if ($nextKey !== null) {
+                        next($table->arr);
+                        $traversal->cursorKey = $nextKey;
+                        return [$nextKey, $table->arr[$nextKey]];
+                    }
+                } elseif (\is_string($key)) {
+                    $nextKey = key($table->hash);
+                    if ($nextKey !== null) {
+                        next($table->hash);
+                        $nextKey = (string) $nextKey;
+                        $traversal->cursorKey = $nextKey;
+                        return [$nextKey, $table->hash[$nextKey]];
+                    }
+                }
+            }
+            $entry = $table->next($key, $L);
             if ($entry !== false) {
                 return $entry ?? [null];
             }
         }
         $table = Auxiliary::checkTable($L, $args, 1);
-        $entry = $table->next($args[1] ?? null);
+        $entry = $table->next($args[1] ?? null, $L);
         if ($entry === false) {
             DebugInfo::runError($L, "invalid key to 'next'");  // key not found
         }

@@ -330,18 +330,17 @@ final class Auxiliary
         if ($level === 0 || !($table instanceof LuaTable)) {
             return null;  // not found
         }
-        $key = null;
-        while (($entry = $table->next($key)) !== null && $entry !== false) {
-            [$key, $value] = $entry;
-            if (\is_string($key)) {  // ignore non-string keys
-                if (Vm::rawEquals($object, $value)) {  // found object?
-                    return $key;
-                }
-                $subName = self::findField($object, $value, $level - 1, $budget);
-                if ($subName !== null) {  // try recursively
-                    MemoryLimit::reserve(\strlen($key) + \strlen($subName), $budget);
-                    return $key . '.' . $subName;
-                }
+        // the string keys in next()'s order (C: lua_next, ignoring non-string
+        // keys), read directly: an error message does not start a traversal
+        foreach ($table->hash as $key => $value) {
+            $key = (string) $key;
+            if (Vm::rawEquals($object, $value)) {  // found object?
+                return $key;
+            }
+            $subName = self::findField($object, $value, $level - 1, $budget);
+            if ($subName !== null) {  // try recursively
+                MemoryLimit::reserve(\strlen($key) + \strlen($subName), $budget);
+                return $key . '.' . $subName;
             }
         }
         return null;

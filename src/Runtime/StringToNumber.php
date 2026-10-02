@@ -80,9 +80,12 @@ final class StringToNumber
         } else {
             while ($position < $length && ctype_digit($s[$position])) {
                 $digit = ord($s[$position]) - 48;
+                // C's 'a >= MAXBY10 && (a > MAXBY10 || d > MAXLASTD + neg)' on the unsigned
+                // accumulator, where PHP_INT_MIN stands for 2^63 (above MAXBY10)
+                $accumulatorIsAboveMaxBy10 = $accumulator < 0 || $accumulator > self::MAXBY10;
                 if (
-                    $accumulator >= self::MAXBY10
-                    && ($accumulator > self::MAXBY10 || $digit > self::MAXLASTD + ($negative ? 1 : 0))
+                    $accumulatorIsAboveMaxBy10
+                    || ($accumulator === self::MAXBY10 && $digit > self::MAXLASTD + ($negative ? 1 : 0))
                 ) {
                     return null;  // overflow: do not accept it (as integer)
                 }

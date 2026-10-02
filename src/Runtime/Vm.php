@@ -491,6 +491,53 @@ final class Vm
         return \is_float($r) ? $l <= $r : self::lessEqualFloatInt($l, $r);
     }
 
+    /**
+     * Whether the process's LC_COLLATE orders strings as bytes ("C" and
+     * "POSIX"), so that strcoll is strcmp. A C program starts in the "C"
+     * locale; os.setlocale updates this when it changes LC_COLLATE. A host
+     * that changes the locale with PHP's own setlocale() is not seen.
+     */
+    public static bool $collationIsByteOrder = true;
+
+    /**
+     * lvm.c: l_strcmp: strcoll, which stops at a '\0', on each segment of
+     * the strings between embedded '\0's; segments may compare equal and
+     * still differ in length.
+     */
+    public static function compareStrings(string $l, string $r): int
+    {
+        if (self::$collationIsByteOrder) {
+            return strcmp($l, $r);
+        }
+        $remainingLengthL = \strlen($l);  // C: rl1
+        $remainingLengthR = \strlen($r);  // C: rl2
+        $segmentStartL = 0;
+        $segmentStartR = 0;
+        while (true) {  // for each segment
+            $segmentLengthL = strcspn($l, "\0", $segmentStartL);  // C: zl1, index of the first '\0'
+            $segmentLengthR = strcspn($r, "\0", $segmentStartR);  // C: zl2
+            $order = strcoll(
+                substr($l, $segmentStartL, $segmentLengthL),
+                substr($r, $segmentStartR, $segmentLengthR),
+            );
+            if ($order !== 0) {  // not equal?
+                return $order;  // done
+            }
+            // strings are equal up to a '\0'
+            if ($segmentLengthR === $remainingLengthR) {  // 'r' is finished?
+                return $segmentLengthL === $remainingLengthL ? 0 : 1;  // check 'l'
+            }
+            if ($segmentLengthL === $remainingLengthL) {  // 'l' is finished?
+                return -1;  // 'l' is less than 'r' ('r' is not finished)
+            }
+            // both strings longer than the segment; go on comparing after the '\0'
+            $segmentStartL += $segmentLengthL + 1;
+            $segmentStartR += $segmentLengthR + 1;
+            $remainingLengthL -= $segmentLengthL + 1;
+            $remainingLengthR -= $segmentLengthR + 1;
+        }
+    }
+
     // lvm.c: luaV_lessthan
     public static function lessThan(Coroutine $L, mixed $l, mixed $r): bool
     {
@@ -498,7 +545,7 @@ final class Vm
             return self::lessThanNumbers($l, $r);
         }
         if (\is_string($l) && \is_string($r)) {  // lvm.c: lessthanothers / l_strcmp
-            return strcmp($l, $r) < 0;
+            return (self::$collationIsByteOrder ? strcmp($l, $r) : self::compareStrings($l, $r)) < 0;
         }
         return MetaMethods::callOrderTM($L, $l, $r, MetaMethods::TM_LT);
     }
@@ -510,7 +557,7 @@ final class Vm
             return self::lessEqualNumbers($l, $r);
         }
         if (\is_string($l) && \is_string($r)) {  // lvm.c: lessequalothers / l_strcmp
-            return strcmp($l, $r) <= 0;
+            return (self::$collationIsByteOrder ? strcmp($l, $r) : self::compareStrings($l, $r)) <= 0;
         }
         return MetaMethods::callOrderTM($L, $l, $r, MetaMethods::TM_LE);
     }
