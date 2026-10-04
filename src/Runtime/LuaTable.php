@@ -4,6 +4,9 @@ declare(strict_types=1);
 
 namespace LuaPhp\Runtime;
 
+use LuaPhp\Compiler\OpCodes;
+use LuaPhp\Compiler\Proto;
+
 /**
  * A Lua table (C: Table in lobject.h, operations from ltable.c).
  *
@@ -24,16 +27,51 @@ namespace LuaPhp\Runtime;
  * Memory: a table is one PHP object of 5 properties (40 + 5 * 16 bytes, a
  * 128-byte block), plus a PHP array for each of $arr and $hash that is not
  * empty (56 bytes, plus at least 8 slots: 160 bytes for a list, 320 with
- * string keys). What most tables never need (other keys, the traversal
- * cursor) lives in $extra, a LuaTableExtra created on demand.
+ * string keys). What most tables never need (other keys, the traversals in
+ * progress) lives in $extra, a LuaTableExtra created on demand.
  *
- * Traversal (next): PHP arrays keep their order, so the "position" of a key
- * is its place in its part. next() leaves the PHP internal array pointer of
- * the part of the key it returns on that key, so the following call finds
- * its place at once: a pairs() loop is amortized O(1). Clearing the current
- * field during the traversal (allowed in Lua) makes PHP advance the
- * internal pointer to the following entry; the cursor ($extra->cursorKey,
- * the last key returned) recognizes that case.
+ * Traversal (next): a traversal goes through the parts $arr, $hash and the
+ * other keys, each in PHP's order (insertion order), and every traversal
+ * goes on from its own key, as C's do from their key's slot: whatever other
+ * next() calls ran in between, and also after its key was deleted (clearing
+ * fields during a traversal is legal; adding keys makes next undefined).
+ * The state is $extra->traversal (TableTraversal), there while needed.
+ * - One traversal at a time holds the PHP internal pointers (the holder:
+ *   cursorKey, the key it was given last). The pointer of its part is past
+ *   that key, so key() names the next entry even after deletions (PHP does
+ *   not move a pointer off a deleted entry; key() looks past it), and next()
+ *   moves on: a pairs() loop is amortized O(1), also when it clears every
+ *   field. BaseLib::next has this fast path inline.
+ * - Traversals are told apart by where they call next from: the caller's
+ *   instruction, code, frame and thread (isCaller; the fast path compares
+ *   all but the code). So 'for k2 in next, t, k' inside the loop over k,
+ *   the same loop one recursion level deeper or in another coroutine, does
+ *   not take that loop's place; a loop that runs again is the same
+ *   traversal.
+ * - next(t) while another traversal holds a pointer gives the first key and
+ *   moves nothing (an emptiness check inside a traversal is O(1)); the key
+ *   is remembered as a first key given: deleted, the part's first entry
+ *   follows it.
+ * - A traversal at the part's first key takes the pointer, and so does one
+ *   at another key when no traversal holds it (finding its key with the
+ *   pointer: O(position)). The holder it replaces is suspended: a
+ *   TraversalLog made for it (owned by where it calls from) keeps its place:
+ *   the part's keys up to its key (O(position); just the key at the part's
+ *   start), and more keys in order as it goes on (in batches as big as the
+ *   log: O(1) a step). A log counts the suspended traversals at each of its
+ *   keys; continuing moves the count (only the owner takes it away: a peek
+ *   from elsewhere does not take a suspended traversal's place), and a log
+ *   goes when its count is 0. A traversal at a key still in the table goes
+ *   on in a log of its own, else takes the free pointer or gets a new log;
+ *   at a deleted key, in any log that has the key.
+ * - Logs are bounded (LOGGED_KEYS_PER_ENTRY per entry of the table, at most
+ *   MAXIMUM_LOGS, least recently used out), and a log made out of date by
+ *   added keys is not used (logIsStale). A traversal at a deleted key that
+ *   no log or first key given remembers ends with "invalid key to 'next'",
+ *   as a key never in the table does: past those bounds, or a traversal
+ *   started by next(t) beside another whose first key is deleted after all
+ *   the others ended (first keys given that are still in the table go when
+ *   no traversal holds a pointer).
  *
  * Border (#): $sizearray plays the role of C's 'alimit': OP_NEWTABLE and
  * OP_SETLIST set it like the array part of a constructor, and length()
@@ -55,7 +93,7 @@ final class LuaTable
     /** border hint (C: alimit); see class comment */
     public int $sizearray = 0;
 
-    /** keys that are neither integers nor strings, and the traversal cursor; null until needed */
+    /** keys that are neither integers nor strings, and the traversals in progress; null until needed */
     public ?LuaTableExtra $extra = null;
 
     public function __construct(int $sizearray = 0)
@@ -273,223 +311,785 @@ final class LuaTable
         return $present;
     }
 
+    /*
+    ** {==================================================================
+    ** Traversal (next): see the class comment
+    ** ===================================================================
+    */
+
+    /** the parts a traversal goes through, in this order */
+    private const INTEGER_KEYS = 0;  // $arr
+    private const STRING_KEYS = 1;  // $hash
+    private const OTHER_KEYS = 2;  // $extra->otherValues
+
+    /** the most keys the logs of suspended traversals hold: this many per entry of the table, plus LOGGED_KEYS_EXTRA */
+    private const LOGGED_KEYS_PER_ENTRY = 4;
+    private const LOGGED_KEYS_EXTRA = 256;
+
+    /** the most logs (a traversal looks through all of them for its key) */
+    private const MAXIMUM_LOGS = 16;
+
+    /** the most first keys given remembered per part (TableTraversal::$firstKeysGiven) */
+    private const MAXIMUM_FIRST_KEYS_GIVEN = 16;
+
+    /** PHP memory of a logged key: a list slot and a map bucket, rounded up */
+    private const BYTES_PER_LOGGED_KEY = 64;
+
     /**
      * ltable.c: luaH_next. Returns [key, value] of the entry after $key
      * (nil: the first entry), null when there are no more entries, or false
-     * when $key is not in the table ("invalid key to 'next'").
+     * when $key is not in the table ("invalid key to 'next'"). $L is the
+     * thread whose Lua code called next (lbaselib.c: luaB_next): where that
+     * code calls from tells traversals at the same key apart. PHP code
+     * passes null.
      *
      * @return array{mixed, mixed}|null|false
      */
-    public function next(mixed $key): array|null|false
+    public function next(mixed $key, ?Coroutine $L = null): array|null|false
     {
         if ($key === null) {
-            return $this->firstFromPart(0);
+            return $this->firstEntryFrom(self::INTEGER_KEYS, $L, true);
         }
-        // Fast path of a pairs() step: an integer or string key under its
-        // part's internal pointer (where the next() that returned it left
-        // it) is followed by the next entry of that part, as below.
-        if (\is_int($key)) {
-            if (key($this->arr) === $key) {
-                next($this->arr);
+        // Fast path of a pairs() step: the traversal holding the internal
+        // pointers (the one calling from the same place) asks for the entry
+        // after its key, which the pointer of the key's part is past (key()
+        // skips entries deleted since)
+        $traversal = $this->extra?->traversal;
+        if (
+            $traversal?->holderPc === self::callerPc($L) && $traversal->cursorKey === $key
+            && $traversal->holderFrameBytes === self::callerFrameBytes($L) && $traversal->holderThread === $L
+        ) {
+            if (\is_int($key)) {
                 $nextKey = key($this->arr);
-                if ($nextKey === null) {
-                    return $this->firstFromPart(1);
+                if ($nextKey !== null) {
+                    next($this->arr);
+                    $traversal->cursorKey = $nextKey;
+                    return [$nextKey, $this->arr[$nextKey]];
                 }
-                $extra = $this->extra ??= new LuaTableExtra();
-                $extra->cursorKey = $nextKey;
-                return [$nextKey, $this->arr[$nextKey]];
-            }
-        } elseif (\is_string($key)) {
-            $currentKey = key($this->hash);
-            if ($currentKey !== null && (string) $currentKey === $key) {
-                next($this->hash);
+            } elseif (\is_string($key)) {
                 $nextKey = key($this->hash);
-                if ($nextKey === null) {
-                    return $this->firstFromPart(2);
+                if ($nextKey !== null) {
+                    next($this->hash);
+                    $nextKey = (string) $nextKey;
+                    $traversal->cursorKey = $nextKey;
+                    return [$nextKey, $this->hash[$nextKey]];
                 }
-                $extra = $this->extra ??= new LuaTableExtra();
-                $extra->cursorKey = (string) $nextKey;
-                return [(string) $nextKey, $this->hash[$nextKey]];
             }
         }
-        if (\is_float($key) && self::floatToInteger($key) !== null) {
+        return $this->nextAfterKey($key, $L);
+    }
+
+    /**
+     * next() for a key, in every case but the fast path: the rules are in
+     * the class comment, in this order
+     *
+     * @return array{mixed, mixed}|null|false
+     */
+    private function nextAfterKey(mixed $key, ?Coroutine $L): array|null|false
+    {
+        if (\is_int($key)) {
+            $part = self::INTEGER_KEYS;
+            $phpKey = $key;
+        } elseif (\is_string($key)) {
+            $part = self::STRING_KEYS;
+            $phpKey = self::phpStringKey($key);
+        } elseif (\is_float($key) && self::floatToInteger($key) !== null) {
             // ltable.c: findindex does not normalize the key: a float is
             // never equal to a stored key with an integral value
             return false;
-        }
-        $extra = $this->extra;
-        if (\is_int($key)) {
-            $part = 0;
-            $phpKey = $key;
-        } elseif (\is_string($key)) {
-            $part = 1;
-            $phpKey = $key;
-        } elseif ($extra === null) {
-            return false;  // no key of another type was ever returned or is present
+        } elseif ($this->extra === null) {
+            return false;  // no key of another type is or was in the table
         } else {
-            $part = 2;
+            $part = self::OTHER_KEYS;
             $phpKey = self::otherKey($key);
         }
+        $traversal = $this->extra?->traversal;
 
-        // the part's internal pointer is on the key, where the next() that returned it left it
-        $currentKey = $this->currentPhpKey($part);
-        if ($currentKey !== null && self::samePhpKey($part, $currentKey, $phpKey)) {
-            $this->advancePart($part);
-            return $this->currentOrFollowing($part);
+        // the holder's key (deleted or not): the pointer is past it
+        if ($traversal !== null && $traversal->cursorKey === $key) {
+            if (!self::callsLikeHolder($traversal, $L, true)) {
+                $this->suspendHolder($traversal, $L);  // another traversal at that key: the holder stays
+            }
+            return $this->holderEntryAtPointer($part, $L);
         }
-        if ($extra !== null && $extra->cursorKey === $key && !$this->hasPhpKey($part, $phpKey)) {
-            // the entry under the cursor was cleared; PHP already moved the pointer past it
-            return $this->currentOrFollowing($part);
-        }
-
-        // slow path: find the key's position
         if (!$this->hasPhpKey($part, $phpKey)) {
+            // a deleted key (or one never in the table): only a log or a first key given knows its place
+            if ($traversal === null) {
+                return false;
+            }
+            $log = $this->findLog($traversal, $part, $phpKey, $L, false);
+            if ($log !== null) {
+                return $this->continueFromLog($log, $phpKey, $L);
+            }
+            if (isset($traversal->firstKeysGiven[$part][$phpKey])) {
+                return $this->firstEntryFrom($part, $L);  // every key before it was gone when it was the first
+            }
             return false;
         }
-        $this->resetPart($part);
-        while (true) {
-            $currentKey = $this->currentPhpKey($part);
-            if ($currentKey === null) {
-                return false;  // unreachable: the key is present
+        if ($phpKey === $this->firstPhpKey($part)) {
+            // a traversal at the part's first key takes the pointer
+            $ownLog = $traversal === null ? null : $this->findLog($traversal, $part, $phpKey, $L, true);
+            if ($ownLog !== null) {
+                $this->leaveLogKey($traversal, $ownLog, $phpKey);  // it is no longer suspended there
             }
-            if (self::samePhpKey($part, $currentKey, $phpKey)) {
-                break;
-            }
-            $this->advancePart($part);
+            $this->suspendHolder($traversal, $L);
+            $this->resetPointer($part);
+            $this->advancePointer($part);
+            return $this->holderEntryAtPointer($part, $L);
         }
-        $this->advancePart($part);
-        return $this->currentOrFollowing($part);
+        $ownLog = $traversal === null ? null : $this->findLog($traversal, $part, $phpKey, $L, true);
+        if ($ownLog !== null) {
+            return $this->continueFromLog($ownLog, $phpKey, $L);
+        }
+        if ($traversal === null || $traversal->cursorKey === null) {
+            // the pointer is free: find the key with it (C finds a key's slot by hashing it)
+            $this->resetPointer($part);
+            while ($this->pointerPhpKey($part) !== $phpKey) {
+                $this->advancePointer($part);
+            }
+            $this->advancePointer($part);
+            $L?->globalState->budget?->chargeSteps($this->partCount($part) >> 6);
+            return $this->holderEntryAtPointer($part, $L);
+        }
+        // the pointer is busy: a log of its own for a traversal from this key
+        $log = $this->logUpTo($part, $phpKey, true, $L);
+        $log->ownerPc = self::callerPc($L);
+        $log->ownerProto = self::callerProto($L);
+        $log->ownerFrameBytes = self::callerFrameBytes($L);
+        $this->rememberLog($traversal, $log);
+        return $this->continueFromLog($log, $phpKey, $L);
     }
 
-    private static function samePhpKey(int $part, int|string $currentKey, int|string $phpKey): bool
+    /**
+     * The first entry of $part or of a following part, for a traversal that
+     * starts there ($isNextOfNil: next(t)) or goes on there. It takes the
+     * part's internal pointer when no traversal holds one (or the holder
+     * calls: a loop that runs again). Else next(t) remembers the key as a
+     * first key given (an emptiness check costs nothing more), and a
+     * traversal that goes on there gets a log of its own at the start.
+     *
+     * @return array{mixed, mixed}|null
+     */
+    private function firstEntryFrom(int $part, ?Coroutine $L, bool $isNextOfNil = false): ?array
     {
-        if ($part === 1) {
-            return (string) $currentKey === (string) $phpKey;
+        for (; $part <= self::OTHER_KEYS; $part++) {
+            if ($this->partCount($part) === 0) {
+                continue;  // (no reset(): it would copy an empty array into a new one, see unreferencePart)
+            }
+            $traversal = $this->traversal();
+            if ($traversal->cursorKey === null || self::callsLikeHolder($traversal, $L, false)) {
+                // (the holder's old place is kept: it may be another traversal from the same call,
+                // as iterator objects that step through one function are)
+                $this->suspendHolder($traversal, $L);
+                $this->resetPointer($part);
+                return $this->holderEntryAtPointer($part, $L);
+            }
+            $firstKey = $this->firstPhpKey($part);
+            if ($isNextOfNil) {
+                self::rememberFirstKeyGiven($traversal, $part, $firstKey);
+            } else {
+                $this->keepPlace(
+                    $traversal,
+                    $part,
+                    $firstKey,
+                    self::callerPc($L),
+                    self::callerProto($L),
+                    self::callerFrameBytes($L),
+                    $L,
+                );
+            }
+            return $this->entry($part, $firstKey);
         }
-        return $currentKey === $phpKey;
+        $this->dropTraversalIfIdle();
+        return null;
+    }
+
+    /**
+     * The first entry at or after the pointer of $part (key() skips deleted
+     * ones), given to the caller as the new holder with the pointer moved
+     * past it; or the first entry of a following part.
+     *
+     * @return array{mixed, mixed}|null
+     */
+    private function holderEntryAtPointer(int $part, ?Coroutine $L): ?array
+    {
+        $phpKey = $this->pointerPhpKey($part);
+        if ($phpKey === null) {
+            return $this->leavePart($part, $L);
+        }
+        $this->advancePointer($part);
+        self::setHolder($this->traversal(), $this->luaKey($part, $phpKey), $L);
+        return $this->entry($part, $phpKey);
+    }
+
+    /**
+     * The holder ran past the last entry of $part: it lets the pointer go
+     * and goes on with the following parts.
+     *
+     * @return array{mixed, mixed}|null
+     */
+    private function leavePart(int $part, ?Coroutine $L): ?array
+    {
+        $traversal = $this->extra?->traversal;
+        if ($traversal !== null) {  // (none when the pointer happened to be past the caller's key)
+            $traversal->cursorKey = null;
+        }
+        $this->unreferencePart($part);
+        return $this->firstEntryFrom($part + 1, $L);
+    }
+
+    private static function setHolder(TableTraversal $traversal, mixed $key, ?Coroutine $L): void
+    {
+        $traversal->cursorKey = $key;
+        $traversal->holderPc = self::callerPc($L);
+        $traversal->holderProto = self::callerProto($L);
+        $traversal->holderFrameBytes = self::callerFrameBytes($L);
+        $traversal->holderThread = $L;
+    }
+
+    /** The holder gives up the pointer: a log of its own keeps its place, its key (deleted or not). */
+    private function suspendHolder(?TableTraversal $traversal, ?Coroutine $L): void
+    {
+        if ($traversal === null || $traversal->cursorKey === null) {
+            return;
+        }
+        $holderKey = $traversal->cursorKey;
+        $traversal->cursorKey = null;
+        if (\is_int($holderKey)) {
+            $part = self::INTEGER_KEYS;
+            $phpKey = $holderKey;
+        } elseif (\is_string($holderKey)) {
+            $part = self::STRING_KEYS;
+            $phpKey = self::phpStringKey($holderKey);
+        } else {
+            $part = self::OTHER_KEYS;
+            $phpKey = self::otherKey($holderKey);
+        }
+        $this->keepPlace(
+            $traversal,
+            $part,
+            $phpKey,
+            $traversal->holderPc,
+            $traversal->holderProto,
+            $traversal->holderFrameBytes,
+            $L,
+        );
+    }
+
+    /**
+     * A suspended traversal is at $phpKey of $part (deleted or not; if
+     * deleted, the pointer of the part, past it, says where it was): a log
+     * made for that traversal (calling from $pc, $proto, $frameBytes) counts
+     * it there: a log it has that has the key, or a new one (just the key
+     * when it is at the part's start, else the part's keys up to it).
+     */
+    private function keepPlace(
+        TableTraversal $traversal,
+        int $part,
+        int|string $phpKey,
+        int $pc,
+        ?Proto $proto,
+        int $frameBytes,
+        ?Coroutine $L,
+    ): void {
+        foreach ($traversal->logs as $log) {
+            if (
+                $log->part === $part && isset($log->positions[$phpKey]) && $log->ownerPc === $pc
+                && $log->ownerProto === $proto && $log->ownerFrameBytes === $frameBytes && !$this->logIsStale($log)
+            ) {
+                $this->enterLogKey($log, $phpKey);
+                return;
+            }
+        }
+        $isPresent = $this->hasPhpKey($part, $phpKey);
+        $followingKey = $isPresent ? null : $this->pointerPhpKey($part);
+        if ($isPresent ? $phpKey === $this->firstPhpKey($part) : $followingKey === $this->firstPhpKey($part)) {
+            $log = new TraversalLog($part);  // at the start: the part's first entry follows it
+            $log->append($phpKey);
+            $this->readPartState($log);
+        } elseif ($isPresent) {
+            $log = $this->logUpTo($part, $phpKey, true, $L);
+        } elseif ($followingKey === null) {
+            $log = new TraversalLog($part);  // deleted after the last entry: nothing follows
+            $log->append($phpKey);
+            $log->complete = true;
+            $this->readPartState($log);
+        } else {
+            $log = $this->logUpTo($part, $followingKey, false, $L);
+            $log->append($phpKey);
+        }
+        $log->ownerPc = $pc;
+        $log->ownerProto = $proto;
+        $log->ownerFrameBytes = $frameBytes;
+        $this->rememberLog($traversal, $log);
+        $this->enterLogKey($log, $phpKey);
+    }
+
+    /** a first key of $part that next(t) gave while another traversal held a pointer (TableTraversal::$firstKeysGiven) */
+    private static function rememberFirstKeyGiven(TableTraversal $traversal, int $part, int|string $phpKey): void
+    {
+        if (isset($traversal->firstKeysGiven[$part][$phpKey])) {
+            return;
+        }
+        if (\count($traversal->firstKeysGiven[$part] ?? []) >= self::MAXIMUM_FIRST_KEYS_GIVEN) {
+            unset($traversal->firstKeysGiven[$part][array_key_first($traversal->firstKeysGiven[$part])]);
+        }
+        $traversal->firstKeysGiven[$part][$phpKey] = true;
+    }
+
+    /**
+     * A log of the keys of $part, in order, up to $lastPhpKey (included or
+     * not); the rest is read when needed.
+     */
+    private function logUpTo(int $part, int|string $lastPhpKey, bool $includeLast, ?Coroutine $L): TraversalLog
+    {
+        $this->reserveLogMemory($part, $L);
+        $log = new TraversalLog($part);
+        foreach ($this->partEntries($part) as $phpKey => $_) {
+            if ($phpKey === $lastPhpKey) {
+                if ($includeLast) {
+                    $log->append($phpKey);
+                }
+                break;
+            }
+            $log->append($phpKey);
+        }
+        $L?->globalState->budget?->chargeSteps(\count($log->keys) >> 6);
+        $this->readPartState($log);
+        return $log;
+    }
+
+    /**
+     * The traversal at $phpKey of $log goes on with the next key of the log
+     * still in the table, or with the following parts, where it is counted.
+     * Only the traversal the log was made for takes its count away from
+     * $phpKey: a peek, next(t, k) from elsewhere, must not take the place
+     * of a traversal suspended there (a count left by one that went on
+     * keeps the log until the bounds evict it).
+     *
+     * @return array{mixed, mixed}|null
+     */
+    private function continueFromLog(TraversalLog $log, int|string $phpKey, ?Coroutine $L): ?array
+    {
+        $traversal = $this->extra->traversal;
+        $part = $log->part;
+        $isOwner = self::isCaller($log->ownerPc, $log->ownerProto, $log->ownerFrameBytes, $L, true);
+        if ($isOwner) {
+            $this->leaveLogKey($traversal, $log, $phpKey, false);
+        }
+        $logId = spl_object_id($log);
+        if (isset($traversal->logs[$logId])) {
+            unset($traversal->logs[$logId]);  // now the most recently used
+            $traversal->logs[$logId] = $log;
+        }
+        $position = $log->positions[$phpKey];
+        while (true) {
+            $keyCount = \count($log->keys);
+            for ($index = $position + 1; $index < $keyCount; $index++) {
+                $candidate = $log->keys[$index];
+                if (!$this->hasPhpKey($part, $candidate)) {
+                    continue;
+                }
+                // (counted there even when the holder is at that key too: if the two call from
+                // one place, the one that calls first moves the pointer, the other finds the count)
+                $this->enterLogKey($log, $candidate);
+                return $this->entry($part, $candidate);
+            }
+            if ($log->complete) {
+                break;
+            }
+            $position = $keyCount - 1;
+            $this->extendLog($traversal, $log, $L);
+        }
+        if ($log->traversalCount === 0) {
+            $this->forgetLog($traversal, $log);
+        }
+        return $this->firstEntryFrom($part + 1, $L);  // its traversal leaves the part
+    }
+
+    /**
+     * Add keys of the part not in the log yet, in order: those after the
+     * log's last key, as many as it has (at least 16), so that a traversal
+     * through a log costs O(1) a step; the log is complete at the part's end.
+     */
+    private function extendLog(TableTraversal $traversal, TraversalLog $log, ?Coroutine $L): void
+    {
+        $this->reserveLogMemory($log->part, $L);
+        $keyCount = \count($log->keys);
+        $wanted = max(16, $keyCount);
+        $added = 0;
+        $complete = true;
+        foreach ($this->partEntries($log->part) as $phpKey => $_) {
+            if (isset($log->positions[$phpKey])) {
+                continue;
+            }
+            if ($added === $wanted) {
+                $complete = false;
+                break;
+            }
+            $log->append($phpKey);
+            $added++;
+        }
+        $L?->globalState->budget?->chargeSteps(($keyCount + $added) >> 6);
+        $log->complete = $complete;
+        $this->readPartState($log);
+        $traversal->loggedKeyCount += $added;
+        $this->evictLogs($traversal, $log);
+    }
+
+    /** one more traversal suspended at $phpKey of $log */
+    private function enterLogKey(TraversalLog $log, int|string $phpKey): void
+    {
+        $log->traversalsAt[$phpKey] = ($log->traversalsAt[$phpKey] ?? 0) + 1;
+        $log->traversalCount++;
+    }
+
+    /** a traversal suspended at $phpKey of $log goes on; the log goes once none is in it (unless !$forgetWhenEmpty) */
+    private function leaveLogKey(
+        TableTraversal $traversal,
+        TraversalLog $log,
+        int|string $phpKey,
+        bool $forgetWhenEmpty = true,
+    ): void {
+        if (!isset($log->traversalsAt[$phpKey])) {
+            return;  // (one that came to the key from elsewhere)
+        }
+        if (--$log->traversalsAt[$phpKey] === 0) {
+            unset($log->traversalsAt[$phpKey]);
+        }
+        if (--$log->traversalCount === 0 && $forgetWhenEmpty) {
+            $this->forgetLog($traversal, $log);
+        }
+    }
+
+    /**
+     * The log a traversal at $phpKey of $part goes on in: the most recently
+     * used one made for the caller's traversal or, unless $ownLogOnly (a key
+     * still in the table: a traversal that is not suspended there does not
+     * take a suspended one's place), any other that has the key (each is the
+     * part's order: one with a deleted key is as good as another). Out of
+     * date logs go.
+     */
+    private function findLog(
+        TableTraversal $traversal,
+        int $part,
+        int|string $phpKey,
+        ?Coroutine $L,
+        bool $ownLogOnly,
+    ): ?TraversalLog {
+        $ownLog = null;
+        $otherLog = null;
+        foreach ($traversal->logs as $log) {  // least recently used first
+            if ($log->part !== $part || !isset($log->positions[$phpKey])) {
+                continue;
+            }
+            if ($this->logIsStale($log)) {
+                $this->forgetLog($traversal, $log);
+            } elseif (self::isCaller($log->ownerPc, $log->ownerProto, $log->ownerFrameBytes, $L, true)) {
+                $ownLog = $log;
+            } else {
+                $otherLog = $log;
+            }
+        }
+        return $ownLogOnly ? $ownLog : $ownLog ?? $otherLog;
+    }
+
+    /** a new log, within the bounds on all logs */
+    private function rememberLog(TableTraversal $traversal, TraversalLog $log): void
+    {
+        $traversal->logs[spl_object_id($log)] = $log;
+        $traversal->loggedKeyCount += \count($log->keys);
+        $this->evictLogs($traversal, $log);
+    }
+
+    /**
+     * Logs hold at most LOGGED_KEYS_PER_ENTRY keys per entry of the table,
+     * and there are at most MAXIMUM_LOGS: past that, the least recently used
+     * ones go (a traversal suspended at a deleted key that nothing remembers
+     * then ends with "invalid key to 'next'").
+     */
+    private function evictLogs(TableTraversal $traversal, TraversalLog $keep): void
+    {
+        $bound = self::LOGGED_KEYS_PER_ENTRY * (\count($this->arr) + \count($this->hash)
+            + \count($this->extra->otherValues)) + self::LOGGED_KEYS_EXTRA;
+        while (
+            ($traversal->loggedKeyCount > $bound || \count($traversal->logs) > self::MAXIMUM_LOGS)
+            && \count($traversal->logs) > 1
+        ) {
+            $oldest = $traversal->logs[array_key_first($traversal->logs)];
+            if ($oldest === $keep) {  // (the one in use is never the least recently used but when just made)
+                unset($traversal->logs[spl_object_id($keep)]);
+                $traversal->logs[spl_object_id($keep)] = $keep;
+                continue;
+            }
+            $this->forgetLog($traversal, $oldest);
+        }
+    }
+
+    private function forgetLog(TableTraversal $traversal, TraversalLog $log): void
+    {
+        $logId = spl_object_id($log);
+        if (isset($traversal->logs[$logId])) {
+            unset($traversal->logs[$logId]);
+            $traversal->loggedKeyCount -= \count($log->keys);
+        }
+    }
+
+    /**
+     * Whether keys were added to the log's part since it read the part: then
+     * its order is out of date (adding keys during a traversal makes next
+     * undefined). PHP appends every new key, so the part grew or its last
+     * key changed; a part that lost as many keys and its last one is not
+     * seen.
+     */
+    private function logIsStale(TraversalLog $log): bool
+    {
+        $part = $log->part;
+        if ($this->partCount($part) > $log->partCountWhenRead) {
+            return true;
+        }
+        $lastKey = $log->partLastKeyWhenRead;
+        return $lastKey !== null && $this->hasPhpKey($part, $lastKey) && $this->lastPhpKey($part) !== $lastKey;
+    }
+
+    private function readPartState(TraversalLog $log): void
+    {
+        $log->partCountWhenRead = $this->partCount($log->part);
+        $log->partLastKeyWhenRead = $this->lastPhpKey($log->part);
+    }
+
+    /** a log may hold every key of the part: check that it fits (see MemoryLimit) */
+    private function reserveLogMemory(int $part, ?Coroutine $L): void
+    {
+        MemoryLimit::reserve($this->partCount($part) * self::BYTES_PER_LOGGED_KEY, $L?->globalState->budget);
+    }
+
+    /**
+     * No traversal holds a pointer: drop the first keys given that are still
+     * in the table (an emptiness check does not go on; a traversal that does
+     * goes on from its first key as long as it is there: only if it is
+     * deleted after every other traversal ended does it get "invalid key to
+     * 'next'"), and the state when no log is left either, and the side
+     * object if it holds nothing else.
+     */
+    private function dropTraversalIfIdle(): void
+    {
+        $extra = $this->extra;
+        $traversal = $extra?->traversal;
+        if ($traversal !== null) {
+            if ($traversal->cursorKey !== null) {
+                return;
+            }
+            foreach ($traversal->firstKeysGiven as $part => $keys) {
+                foreach ($keys as $phpKey => $_) {
+                    if ($this->hasPhpKey($part, $phpKey)) {
+                        unset($traversal->firstKeysGiven[$part][$phpKey]);
+                    }
+                }
+                if ($traversal->firstKeysGiven[$part] === []) {
+                    unset($traversal->firstKeysGiven[$part]);
+                }
+            }
+            if ($traversal->logs !== [] || $traversal->firstKeysGiven !== []) {
+                return;
+            }
+            $extra->traversal = null;
+        }
+        if ($extra !== null && $extra->otherValues === []) {
+            $this->extra = null;
+        }
+    }
+
+    private function traversal(): TableTraversal
+    {
+        $extra = $this->extra ??= new LuaTableExtra();
+        return $extra->traversal ??= new TableTraversal();
+    }
+
+    /** where Lua code calls next from: the savedpc of the caller (the instruction of the call), -1 for PHP code */
+    private static function callerPc(?Coroutine $L): int
+    {
+        return $L === null ? -1 : $L->ci->previous->savedpc;
+    }
+
+    /** ... and its code (null: not a Lua function) */
+    private static function callerProto(?Coroutine $L): ?Proto
+    {
+        $function = $L?->ci->previous->func;
+        return $function instanceof LuaClosure ? $function->proto : null;
+    }
+
+    /** ... and its frame (see TableTraversal::$holderFrameBytes) */
+    private static function callerFrameBytes(?Coroutine $L): int
+    {
+        return $L === null ? -1 : $L->ci->previous->frameBytes;
+    }
+
+    /** whether the caller looks like the holder (isCaller, in the holder's thread) */
+    private static function callsLikeHolder(TableTraversal $traversal, ?Coroutine $L, bool $sameRegisterCounts): bool
+    {
+        return $traversal->holderThread === $L && self::isCaller(
+            $traversal->holderPc,
+            $traversal->holderProto,
+            $traversal->holderFrameBytes,
+            $L,
+            $sameRegisterCounts,
+        );
+    }
+
+    /**
+     * Whether the code calling next now (see callerPc) is the traversal that
+     * called it from ($pc, $proto, $frameBytes) before: the same instruction
+     * in the same frame (a pairs loop's OP_TFORCALL, a 'k = next(t, k)'
+     * loop) or, with $sameRegisterCounts, another call of that frame into
+     * the same register ('k = next(t, k)' in two branches; used where both
+     * are at one key). Calls from one place cannot be told apart (iterator
+     * objects stepping through one function): the counts at logs and start
+     * keys keep a place for every traversal there.
+     */
+    private static function isCaller(
+        int $pc,
+        ?Proto $proto,
+        int $frameBytes,
+        ?Coroutine $L,
+        bool $sameRegisterCounts,
+    ): bool {
+        if ($frameBytes !== self::callerFrameBytes($L) || $proto !== self::callerProto($L)) {
+            return false;
+        }
+        $callerPc = self::callerPc($L);
+        if ($pc === $callerPc) {
+            return true;
+        }
+        return $sameRegisterCounts && $proto !== null
+            && OpCodes::getArgA($proto->code[$pc]) === OpCodes::getArgA($proto->code[$callerPc]);
+    }
+
+    /**
+     * a Lua string key as PHP stores it in $hash: a decimal integer in range
+     * without a leading zero or plus sign ("10", "-5", not "-0") is an integer
+     */
+    private static function phpStringKey(string $key): int|string
+    {
+        $integer = (int) $key;
+        return (string) $integer === $key ? $integer : $key;
     }
 
     private function hasPhpKey(int $part, int|string $phpKey): bool
     {
         return match ($part) {
-            0 => isset($this->arr[$phpKey]),
-            1 => isset($this->hash[$phpKey]),
+            self::INTEGER_KEYS => isset($this->arr[$phpKey]),
+            self::STRING_KEYS => isset($this->hash[$phpKey]),
             default => isset($this->extra->otherValues[$phpKey]),
         };
     }
 
-    private function currentPhpKey(int $part): int|string|null
+    private function partCount(int $part): int
     {
         return match ($part) {
-            0 => key($this->arr),
-            1 => key($this->hash),
+            self::INTEGER_KEYS => \count($this->arr),
+            self::STRING_KEYS => \count($this->hash),
+            default => \count($this->extra->otherValues ?? []),
+        };
+    }
+
+    /** the entries of $part, to read (moving its internal pointer while it is read would copy it) */
+    private function partEntries(int $part): array
+    {
+        return match ($part) {
+            self::INTEGER_KEYS => $this->arr,
+            self::STRING_KEYS => $this->hash,
+            default => $this->extra->otherValues,
+        };
+    }
+
+    private function pointerPhpKey(int $part): int|string|null
+    {
+        return match ($part) {
+            self::INTEGER_KEYS => key($this->arr),
+            self::STRING_KEYS => key($this->hash),
             default => key($this->extra->otherValues),
         };
     }
 
-    private function advancePart(int $part): void
+    private function firstPhpKey(int $part): int|string|null
+    {
+        return match ($part) {
+            self::INTEGER_KEYS => array_key_first($this->arr),
+            self::STRING_KEYS => array_key_first($this->hash),
+            default => array_key_first($this->extra->otherValues),
+        };
+    }
+
+    private function lastPhpKey(int $part): int|string|null
+    {
+        return match ($part) {
+            self::INTEGER_KEYS => array_key_last($this->arr),
+            self::STRING_KEYS => array_key_last($this->hash),
+            default => array_key_last($this->extra->otherValues),
+        };
+    }
+
+    private function advancePointer(int $part): void
     {
         match ($part) {
-            0 => next($this->arr),
-            1 => next($this->hash),
+            self::INTEGER_KEYS => next($this->arr),
+            self::STRING_KEYS => next($this->hash),
             default => next($this->extra->otherValues),
         };
     }
 
-    private function resetPart(int $part): void
+    private function resetPointer(int $part): void
     {
         match ($part) {
-            0 => reset($this->arr),
-            1 => reset($this->hash),
+            self::INTEGER_KEYS => reset($this->arr),
+            self::STRING_KEYS => reset($this->hash),
             default => reset($this->extra->otherValues),
         };
     }
 
-
-    /**
-     * The entry under $part's internal pointer, or the first entry of a
-     * following part; moves the cursor there.
-     *
-     * @return array{mixed, mixed}|null
-     */
-    private function currentOrFollowing(int $part): ?array
+    private function luaKey(int $part, int|string $phpKey): mixed
     {
-        $phpKey = $this->currentPhpKey($part);
-        if ($phpKey === null) {
-            return $part < 2 ? $this->firstFromPart($part + 1) : $this->endTraversal();
-        }
-        return $this->entryAt($part, $phpKey);
-    }
-
-    /**
-     * The first entry of $part or of a following part. (An empty part is
-     * skipped without reset(), which would copy an empty array into a new
-     * one: see endTraversal.)
-     *
-     * @return array{mixed, mixed}|null
-     */
-    private function firstFromPart(int $part): ?array
-    {
-        if ($part === 0 && $this->arr !== []) {
-            reset($this->arr);
-            return $this->entryAt(0, key($this->arr));
-        }
-        if ($part <= 1 && $this->hash !== []) {
-            reset($this->hash);
-            return $this->entryAt(1, key($this->hash));
-        }
-        $extra = $this->extra;
-        if ($extra !== null && $extra->otherValues !== []) {
-            reset($extra->otherValues);
-            return $this->entryAt(2, key($extra->otherValues));
-        }
-        return $this->endTraversal();
+        return match ($part) {
+            self::INTEGER_KEYS => $phpKey,
+            self::STRING_KEYS => (string) $phpKey,
+            default => $this->extra->otherKeys[$phpKey],
+        };
     }
 
     /** @return array{mixed, mixed} */
-    private function entryAt(int $part, int|string $phpKey): array
+    private function entry(int $part, int|string $phpKey): array
     {
-        if ($part === 0) {
-            $key = $phpKey;
-            $value = $this->arr[$phpKey];
-        } elseif ($part === 1) {
-            $key = (string) $phpKey;
-            $value = $this->hash[$phpKey];
-        } else {
-            $key = $this->extra->otherKeys[$phpKey];
-            $value = $this->extra->otherValues[$phpKey];
-        }
-        $extra = $this->extra ??= new LuaTableExtra();
-        $extra->cursorKey = $key;
-        return [$key, $value];
+        return match ($part) {
+            self::INTEGER_KEYS => [$phpKey, $this->arr[$phpKey]],
+            self::STRING_KEYS => [(string) $phpKey, $this->hash[$phpKey]],
+            default => [$this->extra->otherKeys[$phpKey], $this->extra->otherValues[$phpKey]],
+        };
     }
 
     /**
-     * No more entries: forget the cursor. reset() and next() take the PHP
-     * array by reference, which leaves the property holding it a PHP
-     * reference (32 bytes more for as long as the table lives), so turn the
-     * parts back into plain arrays too.
+     * reset() and next() take the PHP array by reference, which leaves the
+     * property holding it a PHP reference (32 bytes more for as long as the
+     * table lives): turn it back into a plain array when its traversal is
+     * over.
      */
-    private function endTraversal(): null
+    private function unreferencePart(int $part): void
     {
-        $arr = $this->arr;
-        unset($this->arr);
-        $this->arr = $arr;
-        $hash = $this->hash;
-        unset($this->hash);
-        $this->hash = $hash;
-        $extra = $this->extra;
-        if ($extra === null) {
-            return null;
+        if ($part === self::INTEGER_KEYS) {
+            $arr = $this->arr;
+            unset($this->arr);
+            $this->arr = $arr;
+        } elseif ($part === self::STRING_KEYS) {
+            $hash = $this->hash;
+            unset($this->hash);
+            $this->hash = $hash;
+        } else {
+            $extra = $this->extra;
+            $otherValues = $extra->otherValues;
+            unset($extra->otherValues);
+            $extra->otherValues = $otherValues;
         }
-        if ($extra->otherValues === []) {
-            $this->extra = null;  // it only held the cursor
-            return null;
-        }
-        $otherValues = $extra->otherValues;
-        unset($extra->otherValues);
-        $extra->otherValues = $otherValues;
-        $extra->cursorKey = null;
-        return null;
     }
+
+    /* }================================================================== */
 }

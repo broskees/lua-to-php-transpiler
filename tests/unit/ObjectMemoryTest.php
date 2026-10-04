@@ -97,6 +97,20 @@ function test_a_traversed_table_is_as_small_as_before(): void
     assertAtMost(128, 'local t = {}; next(t); keep[i] = t');
 }
 
+function test_traversals_that_met_leave_nothing_behind(): void
+{
+    // nested traversals, and emptiness checks inside one, once they are over
+    assertAtMost(
+        128 + 56 + 320,
+        'local t = {x = i, y = i}; for _ in pairs(t) do for _ in pairs(t) do end end; keep[i] = t',
+    );
+    assertAtMost(128 + 56 + 160, 'local t = {i, i}; for _ in pairs(t) do assert(next(t)) end; keep[i] = t');
+    assertAtMost(
+        128 + 56 + 320,
+        'local t = {x = i, y = i, z = i}; for k in pairs(t) do for k2 in next, t, k do end end; keep[i] = t',
+    );
+}
+
 function test_a_closure_holds_its_upvalues_without_an_array(): void
 {
     $closedUpvalue = 56;  // UpVal: one property

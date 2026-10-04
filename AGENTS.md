@@ -491,12 +491,41 @@ Lua string keys and integer keys distinct.
   store "10" as 10 there, it is still a string), `metatable`, `sizearray`
   (the border hint, C's alimit) and `extra`: a `LuaTableExtra`, null until
   needed, with `otherValues/otherKeys` (float, boolean, object keys) and
-  the cursor `next()` keeps so traversal is O(1) and survives clearing
-  fields; it is dropped when a traversal ends with no such keys. Nil is
-  never stored. Only `LuaTable::next` may use reset()/next() on a part:
-  by-reference array functions leave the property a PHP reference (+32
-  bytes), which `endTraversal` undoes. Light userdata:
-  `LightUserdata::pointingTo($obj)`.
+  `traversal`, the `TableTraversal` of the next() calls in progress; it is
+  dropped when no such key and no traversal is left. Nil is never stored.
+  Traversal order is each part's PHP order (arr, hash, other keys), and
+  every traversal goes on from its own key, as C's from its key's slot:
+  whatever other next() calls ran in between, also after its key was
+  deleted (C keeps a dead key in its node; a PHP array cannot say where a
+  deleted key was, so its place must be kept before). One traversal, the
+  holder (`cursorKey`), owns the PHP internal pointers, kept past its key
+  (PHP does not move a pointer off a deleted entry; key() looks past it):
+  a pairs() step is O(1), also when it clears every field;
+  `BaseLib::next` has that fast path inline. Traversals are told apart by
+  where they call next from (the caller's savedpc, code, frameBytes, which
+  grows with each frame of a thread, and thread: `LuaTable::isCaller`), so
+  'for k2 in next, t, k' inside the loop over k, recursion and coroutines
+  keep their places. next(t) while another traversal holds the pointer
+  moves nothing (an emptiness check is O(1)) and remembers the first key
+  given. A traversal at a part's first key takes the pointer (one at
+  another key when the pointer is free: O(position)); the holder it
+  replaces is suspended into a `TraversalLog` owned by its call site: its
+  part's keys up to its key, O(position), extended in batches as it goes
+  on (O(1) a step), with counts of the suspended traversals at each key
+  (only the owner moves its count away, so a peek does not take a
+  suspended traversal's place; a log goes at count 0). Calls from one
+  place (iterator objects stepping through one function, tail calls)
+  look alike: the counts keep a place for each. Logs are bounded (4 keys
+  per table entry + 256, 16 logs, least recently used out) and not used
+  once keys were added (count grown, last key changed). A traversal at a
+  deleted key nothing remembers (past the bounds, or one started by
+  next(t) beside another whose first key is deleted after all others
+  ended) gets "invalid key to 'next'", as a key never in the table does.
+  `tests/diff/next_traversal_stress.lua` checks next's contract over
+  random interleavings. Only the traversal code may use reset()/next() on
+  a part: by-reference array functions leave the property a PHP reference
+  (+32 bytes), which `unreferencePart` undoes when a traversal leaves the
+  part. Light userdata: `LightUserdata::pointingTo($obj)`.
 - **String order.** `Vm::lessThan/lessEqual` (all string `<`/`<=`, so also
   table.sort and math.min/max) follow lvm.c l_strcmp: strcoll per segment
   between embedded '\0's (`Vm::compareStrings`), or strcmp while
