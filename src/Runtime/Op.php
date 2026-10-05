@@ -540,6 +540,22 @@ final class Op
         }
     }
 
+    /**
+     * OP_CLOSE in a function without to-be-closed variables (no OP_TBC or
+     * OP_TFORPREP): close all upvalues >= R[A]
+     */
+    public static function closeUpvalues(Coroutine $L, int $pc, int $a): void
+    {
+        $ci = $L->ci;
+        if ($L->trap) {
+            Hooks::traceExec($L, $ci, $pc);
+        }
+        if ($ci->openupval !== []) {
+            $ci->savedpc = $pc;
+            Upvalues::closeUpvalues($ci, $a);
+        }
+    }
+
     /** OP_TBC: mark variable A "to be closed" */
     public static function tbc(Coroutine $L, int $pc, int $a): void
     {

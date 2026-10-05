@@ -135,6 +135,13 @@ final class FunctionEmitter
     private bool $hasBackwardJumps = false;
 
     /**
+     * whether the function can have to-be-closed variables: only OP_TBC and
+     * OP_TFORPREP (a generic for's closing value) create them (lfunc.c:
+     * luaF_newtbcupval). Without, closing a level only closes upvalues.
+     */
+    private bool $hasToBeClosedVariables;
+
+    /**
      * @param bool $countSteps code for an embedded state (Emitter::emitChunk):
      *   the function charges its size in steps when called and a loop's
      *   size at each jump back (Runtime\Budget: GlobalState::$stepsLeft,
@@ -154,6 +161,8 @@ final class FunctionEmitter
         foreach ($proto->code as $instruction) {
             $this->opcodes[] = OpCodes::getOpcode($instruction);
         }
+        $this->hasToBeClosedVariables = \in_array(OpCodes::OP_TBC, $this->opcodes, true)
+            || \in_array(OpCodes::OP_TFORPREP, $this->opcodes, true);
         $this->findJumpTargets();
         $this->findConstructorRuns();
         $this->findLoops();
@@ -1214,7 +1223,7 @@ final class FunctionEmitter
             case OpCodes::OP_CONCAT:
                 return self::lines($call('concat', $a, $b) . ';');
             case OpCodes::OP_CLOSE:
-                return self::lines($call('close', $a) . ';');
+                return self::lines($call($this->hasToBeClosedVariables ? 'close' : 'closeUpvalues', $a) . ';');
             case OpCodes::OP_TBC:
                 return self::lines($call('tbc', $a) . ';');
             case OpCodes::OP_JMP:
@@ -1674,6 +1683,13 @@ final class FunctionEmitter
                 );
 
             case OpCodes::OP_CLOSE:
+                if (!$this->hasToBeClosedVariables) {  // (lfunc.c: luaF_close, with no tbc variables)
+                    return self::lines(
+                        'if ($ci->openupval !== []) {',
+                        '    ' . self::savePc($pc) . " Upvalues::closeUpvalues(\$ci, $a);",
+                        '}',
+                    );
+                }
                 return self::lines(
                     'if ($ci->openupval !== [] || $ci->tbclist !== []) {',
                     '    ' . self::savePc($pc) . " Upvalues::close(\$L, \$ci, $a);",
@@ -1771,7 +1787,13 @@ final class FunctionEmitter
 
             case OpCodes::OP_RETURN:
                 $code = '';
-                if ($k) {  // may there be open upvalues?
+                if ($k && !$this->hasToBeClosedVariables) {  // may there be open upvalues?
+                    $code .= self::lines(
+                        'if ($ci->openupval !== []) {',
+                        '    ' . self::savePc($pc) . ' Upvalues::closeUpvalues($ci, 0);',
+                        '}',
+                    );
+                } elseif ($k) {  // ... or to-be-closed variables?
                     $code .= self::lines(
                         'if ($ci->openupval !== [] || $ci->tbclist !== []) {',
                         '    ' . self::savePc($pc) . ' Upvalues::close($L, $ci, 0);',

@@ -483,7 +483,10 @@ Lua string keys and integer keys distinct.
   (`Calls::checkStackForCallMetamethod`).
 - **Upvalues.** An open `UpVal->v` is a PHP reference to `$R[$reg]`; one UpVal
   per register (`Upvalues::find`), closed by `Upvalues::close`/`closeUpvalues`
-  (OP_CLOSE, OP_RETURN/OP_TAILCALL with k, error unwinding). `v` is UpVal's
+  (OP_CLOSE, OP_RETURN/OP_TAILCALL with k, error unwinding). Only OP_TBC
+  and OP_TFORPREP (a generic for's closing value) create to-be-closed
+  variables: a function with neither calls `closeUpvalues` directly for
+  OP_CLOSE and OP_RETURN (`Op::closeUpvalues` compact). `v` is UpVal's
   only property. `LuaClosure` is abstract: like C's LClosure, a closure is
   sized to its upvalue count, `LuaClosure1/2/3` in properties `u0..u2`,
   `LuaClosureN` (none or more than 3) in the list `upvals`;
