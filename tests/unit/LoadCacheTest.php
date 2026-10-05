@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Tests\LoadCacheTest;
 
 use LuaPhp\Runtime\ChunkLoader;
+use LuaPhp\Runtime\Coroutine;
 use LuaPhp\Runtime\LoadCache;
 use LuaPhp\Runtime\Standalone;
 
@@ -445,4 +446,33 @@ function test_cache_files_do_nothing_when_run_directly(): void
     foreach (entries("$directory/cache") as $entry) {
         assertSame([0, '', ''], runCommand(['php', ...OPCACHE_ON_NEW_FILES, $entry], '', $directory), basename($entry));
     }
+}
+
+/**
+ * The same code loaded under another chunk name is the same PHP, so PHP
+ * compiles its factory once (ChunkLoader's factory cache): a compile per
+ * name would stay for good, as PHP never frees eval'd code. The name
+ * reaches Lua through the Proto (diff case load_cache.lua). With one entry
+ * in the load cache, what stays per load is what PHP keeps of eval'd code:
+ * 33 KB here when the chunk name was part of the PHP.
+ */
+function test_a_chunk_loaded_under_many_names_is_compiled_once(): void
+{
+    $L = Coroutine::newState();
+    $text = "local t = {}  -- " . __FUNCTION__ . "\n"
+        . "for i = 1, 3 do t[i] = function () return i * 2 end end\nreturn t\n";
+    $memoryEntryLimit = LoadCache::$memoryEntryLimit;
+    LoadCache::$memoryEntryLimit = 1;
+    try {
+        ChunkLoader::load($L, $text, '=first', null);
+        $before = memory_get_usage();
+        $loads = 200;
+        for ($i = 0; $i < $loads; $i++) {
+            ChunkLoader::load($L, $text, "@module$i.lua", null);
+        }
+        $bytesPerLoad = intdiv(memory_get_usage() - $before, $loads);
+    } finally {
+        LoadCache::$memoryEntryLimit = $memoryEntryLimit;
+    }
+    assertTrue($bytesPerLoad < 1024, "$bytesPerLoad bytes stay per load");
 }

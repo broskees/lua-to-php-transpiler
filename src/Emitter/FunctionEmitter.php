@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace LuaPhp\Emitter;
 
-use LuaPhp\Compiler\ChunkId;
 use LuaPhp\Compiler\OpCodes;
 use LuaPhp\Compiler\Proto;
 use LuaPhp\Runtime\DebugInfo;
@@ -234,11 +233,13 @@ final class FunctionEmitter
         }
         $useClause = $uses === [] ? '' : ' use (' . implode(', ', $uses) . ')';
 
-        $sourceName = PhpLiteral::commentText(ChunkId::of($proto->source ?? '=?'), 60);
         $closureClass = self::closureClass($proto);
         $code = "    \$function_{$this->path} = static function "
             . "(Coroutine \$L, $closureClass \$cl, array \$R, int \$callstatus = 0)$useClause: ?array {\n";
-        $code .= self::INDENT . "// function <$sourceName:{$proto->linedefined},{$proto->lastlinedefined}>"
+        // not the chunk name: the same code loaded under another name is
+        // the same PHP, so ChunkLoader::factoryForSource reuses its factory
+        // (PHP never frees eval'd code); the name reaches Lua in the Proto
+        $code .= self::INDENT . "// function <{$proto->linedefined},{$proto->lastlinedefined}>"
             . " numparams={$proto->numparams}" . ($proto->is_vararg ? ' vararg' : '')
             . " maxstacksize={$proto->maxstacksize} instructions=" . \count($proto->code) . "\n";
         // ldo.c: luaD_precall for a Lua function (CallInfo::push, inline)

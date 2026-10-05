@@ -50,6 +50,13 @@ for _ = 1, 2 do
   print(info.source, info.short_src, info.linedefined, info.lastlinedefined, debug.getupvalue(f, 1))
 end
 
+-- one text under several names: each load has its own (they share the PHP)
+for _, chunkname in ipairs{"@one.lua", "=two", "@one.lua", "three"} do
+  local f = load("\nreturn function (t)\n  return t.x\nend\n", chunkname)()
+  local info = debug.getinfo(f, "S")
+  print(info.source, info.short_src, info.linedefined, select(2, xpcall(f, debug.traceback)))
+end
+
 -- the chunk name is never one of the chunk's strings, even when equal to one
 local name = string.rep("X", 50)
 for i = 1, 2 do

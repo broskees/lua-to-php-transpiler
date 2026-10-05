@@ -199,7 +199,9 @@ Lua string keys and integer keys distinct.
   `LoadCache` lookup -> on a miss `Compiler::compile`/`Undump::undump` ->
   `Emitter::emitChunk($proto)` -> eval -> a factory `static function (Proto
   $proto): \Closure` returning the main function's code. Factories are also
-  cached by PHP-source hash (PHP never frees eval'd code).
+  cached by PHP-source hash (PHP never frees eval'd code), and the emitted
+  PHP never contains the chunk name (it reaches Lua in the Proto): one
+  text loaded under many names compiles one factory.
   Ahead of time: lua2php output never compiles or emits a file at run time.
   `bin/lua2php <dir> [-o <outdir>]` transpiles every `*.lua` of a project
   (x.lua -> x.php, other names get ".php": `ChunkLoader::precompiledFileName`).
