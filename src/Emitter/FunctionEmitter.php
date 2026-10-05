@@ -37,6 +37,9 @@ final class FunctionEmitter
 {
     private const INDENT = '        ';
 
+    /** @var list<int> the opcode of each instruction, decoded once (lopcodes.h: GET_OPCODE) */
+    private array $opcodes = [];
+
     /** @var array<int, true> instructions that are jump targets */
     private array $jumpTargets = [];
 
@@ -148,6 +151,9 @@ final class FunctionEmitter
         private readonly string $path,
         private readonly bool $countSteps = false,
     ) {
+        foreach ($proto->code as $instruction) {
+            $this->opcodes[] = OpCodes::getOpcode($instruction);
+        }
         $this->findJumpTargets();
         $this->findConstructorRuns();
         $this->findLoops();
@@ -175,7 +181,7 @@ final class FunctionEmitter
                 $pieceWeight = 1 + ($this->constructorLiterals ? intdiv($last - $pc + 1, 16) : 0);
             } else {
                 $last = $pc;
-                $pieceWeight = self::instructionWeight($code[$pc]);
+                $pieceWeight = $this->instructionWeight($pc);
             }
             $weight += $pieceWeight;
             if (!isset($this->inLoop[$pc])) {
@@ -338,8 +344,8 @@ final class FunctionEmitter
         // most functions weigh less than a segment even with every
         // instruction of their constructor runs weighed
         $weightAtMost = 0;
-        foreach ($code as $instruction) {
-            $weightAtMost += self::instructionWeight($instruction);
+        foreach (array_keys($code) as $pc) {
+            $weightAtMost += $this->instructionWeight($pc);
         }
         if ($weightAtMost <= self::$maximumSegmentWeight) {
             return;
@@ -348,7 +354,7 @@ final class FunctionEmitter
         // before any of $target + 1 .. $pc splits that loop
         $loopDepthChanges = [];
         foreach ($code as $pc => $instruction) {
-            $target = match (OpCodes::getOpcode($instruction)) {
+            $target = match ($this->opcodes[$pc]) {
                 OpCodes::OP_JMP => $pc + 1 + OpCodes::getArgSJ($instruction),
                 OpCodes::OP_FORLOOP, OpCodes::OP_TFORLOOP => $pc + 1 - OpCodes::getArgBx($instruction),
                 default => null,
@@ -372,7 +378,7 @@ final class FunctionEmitter
                 continue;
             }
             if (isset($this->consumed[$pc])) {
-                $pieceWeights[\count($pieceWeights) - 1] += self::instructionWeight($code[$pc]);
+                $pieceWeights[\count($pieceWeights) - 1] += $this->instructionWeight($pc);
                 continue;
             }
             $pieceStarts[] = $pc;
@@ -381,7 +387,7 @@ final class FunctionEmitter
                 $runLast = $this->constructorRuns[$pc];
                 $pieceWeights[] = 1;  // a call, or its fast path of literals
             } else {
-                $pieceWeights[] = self::instructionWeight($code[$pc]);
+                $pieceWeights[] = $this->instructionWeight($pc);
             }
         }
         if (array_sum($pieceWeights) <= self::$maximumSegmentWeight) {
@@ -413,15 +419,16 @@ final class FunctionEmitter
 
     /**
      * Roughly the C stack opcache's optimizer needs for the code of
-     * $instruction (see $maximumSegmentWeight), in units of an ordinary
+     * instruction $pc (see $maximumSegmentWeight), in units of an ordinary
      * instruction: 40 to 108 bytes, measured compiling long runs of one
      * kind of statement in a fiber. Each value an instruction handles in a
      * sequence of its own (call results, vararg values, OP_SETLIST's values,
      * OP_CONCAT's operands, generic for variables) takes 40 to 60 more.
      */
-    private static function instructionWeight(int $instruction): int
+    private function instructionWeight(int $pc): int
     {
-        return 1 + match (OpCodes::getOpcode($instruction)) {
+        $instruction = $this->proto->code[$pc];
+        return 1 + match ($this->opcodes[$pc]) {
             OpCodes::OP_CALL, OpCodes::OP_VARARG => max(OpCodes::getArgC($instruction) - 1, 0),
             OpCodes::OP_TFORCALL => OpCodes::getArgC($instruction),
             OpCodes::OP_SETLIST, OpCodes::OP_CONCAT => OpCodes::getArgB($instruction),
@@ -508,11 +515,11 @@ final class FunctionEmitter
      */
     private function hookCheck(int $pc): string
     {
-        $opcode = OpCodes::getOpcode($this->proto->code[$pc]);
+        $opcode = $this->opcodes[$pc];
         if ($opcode === OpCodes::OP_VARARGPREP || $opcode === OpCodes::OP_TFORLOOP) {
             return '';
         }
-        if (OpCodes::isIT($this->proto->code[$pc])) {
+        if (OpCodes::testITMode($opcode) && OpCodes::getArgB($this->proto->code[$pc]) === 0) {  // lopcodes.h: isIT
             return self::lines("if (\$trap) { Hooks::traceExec(\$L, \$ci, $pc, \$top); }");
         }
         return self::lines("if (\$trap) { Hooks::traceExec(\$L, \$ci, $pc); }");
@@ -523,7 +530,7 @@ final class FunctionEmitter
     {
         $code = $this->proto->code;
         foreach ($code as $pc => $instruction) {
-            $opcode = OpCodes::getOpcode($instruction);
+            $opcode = $this->opcodes[$pc];
             switch ($opcode) {
                 case OpCodes::OP_JMP:
                     $this->jumpTargets[$pc + 1 + OpCodes::getArgSJ($instruction)] = true;
@@ -557,19 +564,19 @@ final class FunctionEmitter
             $nextPc = $pc + 1;
             if (
                 $nextPc < \count($code)
-                && OpCodes::testMMMode(OpCodes::getOpcode($code[$nextPc]))
+                && OpCodes::testMMMode($this->opcodes[$nextPc])
                 && !isset($this->jumpTargets[$nextPc])
             ) {
                 $this->consumed[$nextPc] = true;
-            } elseif ($nextPc < \count($code) && OpCodes::testMMMode(OpCodes::getOpcode($code[$nextPc]))) {
+            } elseif ($nextPc < \count($code) && OpCodes::testMMMode($this->opcodes[$nextPc])) {
                 $this->jumpTargets[$pc + 2] = true;  // success path skips the MMBIN with a goto
             }
         }
-        foreach ($code as $pc => $instruction) {
-            $opcode = OpCodes::getOpcode($instruction);
+        foreach (array_keys($code) as $pc) {
+            $opcode = $this->opcodes[$pc];
             if (
                 ($opcode === OpCodes::OP_LOADKX || $opcode === OpCodes::OP_NEWTABLE || $opcode === OpCodes::OP_SETLIST)
-                && $pc + 1 < \count($code) && OpCodes::getOpcode($code[$pc + 1]) === OpCodes::OP_EXTRAARG
+                && $pc + 1 < \count($code) && $this->opcodes[$pc + 1] === OpCodes::OP_EXTRAARG
             ) {
                 $this->consumed[$pc + 1] = true;
             }
@@ -600,7 +607,7 @@ final class FunctionEmitter
         $code = $this->proto->code;
         $loopChanges = [];
         foreach ($code as $pc => $instruction) {
-            $target = match (OpCodes::getOpcode($instruction)) {
+            $target = match ($this->opcodes[$pc]) {
                 OpCodes::OP_JMP => $pc + 1 + OpCodes::getArgSJ($instruction),
                 OpCodes::OP_FORLOOP, OpCodes::OP_TFORLOOP => $pc + 1 - OpCodes::getArgBx($instruction),
                 default => null,
@@ -635,7 +642,7 @@ final class FunctionEmitter
         $instructionCount = \count($code);
         $runInstructions = 0;
         for ($pc = 0; $pc < $instructionCount; $pc++) {
-            if (OpCodes::getOpcode($code[$pc]) !== OpCodes::OP_NEWTABLE) {
+            if ($this->opcodes[$pc] !== OpCodes::OP_NEWTABLE) {
                 continue;
             }
             $last = $this->constructorRunEnd($pc);
@@ -719,7 +726,7 @@ final class FunctionEmitter
             $b = OpCodes::getArgB($instruction);
             $c = OpCodes::getArgC($instruction);
             $k = OpCodes::getArgK($instruction);
-            $opcode = OpCodes::getOpcode($instruction);
+            $opcode = $this->opcodes[$pc];
             switch ($opcode) {
                 case OpCodes::OP_NEWTABLE:
                     $arraySize = $c;
@@ -873,8 +880,8 @@ final class FunctionEmitter
             $k = OpCodes::getArgK($instruction);
             $valueIsKnown = $k === 1 || isset($written[OpCodes::getArgC($instruction)]);
             $nextIsExtraArgument = $pc + 1 < $instructionCount
-                && OpCodes::getOpcode($code[$pc + 1]) === OpCodes::OP_EXTRAARG;
-            switch (OpCodes::getOpcode($instruction)) {
+                && $this->opcodes[$pc + 1] === OpCodes::OP_EXTRAARG;
+            switch ($this->opcodes[$pc]) {
                 case OpCodes::OP_NEWTABLE:
                 case OpCodes::OP_LOADKX:
                     if (!$nextIsExtraArgument) {
@@ -935,7 +942,7 @@ final class FunctionEmitter
     private function comment(int $pc): string
     {
         $instruction = $this->proto->code[$pc];
-        $opcode = OpCodes::getOpcode($instruction);
+        $opcode = $this->opcodes[$pc];
         $name = OpCodes::OPNAMES[$opcode];
         $arguments = match (OpCodes::getOpMode($opcode)) {
             OpCodes::IABC => OpCodes::getArgA($instruction) . ' ' . OpCodes::getArgB($instruction)
@@ -1063,7 +1070,7 @@ final class FunctionEmitter
         $event = OpCodes::getArgC($instruction);
         $flip = OpCodes::getArgK($instruction) ? 'true' : 'false';
         $b = OpCodes::getArgB($instruction);
-        $call = match (OpCodes::getOpcode($instruction)) {
+        $call = match ($this->opcodes[$mmPc]) {
             OpCodes::OP_MMBIN => 'MetaMethods::tryBinTM($L, ' . self::r($a) . ', ' . self::r($b) . ", $event, $a, $b)",
             OpCodes::OP_MMBINI => 'MetaMethods::tryBinITM($L, ' . self::r($a)
                 . ', ' . OpCodes::getArgSB($instruction) . ", $flip, $event, $a)",
@@ -1122,7 +1129,7 @@ final class FunctionEmitter
     {
         $proto = $this->proto;
         $instruction = $proto->code[$pc];
-        $opcode = OpCodes::getOpcode($instruction);
+        $opcode = $this->opcodes[$pc];
         $a = OpCodes::getArgA($instruction);
         $b = OpCodes::getArgB($instruction);
         $c = OpCodes::getArgC($instruction);
@@ -1277,12 +1284,12 @@ final class FunctionEmitter
             return null;
         }
         $instruction = $code[$pc];
-        $opcode = OpCodes::getOpcode($instruction);
+        $opcode = $this->opcodes[$pc];
         $a = OpCodes::getArgA($instruction);
         $b = OpCodes::getArgB($instruction);
         $c = OpCodes::getArgC($instruction);
         $mm = $code[$mmPc];
-        $mmOpcode = OpCodes::getOpcode($mm);
+        $mmOpcode = $this->opcodes[$mmPc];
         $flip = OpCodes::getArgK($mm) ? 'true' : 'false';
         if ($opcode >= OpCodes::OP_ADD) {  // OP_ADD .. OP_SHR: R[B] op R[C]
             $operation = $opcode - OpCodes::OP_ADD;
@@ -1327,7 +1334,7 @@ final class FunctionEmitter
     {
         $proto = $this->proto;
         $instruction = $proto->code[$pc];
-        $opcode = OpCodes::getOpcode($instruction);
+        $opcode = $this->opcodes[$pc];
         $a = OpCodes::getArgA($instruction);
         $b = OpCodes::getArgB($instruction);
         $c = OpCodes::getArgC($instruction);

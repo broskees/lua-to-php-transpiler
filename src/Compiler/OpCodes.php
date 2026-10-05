@@ -351,6 +351,17 @@ final class OpCodes
 
     private const INSTRUCTION_MASK = 0xFFFFFFFF;
 
+    // lopcodes.h: the masks GET_OPCODE and the GETARG_* macros compute,
+    // MASK1(size, 0), as constants (C's compiler folds them; computing
+    // them per call made decoding a fifth of load()'s time for new code)
+    private const MASK_OP = (1 << self::SIZE_OP) - 1;  // MASK1(SIZE_OP, 0)
+    private const MASK_A = (1 << self::SIZE_A) - 1;  // MASK1(SIZE_A, 0)
+    private const MASK_B = (1 << self::SIZE_B) - 1;  // MASK1(SIZE_B, 0)
+    private const MASK_C = (1 << self::SIZE_C) - 1;  // MASK1(SIZE_C, 0)
+    private const MASK_BX = (1 << self::SIZE_BX) - 1;  // MASK1(SIZE_Bx, 0)
+    private const MASK_AX = (1 << self::SIZE_AX) - 1;  // MASK1(SIZE_Ax, 0)
+    private const MASK_SJ = (1 << self::SIZE_SJ) - 1;  // MASK1(SIZE_sJ, 0)
+
     // lopcodes.h: getOpMode
     public static function getOpMode(int $opcode): int
     {
@@ -428,7 +439,7 @@ final class OpCodes
     // lopcodes.h: GET_OPCODE
     public static function getOpcode(int $instruction): int
     {
-        return ($instruction >> self::POS_OP) & self::mask1(self::SIZE_OP, 0);
+        return ($instruction >> self::POS_OP) & self::MASK_OP;
     }
 
     // lopcodes.h: SET_OPCODE
@@ -453,7 +464,7 @@ final class OpCodes
     // lopcodes.h: GETARG_A
     public static function getArgA(int $instruction): int
     {
-        return self::getarg($instruction, self::POS_A, self::SIZE_A);
+        return ($instruction >> self::POS_A) & self::MASK_A;
     }
 
     // lopcodes.h: SETARG_A
@@ -465,7 +476,7 @@ final class OpCodes
     // lopcodes.h: GETARG_B
     public static function getArgB(int $instruction): int
     {
-        return self::getarg($instruction, self::POS_B, self::SIZE_B);
+        return ($instruction >> self::POS_B) & self::MASK_B;
     }
 
     // lopcodes.h: GETARG_sB
@@ -483,7 +494,7 @@ final class OpCodes
     // lopcodes.h: GETARG_C
     public static function getArgC(int $instruction): int
     {
-        return self::getarg($instruction, self::POS_C, self::SIZE_C);
+        return ($instruction >> self::POS_C) & self::MASK_C;
     }
 
     // lopcodes.h: GETARG_sC
@@ -507,7 +518,7 @@ final class OpCodes
     // lopcodes.h: GETARG_k
     public static function getArgK(int $instruction): int
     {
-        return self::getarg($instruction, self::POS_K, 1);
+        return ($instruction >> self::POS_K) & 1;  // MASK1(1, 0)
     }
 
     // lopcodes.h: SETARG_k
@@ -519,7 +530,7 @@ final class OpCodes
     // lopcodes.h: GETARG_Bx
     public static function getArgBx(int $instruction): int
     {
-        return self::getarg($instruction, self::POS_BX, self::SIZE_BX);
+        return ($instruction >> self::POS_BX) & self::MASK_BX;
     }
 
     // lopcodes.h: SETARG_Bx
@@ -531,7 +542,7 @@ final class OpCodes
     // lopcodes.h: GETARG_Ax
     public static function getArgAx(int $instruction): int
     {
-        return self::getarg($instruction, self::POS_AX, self::SIZE_AX);
+        return ($instruction >> self::POS_AX) & self::MASK_AX;
     }
 
     // lopcodes.h: SETARG_Ax
@@ -543,7 +554,7 @@ final class OpCodes
     // lopcodes.h: GETARG_sBx
     public static function getArgSBx(int $instruction): int
     {
-        return self::getarg($instruction, self::POS_BX, self::SIZE_BX) - self::OFFSET_SBX;
+        return (($instruction >> self::POS_BX) & self::MASK_BX) - self::OFFSET_SBX;
     }
 
     // lopcodes.h: SETARG_sBx
@@ -555,7 +566,7 @@ final class OpCodes
     // lopcodes.h: GETARG_sJ
     public static function getArgSJ(int $instruction): int
     {
-        return self::getarg($instruction, self::POS_SJ, self::SIZE_SJ) - self::OFFSET_SJ;
+        return (($instruction >> self::POS_SJ) & self::MASK_SJ) - self::OFFSET_SJ;
     }
 
     // lopcodes.h: SETARG_sJ
