@@ -22,8 +22,9 @@ takes a few minutes; run it on an otherwise idle machine.
   a file written less than 2 seconds ago, and the JIT with it). *saved PHP*
   runs with the JIT as php.ini sets it, *JIT* adds `-d opcache.jit=tracing`
   (with its own file cache); the report's header shows php.ini's
-  `opcache.jit` (lua2php output turns the tracing JIT on itself only when
-  it is `off` with a buffer). Every number is the median wall time of `runs`
+  `opcache.jit` (lua2php output turns the JIT on itself, as mode 1054,
+  tracing without register allocation, only when it is `off` with a
+  buffer). Every number is the median wall time of `runs`
   runs (default 5) after one untimed run, process startup included, and
   the ratios are to `lua5.4`. *transpile ms* times `bin/lua2php` itself
   (same options, after one untimed run); it is never part of a run time.

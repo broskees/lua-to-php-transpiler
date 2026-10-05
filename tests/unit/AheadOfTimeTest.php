@@ -217,6 +217,11 @@ function test_lua_init_code_is_loaded_like_load(): void
     assertSame([0, "init file\nhello\n", ''], $withInit('@init.lua', true));
 }
 
+/**
+ * The JIT goes on as mode 1054 (tracing without register allocation), not
+ * 'tracing' (1254), whose loop traces repeat iterations after a VM interrupt
+ * in PHP 8.4 and 8.5 (see Standalone::switchJitOn).
+ */
 function test_jit_is_switched_on_only_when_the_host_left_it_available(): void
 {
     $directory = scratchDirectory() . '/aot-jit';
@@ -233,11 +238,11 @@ function test_jit_is_switched_on_only_when_the_host_left_it_available(): void
         // [php options, the JIT's state at the end: opcache.jit, on]
         [
             ['-d', 'opcache.enable_cli=1', '-d', 'opcache.jit=off', '-d', 'opcache.jit_buffer_size=16M'],
-            "jit tracing on\n",
+            "jit 1054 on\n",
         ],
         [
             ['-d', 'opcache.enable_cli=1', '-d', 'opcache.jit=0', '-d', 'opcache.jit_buffer_size=16M'],
-            "jit tracing on\n",
+            "jit 1054 on\n",
         ],
         [
             ['-d', 'opcache.enable_cli=1', '-d', 'opcache.jit=disable', '-d', 'opcache.jit_buffer_size=16M'],

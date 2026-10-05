@@ -640,6 +640,14 @@ Lua string keys and integer keys distinct.
   warn). Hosts may disable ini_set (and getmypid, set_time_limit, putenv,
   ...; see Files and processes): every ini_set is behind
   `function_exists('ini_set')`, and without it the host's values stay.
+  lua2php scripts turn opcache's JIT on (`Standalone::switchJitOn`) only
+  when the host left it off (opcache.jit=off) with a buffer, and as mode
+  1054 (tracing without register allocation), never 'tracing' (1254): in
+  PHP 8.4 and 8.5, a VM interrupt (an async signal handler, a sampling
+  profiler such as Excimer) that hits a 1254 loop trace running ?? or ?:
+  resumes the loop with stale register-held locals, so iterations repeat
+  (php-src zend_jit_trace.c); 1054 gave no wrong run in 44 and costs about
+  1% more CPU. Never profile under 1254.
   Lua cannot observe two of them: traces with arguments hold values until
   the pcall that caught the error returns (about 10% more peak memory at
   a stack overflow), and float literals are exact at any

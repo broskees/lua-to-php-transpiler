@@ -251,6 +251,12 @@ Measured with `php bench/run.php` against `lua5.4` on PHP 8.5
   (17.8 to 25.9 times). PHP's tracing JIT (`opcache.jit=tracing`) makes it
   1.1 to 1.9 times faster (coroutines gain least): 2.6 to 20.5 times slower
   than `lua5.4`.
+- Hosts that run async signal handlers (`pcntl_async_signals`) or a sampling
+  profiler (Excimer): use `opcache.jit=1054` (tracing without register
+  allocation) or no JIT. In PHP 8.4 and 8.5, `opcache.jit=tracing` can
+  repeat loop iterations when such an interrupt hits a loop, so programs
+  compute wrong results. When `opcache.jit` is `off`, transpiled scripts
+  turn on 1054 themselves; they never change a mode the host chose.
 - Transpiling: `bin/lua2php` takes about 28 ms per 1,000 lines of Lua, and
   about 15 ms for a small script. It runs once, before the program is
   deployed, and is not part of the times above.

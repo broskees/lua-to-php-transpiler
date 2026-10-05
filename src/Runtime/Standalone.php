@@ -267,13 +267,18 @@ final class Standalone
     }
 
     /**
-     * Switches opcache's JIT to tracing when opcache runs and the host left
-     * the JIT available but off (opcache.jit=off) with a buffer
-     * (opcache.jit_buffer_size > 0). Never overrides a JIT mode the host
-     * chose, and never makes PHP warn (ini_set does when the JIT is
-     * disabled). Only code compiled afterwards is JIT-compiled: the
-     * runtime and the modules the script loads, not the script itself.
-     * Without ini_set (disabled by the host) the JIT stays off.
+     * Switches opcache's JIT to mode 1054 (tracing without register
+     * allocation) when opcache runs and the host left the JIT available but
+     * off (opcache.jit=off) with a buffer (opcache.jit_buffer_size > 0).
+     * Not 'tracing' (1254): in PHP 8.4 and 8.5 its loop traces that run ??
+     * or ?: lose register-held locals when a VM interrupt (an async signal
+     * handler, a sampling profiler) hits them, and repeat loop iterations
+     * (php-src zend_jit_trace.c); 1054 costs about 1% more CPU. Never
+     * overrides a JIT mode the host chose, and never makes PHP warn
+     * (ini_set does when the JIT is disabled). Only code compiled
+     * afterwards is JIT-compiled: the runtime and the modules the script
+     * loads, not the script itself. Without ini_set (disabled by the host)
+     * the JIT stays off.
      */
     public static function switchJitOn(): void
     {
@@ -292,7 +297,7 @@ final class Standalone
         if (@ini_parse_quantity((string) ini_get('opcache.jit_buffer_size')) <= 0) {
             return;
         }
-        ini_set('opcache.jit', 'tracing');
+        ini_set('opcache.jit', '1054');
     }
 
     /** lauxlib.h: lua_writestring: $bytes to C's stdout (a write error is ignored, as C's callers do) */
