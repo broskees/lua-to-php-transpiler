@@ -86,12 +86,12 @@ final class Utf8Lib
 
     /**
      * lutf8lib.c: utf8_decode: decode the UTF-8 sequence at $position.
-     * Returns [position after it, code point], or null if the byte
-     * sequence is invalid.
-     *
-     * @return array{int, int}|null
+     * Returns the position after it, with the code point in $code (C's
+     * 'val'), or null if the byte sequence is invalid. (Callers run it in
+     * loops, where returning an array would be a VM handler call: see
+     * AGENTS.md, Loops and the tracing JIT.)
      */
-    private static function decode(string $s, int $position, bool $strict): ?array
+    private static function decode(string $s, int $position, bool $strict, ?int &$code = null): ?int
     {
         $length = \strlen($s);
         $c = $position < $length ? \ord($s[$position]) : 0;
@@ -122,7 +122,8 @@ final class Utf8Lib
                 return null;
             }
         }
-        return [$position + 1, $result];  // +1 to include first byte
+        $code = $result;
+        return $position + 1;  // +1 to include first byte
     }
 
     /**
@@ -143,11 +144,11 @@ final class Utf8Lib
         // (a step per byte: a decode is about an instruction's work)
         $L->globalState->budget?->chargeSteps(max(0, $end - $start + 1));
         while ($start <= $end) {
-            $decoded = self::decode($s, $start, !$lax);
-            if ($decoded === null) {  // conversion error?
+            $next = self::decode($s, $start, !$lax);
+            if ($next === null) {  // conversion error?
                 return [null, $start + 1];  // return fail and current position
             }
-            $start = $decoded[0];
+            $start = $next;
             $count++;
         }
         return [$count];
@@ -178,11 +179,12 @@ final class Utf8Lib
         $L->globalState->budget?->chargeSteps($end - $start + 1);
         $codes = [];
         for ($position = $start - 1; $position < $end;) {
-            $decoded = self::decode($s, $position, !$lax);
-            if ($decoded === null) {
+            $next = self::decode($s, $position, !$lax, $code);
+            if ($next === null) {
                 Auxiliary::error($L, self::MSG_INVALID);
             }
-            [$position, $codes[]] = $decoded;
+            $position = $next;
+            $codes[] = $code;
         }
         return $codes;
     }
@@ -291,11 +293,11 @@ final class Utf8Lib
         if ($n >= $length) {
             return [];  // no more codepoints
         }
-        $decoded = self::decode($s, $n, $strict);
-        if ($decoded === null || self::isContinuation($s, $decoded[0])) {
+        $next = self::decode($s, $n, $strict, $code);
+        if ($next === null || self::isContinuation($s, $next)) {
             Auxiliary::error($L, self::MSG_INVALID);
         }
-        return [$n + 1, $decoded[1]];
+        return [$n + 1, $code];
     }
 
     // lutf8lib.c: iter_codes

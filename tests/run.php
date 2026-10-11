@@ -47,6 +47,7 @@ require __DIR__ . '/../src/autoload.php';
 require __DIR__ . '/AssertionFailed.php';
 require __DIR__ . '/harness.php';
 require __DIR__ . '/jit/detector.php';
+require __DIR__ . '/jit/inventory_inputs.php';
 
 $filter = $argv[1] ?? '';
 $testFiles = glob(__DIR__ . '/unit/*Test.php');

@@ -33,8 +33,9 @@ declare(strict_types=1);
         });
         $signalsSent = 0;
         $start = hrtime(true);
-        // stops when the parent asks, or is gone
-        while (!$stopped && posix_kill($parent, SIGUSR1)) {
+        // stops when the parent asks, or is gone (a parent that crashed is not this process's
+        // parent any more, though it can still be signalled until it is reaped)
+        while (!$stopped && posix_getppid() === $parent && posix_kill($parent, SIGUSR1)) {
             $signalsSent++;
             usleep($signalIntervalMicroseconds);
         }

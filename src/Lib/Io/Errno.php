@@ -226,7 +226,8 @@ final class Errno
         }
         $found = null;
         $foundLength = 0;
-        foreach (self::$messages as $errno => $text) {
+        for ($errno = 1; $errno < 134; $errno++) {  // (not foreach: see AGENTS.md, Loops and the tracing JIT)
+            $text = self::$messages[$errno];
             if (\strlen($text) > $foundLength && str_ends_with($message, $text)) {
                 $found = $errno;
                 $foundLength = \strlen($text);

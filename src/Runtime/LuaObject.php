@@ -58,7 +58,9 @@ final class LuaObject
     public static function numberToString(int|float $number): string
     {
         if (\is_int($number)) {
-            return (string) $number;
+            // (strval unqualified, a function call: callers run in loops, where a cast or \strval is
+            // a VM handler call; see AGENTS.md, Loops and the tracing JIT)
+            return strval($number);
         }
         return NumberFormat::luaNumberToString($number);
     }

@@ -223,7 +223,13 @@ final class FunctionEmitter
         $pieces = [];
         $compactInstructions = 0;
         $instructionCount = \count($proto->code);
-        for ($pc = 0; $pc < $instructionCount; $pc++) {
+        // The loop runs the whole emitter, full of VM handler calls: its counters are references, so
+        // that the tracing JIT keeps no value of the loop in a register, and an interrupt cannot make
+        // it run again from a stale one (see AGENTS.md, Loops and the tracing JIT)
+        $pc = 0;
+        $pcInMemory = &$pc;
+        $compactInstructionsInMemory = &$compactInstructions;
+        for (; $pc < $instructionCount; $pc++) {
             if (isset($this->constructorRuns[$pc])) {
                 $last = $this->constructorRuns[$pc];
                 $pieces[$pc] = $this->emitConstructorRun($pc, $last);
@@ -382,7 +388,9 @@ final class FunctionEmitter
         $runLast = -1;
         $instructionCount = \count($code);
         for ($pc = 0; $pc < $instructionCount; $pc++) {
-            $loopDepth += $loopDepthChanges[$pc] ?? 0;
+            if (isset($loopDepthChanges[$pc])) {  // (no ?? in a loop: see AGENTS.md)
+                $loopDepth += $loopDepthChanges[$pc];
+            }
             if ($pc <= $runLast) {
                 continue;
             }
@@ -438,12 +446,24 @@ final class FunctionEmitter
     {
         $instruction = $this->proto->code[$pc];
         return 1 + match ($this->opcodes[$pc]) {
-            OpCodes::OP_CALL, OpCodes::OP_VARARG => max(OpCodes::getArgC($instruction) - 1, 0),
-            OpCodes::OP_TFORCALL => OpCodes::getArgC($instruction),
-            OpCodes::OP_SETLIST, OpCodes::OP_CONCAT => OpCodes::getArgB($instruction),
+            self::$opCall, self::$opVararg => max(OpCodes::getArgC($instruction) - 1, 0),
+            self::$opTforcall => OpCodes::getArgC($instruction),
+            self::$opSetlist, self::$opConcat => OpCodes::getArgB($instruction),
             default => 0,
         };
     }
+
+    /*
+     * The opcodes instructionWeight compares with, as static properties:
+     * it runs in loops, where OpCodes::OP_CALL would be a VM handler call
+     * and self::$opCall is read inline (see AGENTS.md, Loops and the
+     * tracing JIT).
+     */
+    private static int $opCall = OpCodes::OP_CALL;
+    private static int $opVararg = OpCodes::OP_VARARG;
+    private static int $opTforcall = OpCodes::OP_TFORCALL;
+    private static int $opSetlist = OpCodes::OP_SETLIST;
+    private static int $opConcat = OpCodes::OP_CONCAT;
 
     /** the segment of instruction $pc: the last one starting at or before it (0 when the function is one piece) */
     private function segmentOf(int $pc): int
@@ -630,7 +650,9 @@ final class FunctionEmitter
         $loops = 0;
         $instructionCount = \count($code);
         for ($pc = 0; $pc < $instructionCount; $pc++) {
-            $loops += $loopChanges[$pc] ?? 0;
+            if (isset($loopChanges[$pc])) {  // (no ?? in a loop: see AGENTS.md)
+                $loops += $loopChanges[$pc];
+            }
             if ($loops > 0) {
                 $this->inLoop[$pc] = true;
             }
@@ -650,8 +672,9 @@ final class FunctionEmitter
         $code = $this->proto->code;
         $instructionCount = \count($code);
         $runInstructions = 0;
+        $newTable = OpCodes::OP_NEWTABLE;  // (no class constant of another class in a loop: see AGENTS.md)
         for ($pc = 0; $pc < $instructionCount; $pc++) {
-            if ($this->opcodes[$pc] !== OpCodes::OP_NEWTABLE) {
+            if ($this->opcodes[$pc] !== $newTable) {
                 continue;
             }
             $last = $this->constructorRunEnd($pc);
@@ -1888,11 +1911,13 @@ final class FunctionEmitter
                 }
                 $code = self::lines("\$t = $ra;");
                 if ($b === 0) {  // get up to the top
+                    // (unset only when the key is there: unset is a VM handler call, see AGENTS.md)
                     return $code . self::lines(
                         "\$n = \$top - $a - 1;",
                         'for ($i = 1; $i <= $n; $i++) {',
                         "    \$v = \$R[$a + \$i];",
-                        "    if (\$v !== null) { \$t->arr[$last + \$i] = \$v; } else { unset(\$t->arr[$last + \$i]); }",
+                        "    if (\$v !== null) { \$t->arr[$last + \$i] = \$v; }"
+                            . " elseif (isset(\$t->arr[$last + \$i])) { unset(\$t->arr[$last + \$i]); }",
                         '}',
                         "if (\$t->sizearray < $last + \$n) {",
                         "    \$t->sizearray = $last + \$n;",

@@ -75,6 +75,18 @@ final class CodeGen
     // lcode.c previousinstruction: '~(Instruction)0', an invalid instruction
     private const INVALID_INSTRUCTION = 0xFFFFFFFF;
 
+    /*
+     * The values of lopcodes.h that the functions on jump lists read (they
+     * run in loops), as static properties: O::OP_TESTSET would be a VM
+     * handler call there, self::$opTestset is read inline (see AGENTS.md,
+     * Loops and the tracing JIT).
+     */
+    private static int $opTestset = O::OP_TESTSET;
+    private static int $opTest = O::OP_TEST;
+    private static int $noReg = O::NO_REG;
+    private static int $offsetSj = O::OFFSET_SJ;
+    private static int $maxargSj = O::MAXARG_SJ;
+
     // lua.h: status code of errors raised with luaG_runerror
     public const LUA_ERRRUN = 2;
 
@@ -216,7 +228,7 @@ final class CodeGen
     private static function fixjump(FuncState $fs, int $pc, int $dest): void
     {
         $offset = $dest - ($pc + 1);
-        if (!(-O::OFFSET_SJ <= $offset && $offset <= O::MAXARG_SJ - O::OFFSET_SJ)) {
+        if (!(-self::$offsetSj <= $offset && $offset <= self::$maxargSj - self::$offsetSj)) {
             $fs->ls->syntaxerror('control structure too long');
         }
         $fs->f->code[$pc] = O::setArgSJ($fs->f->code[$pc], $offset);
@@ -233,8 +245,12 @@ final class CodeGen
             return;
         }
         $list = $l1;
-        while (($next = self::getjump($fs, $list)) !== self::NO_JUMP) {  // find last element
+        // find last element (the call in the body, not in the test: a loop that starts with a static
+        // method call stores the opline from the IP, see AGENTS.md, Loops and the tracing JIT)
+        $next = self::getjump($fs, $list);
+        while ($next !== self::NO_JUMP) {
             $list = $next;
+            $next = self::getjump($fs, $list);
         }
         self::fixjump($fs, $list, $l2);  // last element links to 'l2'
     }
@@ -284,15 +300,21 @@ final class CodeGen
     {
         $index = self::getjumpcontrol($fs, $node);
         $instruction = $fs->f->code[$index];
-        if (O::getOpcode($instruction) !== O::OP_TESTSET) {
+        if (O::getOpcode($instruction) !== self::$opTestset) {
             return false;  // cannot patch other instructions
         }
-        if ($reg !== O::NO_REG && $reg !== O::getArgB($instruction)) {
+        if ($reg !== self::$noReg && $reg !== O::getArgB($instruction)) {
             $fs->f->code[$index] = O::setArgA($instruction, $reg);
         } else {
             // no register to put value or register already has the value;
             // change instruction to simple test
-            $fs->f->code[$index] = O::createABCk(O::OP_TEST, O::getArgB($instruction), 0, 0, O::getArgK($instruction));
+            $fs->f->code[$index] = O::createABCk(
+                self::$opTest,
+                O::getArgB($instruction),
+                0,
+                0,
+                O::getArgK($instruction),
+            );
         }
         return true;
     }
@@ -301,7 +323,7 @@ final class CodeGen
     private static function removevalues(FuncState $fs, int $list): void
     {
         for (; $list !== self::NO_JUMP; $list = self::getjump($fs, $list)) {
-            self::patchtestreg($fs, $list, O::NO_REG);
+            self::patchtestreg($fs, $list, self::$noReg);
         }
     }
 
@@ -767,7 +789,7 @@ final class CodeGen
     {
         for (; $list !== self::NO_JUMP; $list = self::getjump($fs, $list)) {
             $instruction = $fs->f->code[self::getjumpcontrol($fs, $list)];
-            if (O::getOpcode($instruction) !== O::OP_TESTSET) {
+            if (O::getOpcode($instruction) !== self::$opTestset) {
                 return true;
             }
         }

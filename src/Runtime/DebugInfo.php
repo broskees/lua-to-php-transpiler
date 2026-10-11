@@ -89,14 +89,13 @@ final class DebugInfo
     /** lfunc.c: luaF_getlocalname: name of the n-th active local at 'pc' */
     public static function getLocalName(Proto $f, int $localNumber, int $pc): ?string
     {
-        foreach ($f->locvars as $locvar) {
-            if ($locvar->startpc > $pc) {
-                break;
-            }
-            if ($pc < $locvar->endpc) {  // is variable active?
+        $locvars = $f->locvars;
+        $count = \count($locvars);
+        for ($i = 0; $i < $count && $locvars[$i]->startpc <= $pc; $i++) {  // (not foreach: see AGENTS.md)
+            if ($pc < $locvars[$i]->endpc) {  // is variable active?
                 $localNumber--;
                 if ($localNumber === 0) {
-                    return $locvar->varname;
+                    return $locvars[$i]->varname;
                 }
             }
         }

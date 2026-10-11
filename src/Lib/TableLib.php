@@ -73,22 +73,24 @@ final class TableLib
         return Auxiliary::len($L, $args[$arg - 1]);
     }
 
-    /** lapi.c: lua_geti */
+    /** lapi.c: lua_geti (it runs in loops: is_a, not instanceof; see AGENTS.md, Loops and the tracing JIT) */
     private static function getIndex(Coroutine $L, mixed $table, int $index): mixed
     {
-        if ($table instanceof LuaTable) {
-            $value = $table->arr[$index] ?? null;
-            if ($value !== null || $table->metatable === null) {
-                return $value;
+        if (\is_a($table, LuaTable::class)) {
+            if (isset($table->arr[$index])) {
+                return $table->arr[$index];
+            }
+            if ($table->metatable === null) {
+                return null;
             }
         }
         return Vm::getTable($L, $table, $index);
     }
 
-    /** lapi.c: lua_seti */
+    /** lapi.c: lua_seti (it runs in loops: is_a, not instanceof) */
     private static function setIndex(Coroutine $L, mixed $table, int $index, mixed $value): void
     {
-        if ($table instanceof LuaTable && $table->metatable === null) {
+        if (\is_a($table, LuaTable::class) && $table->metatable === null) {
             if ($value === null) {
                 unset($table->arr[$index]);
             } else {
@@ -124,7 +126,9 @@ final class TableLib
                 Auxiliary::argCheck($L, $inBounds, 2, 'position out of bounds');
                 $budget = $L->globalState->budget;
                 for ($i = $firstEmpty; $i > $position; $i--) {  // move up elements
-                    $budget?->chargeSteps(1);
+                    if ($budget !== null) {
+                        $budget->chargeSteps(1);
+                    }
                     self::setIndex($L, $table, $i, self::getIndex($L, $table, $i - 1));  // t[i] = t[i - 1]
                 }
                 $value = $args[2];
@@ -159,7 +163,9 @@ final class TableLib
         $result = self::getIndex($L, $table, $position);  // result = t[pos]
         $budget = $L->globalState->budget;
         for (; $position < $size; $position++) {
-            $budget?->chargeSteps(1);
+            if ($budget !== null) {
+                $budget->chargeSteps(1);
+            }
             self::setIndex($L, $table, $position, self::getIndex($L, $table, $position + 1));  // t[pos] = t[pos + 1]
         }
         self::setIndex($L, $table, $position, null);  // remove entry t[pos]
@@ -187,12 +193,16 @@ final class TableLib
                 || ($destinationArgument !== 1 && !Vm::equalObjects($L, $source, $destination))
             ) {
                 for ($i = 0; $i < $count; $i++) {
-                    $budget?->chargeSteps(1);
+                    if ($budget !== null) {
+                        $budget->chargeSteps(1);
+                    }
                     self::setIndex($L, $destination, $target + $i, self::getIndex($L, $source, $first + $i));
                 }
             } else {
                 for ($i = $count - 1; $i >= 0; $i--) {
-                    $budget?->chargeSteps(1);
+                    if ($budget !== null) {
+                        $budget->chargeSteps(1);
+                    }
                     self::setIndex($L, $destination, $target + $i, self::getIndex($L, $source, $first + $i));
                 }
             }
@@ -234,6 +244,7 @@ final class TableLib
         // as addfield adds them. Any other element takes the path below.
         if ($table instanceof LuaTable && $table->metatable === null && \count($args) <= 2 && \is_string($separator)) {
             $last = $table->length();
+            $values = $table->arr;  // (nothing in the loop changes the table)
             $parts = [];
             $pieces = [];
             $length = 0;  // of the pieces, without separators
@@ -242,12 +253,14 @@ final class TableLib
             for ($partFirst = 1; $partFirst <= $last; $partFirst += self::PIECES_PER_PART) {
                 $partLast = min($last, $partFirst + self::PIECES_PER_PART - 1);
                 for ($index = $partFirst; $index <= $partLast; $index++) {
-                    $value = $table->arr[$index] ?? null;
+                    $value = isset($values[$index]) ? $values[$index] : null;
                     if (\is_string($value)) {
                         $pieces[] = $value;
                         $length += \strlen($value);
                     } elseif (\is_int($value)) {
-                        $pieces[] = $piece = (string) $value;
+                        // (strval unqualified, a function call: a cast or \strval is a VM handler call in a loop,
+                        // see AGENTS.md, Loops and the tracing JIT)
+                        $pieces[] = $piece = strval($value);
                         $length += \strlen($piece);
                     } else {
                         $pieces = null;
@@ -280,7 +293,9 @@ final class TableLib
         $length = 0;
         $capacity = MemoryLimit::CHECK_ABOVE;  // the parts may grow to this length before the next check
         for (; $index < $last; $index++) {
-            $budget?->chargeSteps(1);
+            if ($budget !== null) {
+                $budget->chargeSteps(1);
+            }
             $pieces[] = $piece = self::field($L, $table, $index);
             $length += \strlen($piece) + \strlen($separator);
             if (\count($pieces) === self::PIECES_PER_PART) {
@@ -325,7 +340,7 @@ final class TableLib
                 $values = $table->arr;
                 $results = [];
                 for ($index = 1; $index <= $end; $index++) {
-                    $results[] = $values[$index] ?? null;
+                    $results[] = isset($values[$index]) ? $values[$index] : null;
                 }
                 return $results;
             }
@@ -345,7 +360,7 @@ final class TableLib
         if ($table instanceof LuaTable && $table->metatable === null) {
             $values = $table->arr;
             for (; $index < $end; $index++) {  // push arg[i..e - 1] (to avoid overflows)
-                $results[] = $values[$index] ?? null;
+                $results[] = isset($values[$index]) ? $values[$index] : null;
             }
             $results[] = $values[$end] ?? null;  // push last element
             return $results;

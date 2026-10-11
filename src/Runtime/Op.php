@@ -762,7 +762,7 @@ final class Op
             return $a + $n;
         }
         for ($i = 0; $i < $c - 1; $i++) {
-            $R[$a + $i] = $ret[$i] ?? null;
+            $R[$a + $i] = isset($ret[$i]) ? $ret[$i] : null;  // (no ?? in a loop: see AGENTS.md)
         }
         return $top;
     }
@@ -783,7 +783,7 @@ final class Op
             $v = $R[$a + $i];
             if ($v !== null) {
                 $t->arr[$index + $i] = $v;
-            } else {
+            } elseif (isset($t->arr[$index + $i])) {  // (unset is a VM handler call: see AGENTS.md)
                 unset($t->arr[$index + $i]);
             }
         }
@@ -813,7 +813,7 @@ final class Op
             return $a + $n;
         }
         for ($i = 0; $i < $wanted; $i++) {
-            $R[$a + $i] = $va[$i] ?? null;
+            $R[$a + $i] = isset($va[$i]) ? $va[$i] : null;  // (no ?? in a loop: see AGENTS.md)
         }
         return $top;
     }

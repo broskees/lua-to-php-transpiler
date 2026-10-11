@@ -129,15 +129,16 @@ final class LuaTable
         Teardown::release();
     }
 
+    /** a table with $values (a list) at keys 1..n */
     public static function fromList(array $values): self
     {
-        $table = new self(\count($values));
-        $key = 1;
-        foreach ($values as $value) {
-            if ($value !== null) {
-                $table->arr[$key] = $value;
+        $count = \count($values);
+        $table = new self($count);
+        // (a for loop, not foreach: see AGENTS.md, Loops and the tracing JIT)
+        for ($index = 0; $index < $count; $index++) {
+            if ($values[$index] !== null) {
+                $table->arr[$index + 1] = $values[$index];
             }
-            $key++;
         }
         return $table;
     }
@@ -989,7 +990,7 @@ final class LuaTable
         return match ($part) {
             self::INTEGER_KEYS => \count($this->arr),
             self::STRING_KEYS => \count($this->hash),
-            default => \count($this->extra->otherValues ?? []),
+            default => $this->extra === null ? 0 : \count($this->extra->otherValues),  // (no ??: it runs in loops)
         };
     }
 

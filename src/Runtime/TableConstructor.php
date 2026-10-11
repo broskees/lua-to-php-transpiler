@@ -44,6 +44,10 @@ final class TableConstructor
         $proto = $ci->func->proto;
         $code = $proto->code;
         $k = $proto->k;
+        // The loop runs VM handler calls (new, instanceof, OpCodes' constants, Vm::setTable): $pc is
+        // a reference, so that the tracing JIT keeps no value of the loop in a register, and an
+        // interrupt cannot make it run again from a stale one (see AGENTS.md, Loops and the tracing JIT)
+        $pcInMemory = &$pc;
         for (; $pc <= $last; $pc++) {
             if ($L->trap) {
                 Hooks::traceExec($L, $ci, $pc);

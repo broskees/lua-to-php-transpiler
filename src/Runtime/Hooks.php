@@ -171,9 +171,10 @@ final class Hooks
         if ($newpc - $oldpc < intdiv(DebugInfo::MAXIWTHABS, 2)) {  // not too far apart?
             $delta = 0;  // line difference
             $pc = $oldpc;
+            $absLineInfo = DebugInfo::ABSLINEINFO;  // (no class constant in a loop: see AGENTS.md)
             while (true) {
                 $lineInfo = $p->lineinfo[++$pc];
-                if ($lineInfo === DebugInfo::ABSLINEINFO) {
+                if ($lineInfo === $absLineInfo) {
                     break;  // cannot compute delta; fall through
                 }
                 $delta += $lineInfo;
