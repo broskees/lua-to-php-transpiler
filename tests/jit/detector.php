@@ -217,13 +217,18 @@ function parseIr(array $lines): array
 
 /**
  * The detector's verdict on a compiled trace, or null when it is not a
- * loop trace (see the file comment). $handlerOpcodes: see IpUses::of.
+ * loop trace (see the file comment). $handlerOpcodes, $knownHandlers: see
+ * IpUses::of.
  *
  * @return array{flagged: bool, interruptCheck: bool, snapshot: bool, registers: list<string>,
  *     ipUses: list<array>}|null
  */
-function loopTraceVerdict(array $trace, array $process, ?array $handlerOpcodes = null): ?array
-{
+function loopTraceVerdict(
+    array $trace,
+    array $process,
+    ?array $handlerOpcodes = null,
+    array $knownHandlers = [],
+): ?array {
     if (!isLoopTrace($trace)) {
         return null;
     }
@@ -273,7 +278,15 @@ function loopTraceVerdict(array $trace, array $process, ?array $handlerOpcodes =
         $verdict['registers'][] = slotName($instruction['bind'], $trace['bytecode']) . " in %{$register[1]}";
     }
     $verdict['flagged'] = !$verdict['snapshot'] && $verdict['registers'] !== [];
-    $verdict['ipUses'] = IpUses::of($instructions, $constants, $trace, $process, $condition, $handlerOpcodes);
+    $verdict['ipUses'] = IpUses::of(
+        $instructions,
+        $constants,
+        $trace,
+        $process,
+        $condition,
+        $handlerOpcodes,
+        $knownHandlers,
+    );
     return $verdict;
 }
 
@@ -377,11 +390,16 @@ function processFacts(string $dumpFile): array
  * use at an opline the trace does not run (an exit's) reads "opline 0012,
  * not in the trace (IP set from the IP)". 'unplacedUses' counts the uses
  * not placed: they sort last, so with any the first could be another.
+ * $knownHandlers: the opcodes other processes placed handlers at, by
+ * handlerKey (IpUses::of); $placedHandlers receives this process's.
  *
  * @return list<array{trace: array, verdict: array}>
  */
-function loopTraceVerdicts(string $dumpFile): array
-{
+function loopTraceVerdicts(
+    string $dumpFile,
+    array $knownHandlers = [],
+    ?array &$placedHandlers = null,
+): array {
     $process = processFacts($dumpFile);
     $results = [];
     $handlerOpcodes = [];
@@ -416,15 +434,28 @@ function loopTraceVerdicts(string $dumpFile): array
                 continue;
             }
             if (isset($unplacedTraces[$loopIndex])) {
-                $verdict = loopTraceVerdict($trace, $process, $handlerOpcodes);
+                $verdict = loopTraceVerdict($trace, $process, $handlerOpcodes, $knownHandlers);
                 $results[$loopIndex]['verdict']['ipUses'] = $verdict['ipUses'];
             }
             $loopIndex++;
         }
     }
+    foreach ($results as $result) {
+        foreach ($result['verdict']['ipUses'] as $use) {
+            if ($use['handler'] !== null && $use['opcode'] !== null) {
+                $handlerOpcodes[$use['handler']][$use['opcode']] = true;
+            }
+        }
+    }
+    $placedHandlers = [];
+    foreach ($handlerOpcodes as $handler => $opcodes) {
+        $placedHandlers[handlerKey($handler)] = ($placedHandlers[handlerKey($handler)] ?? []) + $opcodes;
+    }
     foreach ($results as $index => $result) {
         $groups = [];
         foreach ($result['verdict']['ipUses'] as $useIndex => $use) {
+            $opcodes = $handlerOpcodes[$use['handler'] ?? ''] ?? [];
+            $opcodes = \count($opcodes) === 1 ? $opcodes : ($knownHandlers[handlerKey($use['handler'] ?? '')] ?? []);
             // the first use alone: it set the flag
             $group = $useIndex === 0 ? 'first: ' : '';
             $in = $use['function'] === null ? '' : " in {$use['function']}";
@@ -432,8 +463,8 @@ function loopTraceVerdicts(string $dumpFile): array
                 $groups["$group{$use['opcode']} at %s$in ({$use['kind']})"][] = sprintf('%04d', $use['number']);
             } elseif ($use['number'] !== null) {
                 $groups["{$group}opline %s$in, not in the trace ({$use['kind']})"][] = sprintf('%04d', $use['number']);
-            } elseif (\count($handlerOpcodes[$use['handler'] ?? ''] ?? []) === 1) {
-                $opcode = array_key_first($handlerOpcodes[$use['handler']]);
+            } elseif ($use['handler'] !== null && \count($opcodes) === 1) {
+                $opcode = array_key_first($opcodes);
                 $groups["$group$opcode ({$use['kind']} at an opline not found)"] = [];
             } else {
                 $groups["{$group}an opline not found ({$use['kind']})"] = [];
@@ -500,7 +531,7 @@ function slotName(?int $offset, array $bytecode): string
  * opline the trace does not run or at one with another handler call, one
  * handler function at two opcodes, or at another opcode than the process's
  * traces placed it at), and the one that places the most handler calls is
- * taken and anchors its call; addresses not placed are tried again after
+ * taken and anchors its function; addresses not placed are tried again after
  * each placement. Where
  * the IR does not show a use (a set to the opline the IP already holds
  * emits nothing), it is not listed; where it cannot be placed, it says so.
@@ -509,6 +540,10 @@ final class IpUses
 {
     /** @var array<int, array> */
     private array $byRef = [];
+    /** @var array<int, int> ref => the instruction's place in the IR */
+    private array $irOrder = [];
+    /** @var array<int, array<string, true>> by handlerKey: the opcodes other processes placed handlers at */
+    private array $knownHandlers = [];
     /** @var list<array{number: int, level: int, opcode: string, function: string}> */
     private array $entries = [];
     private ?int $ipRegister = null;
@@ -524,12 +559,11 @@ final class IpUses
     private array $ipAt = [];
     private bool $ipKnownAtStart;
     /**
-     * Where the oplines of a call in the trace are: [an entry index of the
-     * call, the address of the call's opline 0]. From the IP the loop sets
-     * before its interrupt check (its first opline), and from each address
-     * search mode placed.
+     * Where a function's oplines are: [the function, the address of its
+     * opline 0]. From the IP the loop sets before its interrupt check (its
+     * first opline), and from each address search mode placed.
      *
-     * @var list<array{int, int}>
+     * @var list<array{string, int}>
      */
     private array $anchors = [];
 
@@ -547,8 +581,9 @@ final class IpUses
         private array $process,
         private array $interruptCheckLoad,
     ) {
-        foreach ($instructions as $instruction) {
+        foreach ($instructions as $order => $instruction) {
             $this->byRef[$instruction['ref']] = $instruction;
+            $this->irOrder[$instruction['ref']] = $order;
         }
         $this->entries = bytecodeEntries($trace['bytecode'], $trace['function']);
         // a root trace starts knowing its IP (its first opline), a side trace not (zend_jit_trace.c:4181-4189)
@@ -565,7 +600,10 @@ final class IpUses
         $firstOplineAddress = $this->isIpStore($loopEnd) && $loopEnd['operands'][1]['kind'] === 'c'
             ? constantValue($constants, $loopEnd['operands'][1]['ref']) : null;
         if ($firstOplineAddress !== null && $this->entries !== []) {
-            $this->anchors[] = [0, $firstOplineAddress - $this->entries[0]['number'] * ZEND_OP_BYTES];
+            $this->anchors[] = [
+                $this->entries[0]['function'],
+                $firstOplineAddress - $this->entries[0]['number'] * ZEND_OP_BYTES,
+            ];
         }
     }
 
@@ -579,7 +617,9 @@ final class IpUses
      * function (null: the trace's own; else the function the trace inlines);
      * and for a handler call, the handler (its function constant).
      * $handlerOpcodes (handler => [opcode => true], from the process's
-     * traces) turns on search mode.
+     * traces) turns on search mode; $knownHandlers (handlerKey => [opcode
+     * => true], from other processes) names the handlers this process did
+     * not place.
      *
      * @return list<array{kind: string, number: ?int, opcode: ?string, function: ?string, handler: ?string}>
      */
@@ -590,11 +630,13 @@ final class IpUses
         array $process,
         array $interruptCheckLoad,
         ?array $handlerOpcodes = null,
+        array $knownHandlers = [],
     ): array {
         $uses = new self($instructions, $constants, $trace, $process, $interruptCheckLoad);
         if ($uses->ipRegister === null || $uses->entries === []) {
             return [];
         }
+        $uses->knownHandlers = $knownHandlers;
         if ($handlerOpcodes !== null) {
             $uses->placeAddresses($handlerOpcodes);
         }
@@ -617,9 +659,10 @@ final class IpUses
     }
 
     /**
-     * Every use of the IP with where it points: [position, kind, handler]
+     * Every use of the IP with where it points: [position, kind, handler,
+     * its instruction's ref]
      *
-     * @return list<array{?array, string, ?string}>
+     * @return list<array{?array, string, ?string, int}>
      */
     private function found(): array
     {
@@ -630,12 +673,14 @@ final class IpUses
             if ($this->isHandlerCall($instruction)) {
                 $handlerSets[$instruction['operands'][0]['ref']] = true;
                 $position = $this->ipAt($instruction['operands'][0]['ref'], $instruction);
-                $found[] = [$position, 'VM handler call', $this->constants[$instruction['operands'][1]['ref']]];
+                $handler = $this->constants[$instruction['operands'][1]['ref']];
+                $found[] = [$position, 'VM handler call', $handler, $instruction['ref']];
                 continue;
             }
             $value = $this->exOplineValue($instruction);
             if ($value !== null && $value['number'] === $this->ipRegister) {
-                $found[] = [$this->ipAt($value['operands'][0]['ref']), 'EX(opline) from the IP', null];
+                $position = $this->ipAt($value['operands'][0]['ref']);
+                $found[] = [$position, 'EX(opline) from the IP', null, $instruction['ref']];
             }
         }
         foreach ($this->instructions as $instruction) {
@@ -643,7 +688,7 @@ final class IpUses
                 $this->relativeIpSet($instruction) !== null && !isset($handlerSets[$instruction['ref']])
                 && $instruction['ref'] !== $loopEnd
             ) {
-                $found[] = [$this->ipAt($instruction['ref']), 'IP set from the IP', null];
+                $found[] = [$this->ipAt($instruction['ref']), 'IP set from the IP', null, $instruction['ref']];
             }
         }
         return $found;
@@ -699,24 +744,32 @@ final class IpUses
                 if ($address === null || ($this->ipAfterSet($set, $call)[0] ?? '') !== 'address') {
                     continue;
                 }
-                $opcodes = $handlerOpcodes[$this->constants[$call['operands'][1]['ref']]] ?? [];
-                $placedBy = [];
+                $opcodes = $this->handlerOpcodes($handlerOpcodes, $this->constants[$call['operands'][1]['ref']]);
+                // each opline of a function of the trace: [function, number] => entries
+                $oplines = [];
                 foreach ($this->entries as $index => $entry) {
-                    if (\count($opcodes) === 1 && !isset($opcodes[$entry['opcode']])) {
-                        continue;
+                    if (\count($opcodes) !== 1 || isset($opcodes[$entry['opcode']])) {
+                        $oplines[$entry['function'] . "\n" . $entry['number']][] = $index;
                     }
-                    $this->anchors[] = [$index, $address - $entry['number'] * ZEND_OP_BYTES];
+                }
+                $placedBy = [];
+                foreach ($oplines as $key => $indexes) {
+                    $entry = $this->entries[$indexes[0]];
+                    $this->anchors[] = [$entry['function'], $address - $entry['number'] * ZEND_OP_BYTES];
                     $this->forgetPositions();
                     [$inconsistenciesThen, $placedThen] = $this->handlerCallsChecked($handlerOpcodes);
                     if ($inconsistenciesThen <= $inconsistencies && $placedThen > $placed) {
-                        $placedBy[$index] = $placedThen;
+                        $placedBy[$key] = $placedThen;
                     }
                     array_pop($this->anchors);
                 }
+                $this->forgetPositions();
                 arsort($placedBy);
-                if ($placedBy !== [] && \count(array_keys($placedBy, reset($placedBy), true)) === 1) {
-                    $index = array_key_first($placedBy);
-                    $this->anchors[] = [$index, $address - $this->entries[$index]['number'] * ZEND_OP_BYTES];
+                $best = array_keys($placedBy, reset($placedBy), true);
+                $best = \count($best) > 1 ? $this->tieBreak($best, $oplines, $call) : $best;
+                if (\count($best) === 1) {
+                    $entry = $this->entries[$oplines[$best[0]][0]];
+                    $this->anchors[] = [$entry['function'], $address - $entry['number'] * ZEND_OP_BYTES];
                     $changed = true;
                 }
                 $this->forgetPositions();
@@ -724,6 +777,53 @@ final class IpUses
             }
             // a placement can rule out another's candidates: try those not placed again
         } while ($changed);
+    }
+
+    /**
+     * Of the oplines $candidates (keys of $oplines: function and number =>
+     * entries) that tie for the handler call $call, those with an entry
+     * between the oplines of the placed handler calls before and after it
+     * in the IR (the trace compiler emits handler calls in trace order), if
+     * any
+     *
+     * @param list<string> $candidates
+     * @param array<string, list<int>> $oplines
+     * @return list<string>
+     */
+    private function tieBreak(array $candidates, array $oplines, array $call): array
+    {
+        $after = PHP_INT_MIN;
+        $before = PHP_INT_MAX;
+        foreach ($this->found() as [$position, , $handler, $ref]) {
+            if ($handler === null || ($position[0] ?? '') !== 'entry' || $ref === $call['ref']) {
+                continue;
+            }
+            if ($this->irOrder[$ref] < $this->irOrder[$call['ref']]) {
+                $after = max($after, $position[1]);
+            } else {
+                $before = min($before, $position[1]);
+            }
+        }
+        $between = array_values(array_filter(
+            $candidates,
+            static fn (string $key): bool => array_filter(
+                $oplines[$key],
+                static fn (int $index): bool => $index > $after && $index < $before,
+            ) !== [],
+        ));
+        return $between ?: $candidates;
+    }
+
+    /**
+     * The opcodes the handler $handler was placed at: by this process's
+     * traces ($handlerOpcodes), else by other processes ($knownHandlers)
+     *
+     * @return array<string, true>
+     */
+    private function handlerOpcodes(array $handlerOpcodes, string $handler): array
+    {
+        $opcodes = $handlerOpcodes[$handler] ?? [];
+        return \count($opcodes) === 1 ? $opcodes : ($this->knownHandlers[handlerKey($handler)] ?? []);
     }
 
     private function forgetPositions(): void
@@ -761,7 +861,7 @@ final class IpUses
                 $callsAt[$position[1]] = true;
                 $opcode = $this->entries[$position[1]]['opcode'];
                 $opcodes[$handler][$opcode] = true;
-                $known = $handlerOpcodes[$handler] ?? [];
+                $known = $this->handlerOpcodes($handlerOpcodes, $handler);
                 $inconsistencies += \count($known) === 1 && !isset($known[$opcode]) ? 1 : 0;
             }
         }
@@ -846,7 +946,7 @@ final class IpUses
         $position = null;
         if ($value['kind'] === 'c') {
             $address = constantValue($this->constants, $value['ref']);
-            $position = $address === null ? null : $this->placeAddress($address, $handlerCall);
+            $position = $address === null ? null : $this->placeAddress($address, $handlerCall, $set);
         } elseif (($relative = $this->relativeIpSet($set)) !== null) {
             [$base, $offset] = $relative;
             $before = $this->ipAt($base['operands'][0]['ref']);
@@ -861,19 +961,31 @@ final class IpUses
     }
 
     /**
-     * ['entry', index] for an address of an opline the trace runs in a call
-     * an anchor places, or for the handler call $handlerCall at an address,
-     * the one opline of the trace that the call's check of the next opline
-     * fits; else ['address', $address]
+     * ['entry', index] for an address of an opline the trace runs in a
+     * function an anchor places (in several calls of it, by the rank of
+     * $set among the sets of the IP to that address), or for the handler
+     * call $handlerCall at an address, the one opline of the trace that the
+     * call's check of the next opline fits; else ['address', $address]
      */
-    private function placeAddress(int $address, ?array $handlerCall): array
+    private function placeAddress(int $address, ?array $handlerCall, ?array $set = null): array
     {
-        foreach ($this->anchors as [$index, $base]) {
+        foreach ($this->anchors as [$function, $base]) {
             $offset = $address - $base;
-            $position = $offset >= 0 && $offset % ZEND_OP_BYTES === 0
-                ? $this->oplineInSameCall($index, intdiv($offset, ZEND_OP_BYTES)) : null;
-            if (($position[0] ?? '') === 'entry') {
-                return $position;
+            if ($offset < 0 || $offset % ZEND_OP_BYTES !== 0) {
+                continue;
+            }
+            $number = intdiv($offset, ZEND_OP_BYTES);
+            $candidates = array_keys(array_filter(
+                $this->entries,
+                static fn (array $entry): bool => $entry['function'] === $function && $entry['number'] === $number,
+            ));
+            if (\count($candidates) === 1) {
+                return ['entry', $candidates[0]];
+            }
+            // the opline in several calls of the function: the n-th set of the IP to it goes to the n-th
+            $sets = $set === null ? [] : $this->setsTo($address);
+            if ($candidates !== [] && \count($sets) === \count($candidates)) {
+                return ['entry', $candidates[array_search($set['ref'], $sets, true)]];
             }
         }
         $nextOpline = $handlerCall === null ? null : $this->nextOplineCheck($handlerCall);
@@ -895,6 +1007,25 @@ final class IpUses
             }
         }
         return ['address', $address];
+    }
+
+    /**
+     * The RSTOREs that set the IP to $address, in IR order (refs)
+     *
+     * @return list<int>
+     */
+    private function setsTo(int $address): array
+    {
+        $sets = [];
+        foreach ($this->instructions as $instruction) {
+            if (
+                $this->isIpStore($instruction) && $instruction['operands'][1]['kind'] === 'c'
+                && constantValue($this->constants, $instruction['operands'][1]['ref']) === $address
+            ) {
+                $sets[] = $instruction['ref'];
+            }
+        }
+        return $sets;
     }
 
     /** the low 32 bits of the next opline the trace checks the IP against after $call, or null */
@@ -942,6 +1073,19 @@ final class IpUses
         }
         return ['untraced', $from, $number];
     }
+}
+
+/**
+ * A key that names a VM handler in every process: the low 21 bits of its
+ * address (the IR prints it: "func *0x55d0d28bd410(): int32_t"). The PHP
+ * binary is loaded at an address aligned to 2 MB here, so ASLR leaves those
+ * bits alone: in 41 processes, 46 handlers each kept one key, and no key
+ * named two opcodes. A key that does name two is not used (IpUses keeps
+ * only keys with one opcode).
+ */
+function handlerKey(string $handler): int
+{
+    return preg_match('/0x([0-9a-f]+)/', $handler, $match) === 1 ? (int) hexdec($match[1]) & 0x1fffff : -1;
 }
 
 /** the integer value of constant c_$ref ("0x55d0c6974bd8", "3331804184"), or null */

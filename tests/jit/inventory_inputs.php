@@ -152,7 +152,10 @@ function transpileProject(string $projectDirectory, string $outputDirectory, arr
  * (stdout discarded, stderr, the JIT's report, in a file of
  * $scratchDirectory that is removed once read), and returns per input: its
  * exit status, how many loop traces the JIT compiled, and the flagged ones
- * (trace, verdict and place, see tracePlace).
+ * (trace, verdict and place, see tracePlace). A report with a flagged trace
+ * whose uses of the IP are not all placed is read again at the end, with
+ * the handlers every run placed (loopTraceVerdicts' $knownHandlers): a
+ * handler one process never placed, another often did.
  *
  * @param list<array{class: string, name: string, arguments: list<string>, environment: list<string>,
  *     directory: string}> $inputs
@@ -164,6 +167,8 @@ function examineInputs(array $inputs, string $mode, string $profile, int $parall
     $results = [];
     $running = [];
     $next = 0;
+    $knownHandlers = [];
+    $readAgain = [];
     while ($next < \count($inputs) || $running !== []) {
         while ($next < \count($inputs) && \count($running) < $parallel) {
             $input = $inputs[$next];
@@ -188,26 +193,47 @@ function examineInputs(array $inputs, string $mode, string $profile, int $parall
             }
             proc_close($process);
             unset($running[$index]);
-            $results[$index] = examineDump($inputs[$index], $status['exitcode'], $dumpFile);
-            unlink($dumpFile);
+            $results[$index] = examineDump($inputs[$index], $status['exitcode'], $dumpFile, [], $placedHandlers);
+            foreach ($placedHandlers as $key => $opcodes) {
+                $knownHandlers[$key] = ($knownHandlers[$key] ?? []) + $opcodes;
+            }
+            if ($results[$index]['flaggedWithUnplacedUses'] > 0) {
+                $readAgain[$index] = $dumpFile;
+            } else {
+                unlink($dumpFile);
+            }
         }
+    }
+    foreach ($readAgain as $index => $dumpFile) {
+        $results[$index] = examineDump($inputs[$index], $results[$index]['status'], $dumpFile, $knownHandlers);
+        unlink($dumpFile);
     }
     ksort($results);
     return array_values($results);
 }
 
-/** the detector's findings in the JIT report $dumpFile of one input's run */
-function examineDump(array $input, int $status, string $dumpFile): array
-{
+/**
+ * The detector's findings in the JIT report $dumpFile of one input's run
+ * ($knownHandlers, $placedHandlers: see loopTraceVerdicts)
+ */
+function examineDump(
+    array $input,
+    int $status,
+    string $dumpFile,
+    array $knownHandlers = [],
+    ?array &$placedHandlers = null,
+): array {
     $result = ['input' => $input, 'status' => $status, 'loopTraces' => 0, 'withoutInterruptCheck' => 0,
-        'flagged' => []];
-    foreach (loopTraceVerdicts($dumpFile) as ['trace' => $trace, 'verdict' => $verdict]) {
+        'flagged' => [], 'flaggedWithUnplacedUses' => 0];
+    $verdicts = loopTraceVerdicts($dumpFile, $knownHandlers, $placedHandlers);
+    foreach ($verdicts as ['trace' => $trace, 'verdict' => $verdict]) {
         $result['loopTraces']++;
         if (!$verdict['interruptCheck']) {
             $result['withoutInterruptCheck']++;
         }
         if ($verdict['flagged']) {
             $result['flagged'][] = ['trace' => $trace, 'verdict' => $verdict, 'place' => tracePlace($trace)];
+            $result['flaggedWithUnplacedUses'] += $verdict['unplacedUses'] > 0 ? 1 : 0;
         }
     }
     return $result;
