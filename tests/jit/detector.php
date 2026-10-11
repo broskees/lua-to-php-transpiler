@@ -7,10 +7,12 @@
  * run again from values its frame held before the trace kept them in CPU
  * registers. It happens to a loop trace whose interrupt check jumps to
  * the shared interrupt stub instead of a deoptimizing exit, which the
- * trace compiler chooses when the trace uses its initial IP (an opcode it
- * compiles as a call to its VM handler, such as ?? and ?:) and its stack
- * holds no register in the old sense (zend_jit_trace.c:7226-7238 and
- * 3493-3505 in php-8.5.11; the analysis is in the issue).
+ * trace compiler chooses when the trace's code uses the IP the compiler
+ * keeps track of (ZEND_JIT_TRACE_USES_INITIAL_IP: a call to the VM handler
+ * of an opcode without inline code, such as ?? and ?:, or EX(opline) set
+ * from the IP, as foreach's FE_FETCH_R does) and its stack holds no
+ * register in the old sense (zend_jit_trace.c:7226-7238 and 3493-3505 in
+ * php-8.5.11; the analysis is in the issue).
  *
  * The verdicts come only from what the JIT reports about the code it
  * compiled (opcache.jit_debug, see JIT_DEBUG): per compiled trace, its
@@ -354,11 +356,11 @@ function processFacts(string $dumpFile): array
  * one that set the flag: "COALESCE at 0005 (VM handler call)", "FE_FETCH_R
  * at 0004 (EX(opline) from the IP)", "COALESCE at 0010 in
  * LuaPhp\Runtime\LuaTable::partCount (VM handler call)"; after the first,
- * the same opcode, function and kind in one item. A handler call whose opline was not
- * found is named by the opcode the same handler function runs where the
- * process's traces placed it (one handler function per opcode and operand
- * types), if they agree: "FETCH_CLASS_CONSTANT (VM handler call at an
- * opline not found)".
+ * the same opcode, function and kind in one item. A handler call whose
+ * opline was not found is named by the opcode the same handler function
+ * runs where the process's traces placed it (one handler function per
+ * opcode and operand types), if they agree: "FETCH_CLASS_CONSTANT (VM
+ * handler call at an opline not found)".
  *
  * @return list<array{trace: array, verdict: array}>
  */
@@ -443,21 +445,24 @@ function slotName(?int $offset, array $bytecode): string
  * opline, or the last one it set), and a loop trace with that flag gets the
  * interrupt stub. Those uses show in the final IR as
  *   - a call to a VM handler (zend_jit_trace_handler, for an opcode without
- *     inline code): an RSTORE of the IP, then a CALL of the handler with no
- *     argument;
+ *     inline code; the process's handlers come from processFacts): a CALL
+ *     of it with no argument, after an RSTORE of the IP unless the IP
+ *     already points at the opline;
  *   - EX(opline) stored from the IP (jit_SET_EX_OPLINE): a STORE to the
  *     frame register itself of an RLOAD of the IP;
  *   - the IP set from itself plus or minus an offset (zend_jit_set_ip),
  *     other than for a handler call or the loop's own set back to its first
  *     opline before its interrupt check (there because of the flag).
  * Each is named by the opline the IP points to there, followed through the
- * trace's bytecode: the trace starts at its first opline; a set from the IP
- * moves it by whole zend_ops in the same function; a handler leaves it at
- * the next opline of the trace; an address is placed by the IP the loop
- * sets before its interrupt check (its first opline) or, in a function the
- * trace inlines, by the check of the next opline after a handler call. An
- * IP use that the IR does not show (a set to the opline it already holds
- * emits nothing) is not listed.
+ * trace's bytecode: a root trace starts at its first opline, a side trace
+ * at an IP not known; a set from the IP moves it by whole zend_ops in the
+ * same function; a handler leaves it at the next opline of the trace; at a
+ * MERGE every path must agree; an address is placed by the IP the loop
+ * sets before its interrupt check (its first opline), or for a handler
+ * call by the check of the next opline after it, when one opline of the
+ * trace fits. Where the IR does not show a use (a set to the opline the
+ * IP already holds emits nothing), it is not listed; where it cannot be
+ * placed, it says so.
  */
 final class IpUses
 {
