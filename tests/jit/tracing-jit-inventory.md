@@ -32,23 +32,18 @@ profile) and flagged traces (1831, at 27 places).
 How to read a flagged place:
 
 - The line names the loop: our PHP file and the line of the loop's first
-  opline, and its function. Under bin/lua the emitted code is eval'd and
-  never JIT-compiled. In lua2php output one emitted loop is flagged on the
-  phase-1 tree (commit 14622c6), though not in the output below (commit
-  cd74903): the loop the emitter writes for OP_SETLIST with B = 0 (`{...}`,
-  or a constructor that ends in a call). For a nil value it runs
-  `unset($t->arr[...])`, which is FETCH_OBJ_UNSET and UNSET_DIM, two VM
-  handler calls. Its two places are under "Entries that vary between
-  runs". For a place in emitted code the command prints the Lua file, the
-  emitted `$function_...` with its Lua line range, and the comment of the
-  last instruction above the line PHP reports for the loop. That comment
-  can name a later instruction than the loop's: PHP counts a lone "\r" as
-  a line end, the command splits the file at "\n" only, and the binary
-  chunk in a lua2php file holds such bytes. Above the SETLIST loop there
-  are 18 in tables.lua's file and 11 in table_semantics.lua's, so the
-  command looks 18 and 11 lines below the loop and finds a RETURN. Phase 2
-  (commit ad0d07a) changed the loop to unset an element only when `isset`
-  says it is there.
+  opline, and its function. For a loop in emitted code it names the Lua
+  file, the emitted `$function_...` with its Lua line range, and the pc
+  and comment of the instruction whose code holds the loop (lines counted
+  as PHP counts them: a lone "\r" ends one too). Under bin/lua the emitted
+  code is eval'd and never JIT-compiled. In lua2php output one emitted
+  loop is flagged on the phase-1 tree (commit 14622c6), though not in the
+  output below (commit cd74903): the loop the emitter writes for
+  OP_SETLIST with B = 0 (`{...}`, or a constructor that ends in a call).
+  For a nil value it runs `unset($t->arr[...])`, which is FETCH_OBJ_UNSET
+  and UNSET_DIM, two VM handler calls. Its two places are under "Entries
+  that vary between runs". Phase 2 (commit ad0d07a) changed the loop to
+  unset an element only when `isset` says it is there.
 - operation: the first use, in trace order, of the IP the trace compiler
   keeps track of; that use sets `ZEND_JIT_TRACE_USES_INITIAL_IP`, which gives
   the loop the interrupt stub. It names the opcode and where it is: "at
@@ -87,23 +82,27 @@ counts differed by less than 0.4%: loop traces examined 21034 and 21037,
 flagged traces 1825 and 1831. In both, 0 flagged traces had an operation
 without an opline, and 0 had a use of the IP not placed.
 
-On 14622c6, six runs of this command on 2026-10-11 (five on a copy of
-the tree, one by the final verification) all ran 373 inputs and flagged
-the 27 places of the output and the two emitted places below; two of them
-also flagged src/Lib/Utf8Lib.php:286 (below). Loop traces examined: 20922
-to 20959; flagged traces: 1867 to 1875, at 29 or 30 places. In all six,
-0 flagged traces had an operation without an opline, and 0 had a use of
-the IP not placed.
+On 14622c6, seven runs of this command on 2026-10-11 all ran 373 inputs
+and flagged the 27 places of the output and the two emitted places below;
+three of them also flagged src/Lib/Utf8Lib.php:286 (below). Six ran
+phase 1's tests/jit/ (five on a copy of the tree, one by the final
+verification); the seventh ran 14622c6's src/, bin/ and tests/diff/ with
+the tests/jit/ of the repair after it, whose places for emitted code count
+lines as PHP does (the six named the two emitted places by the RETURN
+after the loop: `[5] RETURN 0 2 1` and `[6] RETURN 0 1 1`). Loop traces
+examined: 20916 to 20959; flagged traces: 1867 to 1881, at 29 or 30
+places. In all seven, 0 flagged traces had an operation without an
+opline, and 0 had a use of the IP not placed.
 
 Emitted code, flagged in every run on 14622c6 and in no run on cd74903:
 
-- table_semantics.lua $function_0_3 <41,41> [5] RETURN 0 2 1 ; line 41
+- table_semantics.lua $function_0_3 <41,41> [4] SETLIST 0 0 0 ; line 41
   - operation: FETCH_OBJ_UNSET at 0117 (VM handler call)
   - later uses of the IP in its traces: UNSET_DIM (VM handler call)
   - registers: CV9($i) in %r12
   - traces: 1 ((i) 1, (ii) 0, (iii) 0, (iv) 0, (v) 0; profiles (default) 0, (eager) 1) in 1 inputs, the first (i) diff/table_semantics.lua
 
-- tables.lua $function_0_0 <3,3> [6] RETURN 0 1 1 ; line 3
+- tables.lua $function_0_0 <3,3> [4] SETLIST 0 0 0 ; line 3
   - operation: FETCH_OBJ_UNSET at 0117 (VM handler call)
   - later uses of the IP in its traces: UNSET_DIM (VM handler call)
   - registers: CV9($i) in %r12
@@ -111,8 +110,7 @@ Emitted code, flagged in every run on 14622c6 and in no run on cd74903:
 
 Both are the loop the emitter writes for `[4] SETLIST 0 0 0` in `local
 function pack(...) return {...} end` (table_semantics.lua line 41) and
-`local function values(...) return {...} end` (tables.lua line 3); the
-label names a RETURN after it (see "How to read a flagged place"). The
+`local function values(...) return {...} end` (tables.lua line 3). The
 loop, the same on both commits:
 
     for ($i = 1; $i <= $n; $i++) {
@@ -130,7 +128,7 @@ that runs before moves that point (here JitSafety's, the only PHP that
 differs between the two commits): on cd74903, the
 lua2php file of tables.lua run alone flags the loop with
 `opcache.jit_hot_loop` 5, 6 and 9, and not with 7 (the eager profile), 8
-or 10. How often: on 14622c6, in 6 of 6 full runs (1 trace each, eager
+or 10. How often: on 14622c6, in 7 of 7 full runs (1 trace each, eager
 profile); each file's lua2php output run alone, 10 of 10 runs under
 the eager profile and 0 of 10 under the default profile. Before the
 merge: in none of the 11 full runs of phase 1's two iterations (runs 3
@@ -147,7 +145,7 @@ Our PHP, flagged in some runs on 14622c6 only:
 
 Its loop `while (self::isContinuation($s, $n)) { $n++; }` starts with a
 static method call, which stores the opline from the IP. How often: on
-14622c6, in 2 of 6 full runs (1 trace each, eager profile); (ii)
+14622c6, in 3 of 7 full runs (1 trace each, eager profile); (ii)
 diff/utf8_library.lua run alone under the eager profile, 3 of 10 runs
 (each one that compiled 85 loop traces; the other 7 compiled 74 or 80),
 under the default profile 0 of 10; its (i) and (v) inputs under the
