@@ -38,12 +38,17 @@ final class LuaCommand
 
     /**
      * lua.c: main. Also sets PHP up for the command line
-     * (Standalone::configurePhp) and load()'s disk cache.
+     * (Standalone::configurePhp) and load()'s disk cache, after refusing
+     * a JIT mode that can compute wrong results (Standalone::refusesJit).
      *
      * @param list<string> $argv
      */
     public static function main(array $argv): int
     {
+        $programName = (isset($argv[0]) && $argv[0] !== '') ? $argv[0] : 'lua';  // lua.c: progname
+        if (Standalone::refusesJit($programName)) {
+            return 1;
+        }
         Standalone::configurePhp();
         Standalone::raiseMemoryLimit();
 
@@ -51,8 +56,6 @@ final class LuaCommand
         // depend on what earlier runs left there); in memory it always does
         $cacheDirectory = getenv('LUAPHP_CACHE_DIR');
         LoadCache::useDirectory(is_string($cacheDirectory) && $cacheDirectory !== '' ? $cacheDirectory : null);
-
-        $programName = (isset($argv[0]) && $argv[0] !== '') ? $argv[0] : 'lua';  // lua.c: progname
 
         $L = Coroutine::newState();
         $L->globalState->gcstp = Collector::GCSTPUSR;  // lua_gc(L, LUA_GCSTOP): stop GC while building state

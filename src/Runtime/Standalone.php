@@ -76,6 +76,23 @@ final class Standalone
         }
     }
 
+    /**
+     * Whether PHP runs a JIT mode that can compute wrong results
+     * (JitSafety): then writes "<program>: <the setting, what to set
+     * instead>" to stderr, and bin/lua, bin/luac, bin/lua2php or the
+     * lua2php script exits with status 1 before it compiles or runs any
+     * Lua code.
+     */
+    public static function refusesJit(string $programName): bool
+    {
+        $refusal = JitSafety::refusal();
+        if ($refusal === null) {
+            return false;
+        }
+        self::message($programName, $refusal);
+        return true;
+    }
+
     /** lauxlib.c: luaL_newstate + linit.c: luaL_openlibs */
     public static function newStateWithLibraries(): Coroutine
     {
@@ -228,12 +245,17 @@ final class Standalone
      * script. $chunk is the script's chunk (see ChunkLoader::loadPrecompiled).
      * Files are precompiled too (ChunkLoader::loadFile); load() caches on
      * disk in LUAPHP_CACHE_DIR, else in LoadCache's default directory.
-     * Returns the process exit status.
+     * A JIT mode that can compute wrong results is refused first
+     * (refusesJit). Returns the process exit status.
      *
      * @param list<string> $argv
      */
     public static function runCompiledScript(array $argv, string $scriptName, array $chunk): int
     {
+        $programName = $argv[0] ?? 'lua';
+        if (self::refusesJit($programName)) {
+            return 1;
+        }
         self::switchJitOn();
         $cacheDirectory = getenv('LUAPHP_CACHE_DIR');
         if (\is_string($cacheDirectory) && $cacheDirectory !== '') {
@@ -241,7 +263,6 @@ final class Standalone
         } else {
             LoadCache::useDefaultDirectory();
         }
-        $programName = $argv[0] ?? 'lua';
         $L = Coroutine::newState();
         $L->globalState->filesArePrecompiled = true;
         $L->globalState->gcstp = Collector::GCSTPUSR;  // lua_gc(L, LUA_GCSTOP): stop GC while building state
