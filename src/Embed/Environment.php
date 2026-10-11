@@ -10,6 +10,7 @@ use LuaPhp\Embed\Internal\State;
 use LuaPhp\Embed\Loader\Loader;
 use LuaPhp\Lib\StandardLibraries;
 use LuaPhp\Runtime\Coroutine;
+use LuaPhp\Runtime\JitSafety;
 use LuaPhp\Runtime\LuaError;
 use LuaPhp\Runtime\PhpErrors;
 
@@ -27,6 +28,10 @@ use LuaPhp\Runtime\PhpErrors;
  * name, then reused; compile() does it ahead of time. Creating an
  * Environment or a Sandbox, loading and running code never change PHP's
  * settings, handlers or output buffers.
+ *
+ * Under PHP's function JIT with register allocation (opcache.jit
+ * "function", 1205, ...), which can compute wrong results, newSandbox(),
+ * run() and compile() throw UnsafeJitSetting.
  */
 final class Environment
 {
@@ -137,6 +142,10 @@ final class Environment
     {
         if ($this->loader === null) {
             throw new \LogicException('cannot compile scripts: the Environment has no loader');
+        }
+        $jitRefusal = JitSafety::refusal();
+        if ($jitRefusal !== null) {
+            throw new UnsafeJitSetting($jitRefusal);
         }
         $L = Coroutine::newState();  // the compiler runs on a thread (its protected parser, its C-call depth)
         $L->globalState->chunkCache = $this->cache;

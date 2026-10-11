@@ -11,6 +11,7 @@ use LuaPhp\Compiler\Listing;
 use LuaPhp\Compiler\Proto;
 use LuaPhp\Compiler\Undump;
 use LuaPhp\Lib\Io\CFile;
+use LuaPhp\Runtime\Standalone;
 
 /**
  * bin/luac: port of luac.c (Lua 5.4.9) for a single input file: list,
@@ -27,13 +28,17 @@ final class LuacCommand
     private static string $programName = 'luac';
 
     /**
-     * luac.c: main / doargs / pmain
+     * luac.c: main / doargs / pmain, after refusing a JIT mode that can
+     * compute wrong results (Standalone::refusesJit)
      *
      * @param list<string> $argv
      */
     public static function main(array $argv): int
     {
         self::$programName = (isset($argv[0]) && $argv[0] !== '') ? $argv[0] : 'luac';
+        if (Standalone::refusesJit(self::$programName)) {
+            return 1;
+        }
 
         // luac.c: doargs
         $listing = 0;

@@ -30,10 +30,18 @@ final class Lua2PhpCommand
 {
     private static string $programName = 'lua2php';
 
-    /** @param list<string> $argv */
+    /**
+     * Refuses a JIT mode that can compute wrong results first
+     * (Standalone::refusesJit): then nothing is transpiled or written.
+     *
+     * @param list<string> $argv
+     */
     public static function main(array $argv): int
     {
         self::$programName = (isset($argv[0]) && $argv[0] !== '') ? $argv[0] : 'lua2php';
+        if (Standalone::refusesJit(self::$programName)) {
+            return 1;
+        }
 
         Standalone::raiseMemoryLimit();
 

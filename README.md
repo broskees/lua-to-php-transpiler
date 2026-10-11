@@ -19,6 +19,24 @@ php hello.php
   (its tracing JIT runs the generated code 1.1 to 1.9 times faster), posix
   (the host C library's error texts) and pcntl (exit statuses of `io.popen`
   and `os.execute` without polling).
+- opcache's JIT, if you turn it on: these `opcache.jit` values run:
+  `disable`, `off`, the tracing JIT (`tracing`, `1254`, `1154`, `1054`) and
+  function modes without register allocation (`1005`). PHP's function JIT
+  with register allocation (`function`, `1205`, `1105`, `1215`, `1225`: the
+  T digit 0 to 3 with the R digit 1 or 2) is refused. In PHP 8.4 and 8.5 it
+  can repeat loop iterations when an async signal handler or a sampling
+  profiler interrupts a loop, so programs compute wrong results without an
+  error ([php-src#23983](https://github.com/php/php-src/issues/23983)).
+  Under it, `bin/lua`, `bin/luac`, `bin/lua2php` and transpiled scripts
+  print one line on stderr that names the setting and the values to use
+  instead, and exit with status 1 before they run or compile any Lua
+  (lua2php writes no file). The embedding API throws
+  `LuaPhp\Embed\UnsafeJitSetting` with the same message when you create a
+  sandbox (`newSandbox`, `run`, `Lua::run`) or call `compile`. The check
+  works also where the host disables or restricts `opcache_get_status`. The
+  tracing JIT has a narrower form of the bug
+  ([php-src#24186](https://github.com/php/php-src/issues/24186)): see
+  [Performance](#performance).
 - For running the tests: `lua5.4` and `luac5.4` (5.4.9). The tests compare
   against them.
 
@@ -198,8 +216,9 @@ functions); `LuaPhp\Embed\Lua::run('return 1 + 1')` is the one-liner.
   takes that cost out of the runs.
 - **Errors.** `SyntaxError` (message as `lua5.4` prints it, `->chunkName`,
   `->luaLine`), `RuntimeError` (`->luaMessage`, `->value`, `->traceback`),
-  `LimitExceeded`, `ConversionError`, and `SandboxClosed` for a sandbox
-  used after a limit or a PHP exception stopped it. Pending `__gc`
+  `LimitExceeded`, `ConversionError`, `SandboxClosed` for a sandbox
+  used after a limit or a PHP exception stopped it, and `UnsafeJitSetting`
+  under a refused JIT mode (see [Requirements](#requirements)). Pending `__gc`
   finalizers never run when a sandbox is closed or dropped.
 - **Isolation.** Each sandbox has its own globals, registry, string
   metatable, `package.loaded` and random state, and
