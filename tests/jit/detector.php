@@ -491,15 +491,17 @@ function slotName(?int $offset, array $bytecode): string
  * same function (to an opline of the trace, or one it does not run, as an
  * exit's); a handler leaves it at the next opline of the trace; at a MERGE
  * every path must agree. An address (where the IP was set to a constant)
- * is placed by the IP the loop sets before its interrupt check (its first
- * opline); for a handler call, by the check of the next opline after it
+ * is placed by an anchor (the IP the loop sets before its interrupt check,
+ * at its first opline, places every opline of the loop's own function the
+ * trace runs); for a handler call, by the check of the next opline after it
  * when one opline of the trace fits; else, given the handlers' opcodes
  * the process's traces placed (search mode), by trying each opline of the
  * trace for it: a placement may add no inconsistency (a handler call at an
  * opline the trace does not run or at one with another handler call, one
  * handler function at two opcodes, or at another opcode than the process's
  * traces placed it at), and the one that places the most handler calls is
- * taken; addresses not placed are tried again after each placement. Where
+ * taken and anchors its call; addresses not placed are tried again after
+ * each placement. Where
  * the IR does not show a use (a set to the opline the IP already holds
  * emits nothing), it is not listed; where it cannot be placed, it says so.
  */
@@ -510,7 +512,6 @@ final class IpUses
     /** @var list<array{number: int, level: int, opcode: string, function: string}> */
     private array $entries = [];
     private ?int $ipRegister = null;
-    private ?int $firstOplineAddress = null;
     /**
      * Positions of the IP: ['entry', index into $entries], ['untraced',
      * index, number] (opline number of the call entry index is in, which
@@ -522,8 +523,15 @@ final class IpUses
     /** @var array<int, ?array> by control instruction */
     private array $ipAt = [];
     private bool $ipKnownAtStart;
-    /** @var array<int, int> address => entry index: where search mode placed addresses */
-    private array $placedAddresses = [];
+    /**
+     * Where the oplines of a call in the trace are: [an entry index of the
+     * call, the address of the call's opline 0]. From the IP the loop sets
+     * before its interrupt check (its first opline), and from each address
+     * search mode placed.
+     *
+     * @var list<array{int, int}>
+     */
+    private array $anchors = [];
 
     /**
      * @param list<array> $instructions the trace's final IR (parseIr)
@@ -554,8 +562,10 @@ final class IpUses
             }
         }
         $loopEnd = $this->byRef[$interruptCheckLoad['operands'][0]['ref'] ?? 0] ?? null;
-        if ($this->isIpStore($loopEnd) && $loopEnd['operands'][1]['kind'] === 'c') {
-            $this->firstOplineAddress = constantValue($constants, $loopEnd['operands'][1]['ref']);
+        $firstOplineAddress = $this->isIpStore($loopEnd) && $loopEnd['operands'][1]['kind'] === 'c'
+            ? constantValue($constants, $loopEnd['operands'][1]['ref']) : null;
+        if ($firstOplineAddress !== null && $this->entries !== []) {
+            $this->anchors[] = [0, $firstOplineAddress - $this->entries[0]['number'] * ZEND_OP_BYTES];
         }
     }
 
@@ -695,17 +705,18 @@ final class IpUses
                     if (\count($opcodes) === 1 && !isset($opcodes[$entry['opcode']])) {
                         continue;
                     }
-                    $this->placedAddresses[$address] = $index;
+                    $this->anchors[] = [$index, $address - $entry['number'] * ZEND_OP_BYTES];
                     $this->forgetPositions();
                     [$inconsistenciesThen, $placedThen] = $this->handlerCallsChecked($handlerOpcodes);
                     if ($inconsistenciesThen <= $inconsistencies && $placedThen > $placed) {
                         $placedBy[$index] = $placedThen;
                     }
+                    array_pop($this->anchors);
                 }
-                unset($this->placedAddresses[$address]);
                 arsort($placedBy);
                 if ($placedBy !== [] && \count(array_keys($placedBy, reset($placedBy), true)) === 1) {
-                    $this->placedAddresses[$address] = array_key_first($placedBy);
+                    $index = array_key_first($placedBy);
+                    $this->anchors[] = [$index, $address - $this->entries[$index]['number'] * ZEND_OP_BYTES];
                     $changed = true;
                 }
                 $this->forgetPositions();
@@ -850,23 +861,19 @@ final class IpUses
     }
 
     /**
-     * ['entry', index] for an address of the trace's own function (placed
-     * from the address of its first opline), or that search mode placed, or
-     * for the handler call $handlerCall at an address, the one opline of
-     * the trace that the call's check of the next opline fits; else
-     * ['address', $address]
+     * ['entry', index] for an address of an opline the trace runs in a call
+     * an anchor places, or for the handler call $handlerCall at an address,
+     * the one opline of the trace that the call's check of the next opline
+     * fits; else ['address', $address]
      */
     private function placeAddress(int $address, ?array $handlerCall): array
     {
-        if (isset($this->placedAddresses[$address])) {
-            return ['entry', $this->placedAddresses[$address]];
-        }
-        if ($this->firstOplineAddress !== null && ($address - $this->firstOplineAddress) % ZEND_OP_BYTES === 0) {
-            $number = $this->entries[0]['number'] + intdiv($address - $this->firstOplineAddress, ZEND_OP_BYTES);
-            foreach ($this->entries as $index => $entry) {
-                if ($entry['level'] === $this->entries[0]['level'] && $entry['number'] === $number) {
-                    return ['entry', $index];
-                }
+        foreach ($this->anchors as [$index, $base]) {
+            $offset = $address - $base;
+            $position = $offset >= 0 && $offset % ZEND_OP_BYTES === 0
+                ? $this->oplineInSameCall($index, intdiv($offset, ZEND_OP_BYTES)) : null;
+            if (($position[0] ?? '') === 'entry') {
+                return $position;
             }
         }
         $nextOpline = $handlerCall === null ? null : $this->nextOplineCheck($handlerCall);
