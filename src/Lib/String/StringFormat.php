@@ -65,6 +65,8 @@ final class StringFormat
         $position = 0;
         $result = '';
         $capacity = MemoryLimit::CHECK_ABOVE;  // $result may grow to this length before the next check
+        // (in the loop: no ?? and no class constant of another class, see AGENTS.md)
+        $stringType = Lua::LUA_TSTRING;
         while ($position < $formatEnd) {
             $escapePosition = strpos($format, self::L_ESC, $position);
             // room for the text before the next item and for the item, unless it is a string (checked below)
@@ -79,7 +81,7 @@ final class StringFormat
             }
             $result .= substr($format, $position, $escapePosition - $position);
             $position = $escapePosition + 1;
-            if (($format[$position] ?? "\0") === self::L_ESC) {
+            if (($position < $formatEnd ? $format[$position] : "\0") === self::L_ESC) {
                 $result .= self::L_ESC;  // %%
                 $position++;
                 continue;
@@ -95,7 +97,8 @@ final class StringFormat
                 Auxiliary::error($L, 'invalid format (too long)');
             }
             $form = self::L_ESC . substr($format, $position, $length);
-            $conversion = $format[$position + $length - 1] ?? "\0";  // C reads the string's final '\0'
+            // C reads the string's final '\0'
+            $conversion = $position + $length - 1 < $formatEnd ? $format[$position + $length - 1] : "\0";
             $position += $length;
             $value = $args[$arg - 1];
             switch ($conversion) {
@@ -107,7 +110,8 @@ final class StringFormat
                 case 'd':
                 case 'i':
                     if ($form === '%d' && \is_int($value)) {  // fast path: no flags, width or precision
-                        $result .= $value;
+                        // (strval unqualified, a function call: see AGENTS.md, Loops and the tracing JIT)
+                        $result .= strval($value);
                         break;
                     }
                     $result .= self::formatInteger($L, $args, $arg, $form, $conversion, self::L_FMTFLAGSI);
@@ -139,7 +143,7 @@ final class StringFormat
                     $pointer = self::toPointer($L, $value);
                     self::checkFormat($L, $form, self::L_FMTFLAGSC, false);
                     // avoid calling 'printf' with argument NULL: format "(null)" as a string
-                    $result .= self::pad($form, $pointer ?? '(null)');
+                    $result .= self::pad($form, $pointer === null ? '(null)' : $pointer);
                     break;
                 case 'q':
                     if (\strlen($form) !== 2) {  // modifiers?
@@ -154,7 +158,7 @@ final class StringFormat
                 case 's':
                     // fast path: a string, when strings have no '__tostring'
                     $string = \is_string($value)
-                        && !isset($L->globalState->typeMetatables[Lua::LUA_TSTRING]->hash['__tostring'])
+                        && !isset($L->globalState->typeMetatables[$stringType]->hash['__tostring'])
                         ? $value
                         : Auxiliary::toLString($L, $value);
                     if (\strlen($form) === 2) {  // no modifiers?

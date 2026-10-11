@@ -138,15 +138,18 @@ final class PatternRegex
         $closedCaptures = [];  // capture index => true
         $recursiveItems = 0;
         $balanceGroups = '';  // the recursive groups '%b' calls
+        // (in the loop: no ??, no class constant of another class, no integer in '.': see AGENTS.md,
+        // Loops and the tracing JIT)
+        $maximumCaptures = MatchState::LUA_MAXCAPTURES;
         $p = 0;
         while ($p < $patternEnd) {
             $character = $pattern[$p];
             if ($character === '(') {  // start capture
-                if (\count($isPositionCapture) >= MatchState::LUA_MAXCAPTURES) {
+                if (\count($isPositionCapture) >= $maximumCaptures) {
                     return null;  // "too many captures"
                 }
                 $recursiveItems++;
-                if (($pattern[$p + 1] ?? '') === ')') {  // position capture
+                if ($p + 1 < $patternEnd && $pattern[$p + 1] === ')') {  // position capture
                     $closedCaptures[\count($isPositionCapture)] = true;
                     $isPositionCapture[] = true;
                     $regex .= '()';
@@ -175,7 +178,7 @@ final class PatternRegex
                 continue;
             }
             if ($character === '%') {
-                $next = $pattern[$p + 1] ?? '';
+                $next = $p + 1 < $patternEnd ? $pattern[$p + 1] : '';
                 if ($next === 'b') {  // balanced string
                     if ($p + 3 >= $patternEnd) {
                         return null;  // "malformed pattern (missing arguments to '%b')"
@@ -198,7 +201,7 @@ final class PatternRegex
                 }
                 if ($next === 'f') {  // frontier
                     $p += 2;
-                    if (($pattern[$p] ?? '') !== '[') {
+                    if ($p >= $patternEnd || $pattern[$p] !== '[') {
                         return null;  // "missing '[' after '%f' in pattern"
                     }
                     $ep = self::classEnd($pattern, $patternEnd, $p);
@@ -214,7 +217,7 @@ final class PatternRegex
                     if (!isset($closedCaptures[$index])) {
                         return null;  // "invalid capture index" (%0, not started or unfinished)
                     }
-                    $regex .= $isPositionCapture[$index] ? '(*FAIL)' : '\g{' . ($index + 1) . '}';
+                    $regex .= $isPositionCapture[$index] ? '(*FAIL)' : '\g{' . strval($index + 1) . '}';
                     $p += 2;
                     continue;
                 }
@@ -226,7 +229,7 @@ final class PatternRegex
                 return null;
             }
             $regex .= self::classRegex($pattern, $p, $ep, $ms);
-            $suffix = $pattern[$ep] ?? '';
+            $suffix = $ep < $patternEnd ? $pattern[$ep] : '';
             if ($suffix === '*' || $suffix === '+' || $suffix === '?') {
                 $regex .= $suffix;
                 $recursiveItems++;
@@ -260,7 +263,7 @@ final class PatternRegex
             return $p === $patternEnd ? null : $p + 1;  // "(ends with '%')"
         }
         if ($character === '[') {
-            if (($pattern[$p] ?? '') === '^') {
+            if ($p < $patternEnd && $pattern[$p] === '^') {  // (no ??: it runs in a loop, see AGENTS.md)
                 $p++;
             }
             do {  // look for a ']'
@@ -270,7 +273,7 @@ final class PatternRegex
                 if ($pattern[$p++] === '%' && $p < $patternEnd) {
                     $p++;  // skip escapes (e.g. '%]')
                 }
-            } while (($pattern[$p] ?? '') !== ']');
+            } while ($p >= $patternEnd || $pattern[$p] !== ']');
             return $p + 1;
         }
         return $p;
@@ -284,7 +287,11 @@ final class PatternRegex
             return '[\x00-\xff]';
         }
         if ($character === '%') {  // a class like '%a' depends only on its letter
-            return self::$escapeRegexes[$pattern[$p + 1]] ??= self::byteSetRegex($ms->classBytes($p, $ep));
+            $letter = $pattern[$p + 1];
+            if (!isset(self::$escapeRegexes[$letter])) {  // (no ??=: it runs in a loop, see AGENTS.md)
+                self::$escapeRegexes[$letter] = self::byteSetRegex($ms->classBytes($p, $ep));
+            }
+            return self::$escapeRegexes[$letter];
         }
         if ($character === '[') {
             return self::byteSetRegex($ms->classBytes($p, $ep));

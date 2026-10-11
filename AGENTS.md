@@ -651,8 +651,9 @@ Lua string keys and integer keys distinct.
   PHP 8.4 and 8.5, a VM interrupt (an async signal handler, a sampling
   profiler such as Excimer) that hits a 1254 loop trace running ?? or ?:
   resumes the loop with stale register-held locals, so iterations repeat
-  (php-src zend_jit_trace.c); 1054 gave no wrong run in 44 and costs about
-  1% more CPU. Never profile under 1254.
+  (php-src#24186; our own PHP avoids it, see Loops and the tracing JIT);
+  1054 gave no wrong run in 44 and costs about 1% more CPU. Never profile
+  under 1254.
   Lua cannot observe two of them: traces with arguments hold values until
   the pcall that caught the error returns (about 10% more peak memory at
   a stack overflow), and float literals are exact at any
@@ -683,6 +684,62 @@ Lua string keys and integer keys distinct.
   point must call it too. `tests/unit/JitRefusalTest.php` runs every
   entry point under 14 JIT settings, and with opcache_get_status disabled
   or restricted.
+- **Loops and the tracing JIT.** php-src#24186 (PHP 8.4 and newer, tracing
+  JIT with register allocation: opcache.jit=tracing or 1254, a host's
+  setting we must run under): a loop trace that uses the instruction
+  pointer the trace compiler keeps track of ends its loop with an
+  interrupt check that jumps to a stub writing nothing back, so after a VM
+  interrupt (an async signal handler, a sampling profiler,
+  max_execution_time) the loop runs again from the values its frame held
+  before the trace kept them in CPU registers: iterations repeat, with no
+  error (table.unpack, table.concat and string.format printed wrong
+  results). The trace uses that pointer at each call of an opcode's VM
+  handler (an opcode the trace compiler has no inline code for), and where
+  an operation stores the opline right after one or as the loop's first.
+  So inside a loop, and in every function a loop calls (the trace inlines
+  them), our PHP (src/, the emitted code, the Op methods) avoids these,
+  each with what we write instead: `??` and `??=` (`isset($a[$k]) ?
+  $a[$k] : null`; for a string offset, a test of the length), `?:` (`$x ?
+  $x : $y`), `?->` (`if ($x !== null)`), `@` (`set_error_handler` around
+  the loop), `instanceof` (`\is_a($x, C::class)`), `~` (`^ -1`), `unset`
+  of an array element (when it is usually absent, `isset` first keeps the
+  call off the common path), a cast to another type, and
+  `.`, `.=` or `"$x"` with an integer (unqualified `strval($x)`, a function
+  call: `(string)`, `\strval` and `\sprintf('%d', ...)` compile to a cast),
+  a class constant of another class (`OpCodes::OP_CALL`: a local before
+  the loop, or in a method the loop calls a static property such as
+  `self::$opCall = OpCodes::OP_CALL`; a constant of the class itself is
+  compiled in), an array literal holding variables (return a second value
+  through a reference parameter, as C does), `new`. And a loop does not
+  start with an operation that may store the opline: no `foreach` whose
+  values may be arrays or objects (`for` over the list), no `while` whose
+  condition starts with a static method call. A loop that must run such
+  operations (TableConstructor::run creates tables, FunctionEmitter::emit's
+  loop runs the whole emitter) keeps its counters in memory: a reference to
+  each (`$pcInMemory = &$pc;`) keeps the JIT from holding it in a register,
+  so the stub's restart goes on from the right values. The detector flags
+  no loop of ours over the inventory's inputs, but a token scan on
+  2026-10-11 still found about 110 loops in src/ with such an operation
+  in their own body (compiling, the collector, unwinding, rare paths)
+  whose traces kept no value in a register there or were never compiled:
+  change one when you touch it, and any loop the detector flags.
+  `tests/jit/detector.php` decides from the JIT's own report
+  (opcache.jit_debug) which loop traces can lose values ("flagged");
+  `tests/unit/TracingJitImmunityTest.php` asserts that the inputs (i),
+  (iii) and (v) of `tests/jit/inventory_inputs.php` (lua2php output of the
+  diff corpus, plain and compact, and the speed workloads) compile no
+  flagged loop trace under 1254 and at least 80% as many loop traces as
+  phase 1's inventory examined
+  (`test_no_loop_trace_of_our_code_can_lose_values_at_an_interrupt`), and
+  runs strings, string_library and table_library as lua2php output under
+  the interrupt harness (`tests/jit/interrupts_after_compiling.php`: 3,000
+  SIGUSR1 a second), 10 times each, against lua5.4
+  (`test_the_workloads_that_went_wrong_stay_right_under_interrupts`).
+  `php tests/jit/inventory.php 1254` runs the detector over the whole input
+  set, bin/lua and the official files too (about 10 minutes); its 1154 run
+  (local register allocation) flagged nothing even before the fix.
+  `tests/jit/tracing-jit-inventory.md` is the record of the 27 places it
+  flagged on 2026-10-11, before our code was fixed.
 - **Reference build.** lua5.4 is built with LUA_COMPAT_5_3: `__le` falls back
   to `not __lt(b, a)`, and math has pow, ldexp, frexp, cosh, sinh, tanh, log10,
   atan2. Its package.path/cpath defaults include the distribution's `/usr/`

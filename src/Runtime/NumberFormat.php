@@ -377,8 +377,9 @@ final class NumberFormat
             $step = min($exponent, $maximumStep);
             $factor = $base ** $step;
             $carry = 0;
-            foreach ($limbs as $limbIndex => $limb) {
-                $product = $limb * $factor + $carry;
+            $limbCount = \count($limbs);
+            for ($limbIndex = 0; $limbIndex < $limbCount; $limbIndex++) {  // (not foreach: see AGENTS.md)
+                $product = $limbs[$limbIndex] * $factor + $carry;
                 $limbs[$limbIndex] = $product % self::LIMB_BASE;
                 $carry = intdiv($product, self::LIMB_BASE);
             }

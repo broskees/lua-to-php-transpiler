@@ -169,27 +169,34 @@ final class CFile
      */
     private static function ownDescriptorLink(string $filename): ?int
     {
-        $path = $filename;
-        for ($links = 0; $links < 40; $links++) {  // (Linux follows at most 40)
-            $directory = @realpath(\dirname($path));
-            if ($directory === false) {
-                return null;
+        // the warnings of realpath and readlink ignored, as @ would: @ is a VM handler call inside
+        // the loop (see AGENTS.md, Loops and the tracing JIT)
+        set_error_handler(static fn (): bool => true);
+        try {
+            $path = $filename;
+            for ($links = 0; $links < 40; $links++) {  // (Linux follows at most 40)
+                $directory = realpath(\dirname($path));
+                if ($directory === false) {
+                    return null;
+                }
+                $path = $directory . '/' . basename($path);
+                $process = realpath('/proc/self');
+                if (
+                    \is_string($process)
+                    && preg_match('~^' . preg_quote($process, '~') . '(?:/task/\d+)?/fd/(\d+)$~', $path, $match) === 1
+                ) {
+                    return (int) $match[1];
+                }
+                $target = readlink($path);
+                if ($target === false) {
+                    return null;
+                }
+                $path = str_starts_with($target, '/') ? $target : "$directory/$target";
             }
-            $path = $directory . '/' . basename($path);
-            $process = @realpath('/proc/self');
-            if (
-                \is_string($process)
-                && preg_match('~^' . preg_quote($process, '~') . '(?:/task/\d+)?/fd/(\d+)$~', $path, $match) === 1
-            ) {
-                return (int) $match[1];
-            }
-            $target = @readlink($path);
-            if ($target === false) {
-                return null;
-            }
-            $path = str_starts_with($target, '/') ? $target : "$directory/$target";
+            return null;
+        } finally {
+            restore_error_handler();
         }
-        return null;
     }
 
     /** stdio.h: fopen ($mode already validated by the caller) */

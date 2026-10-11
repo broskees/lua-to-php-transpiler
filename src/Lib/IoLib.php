@@ -607,7 +607,7 @@ final class IoLib
         $readArguments = [$args[0] ?? null];  // lua_settop(L, 1)
         Auxiliary::checkStack($L, $count, 'too many arguments');
         for ($i = 1; $i <= $count; $i++) {  // push arguments to 'g_read'
-            $readArguments[] = $upvalues[2 + $i] ?? null;
+            $readArguments[] = isset($upvalues[2 + $i]) ? $upvalues[2 + $i] : null;  // (no ?? in a loop: see AGENTS.md)
         }
         $results = self::gRead($L, $stream->file, $readArguments, 2);
         $first = $results[0];

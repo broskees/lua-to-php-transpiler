@@ -433,7 +433,8 @@ final class OpCodes
     // lopcodes.h: MASK0 (a mask with 'n' 0 bits at position 'p')
     public static function mask0(int $bitCount, int $position): int
     {
-        return ~self::mask1($bitCount, $position) & self::INSTRUCTION_MASK;
+        // (~x written x ^ -1: ~ is a VM handler call in the loops that set arguments, see AGENTS.md)
+        return (self::mask1($bitCount, $position) ^ -1) & self::INSTRUCTION_MASK;
     }
 
     // lopcodes.h: GET_OPCODE
