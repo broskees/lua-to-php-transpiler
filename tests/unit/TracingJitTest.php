@@ -9,6 +9,7 @@ use Tests\TracingJit\Canaries\CanaryWeights;
 use function Tests\TracingJit\detectorOptions;
 use function Tests\TracingJit\jitOptions;
 use function Tests\TracingJit\loopTraceVerdicts;
+use function Tests\TracingJit\tracePlace;
 
 use const Tests\TracingJit\JIT_DEBUG;
 
@@ -95,6 +96,47 @@ function test_the_detector_tells_the_loops_that_go_wrong_from_those_that_do_not(
                 );
             }
         }
+    }
+}
+
+/*
+ * tests/jit/inventory.php names the instruction of a flagged loop in
+ * emitted code from the line PHP reports for its trace. PHP ends a line at
+ * a lone "\r" too (zend_language_scanner.l: HANDLE_NEWLINES), and the
+ * binary chunk in a lua2php file holds such bytes: counted at "\n" only,
+ * the place was an instruction below the loop, or in another function.
+ */
+function test_the_place_of_an_emitted_loop_names_its_instruction(): void
+{
+    $directory = scratchDirectory() . '/emitted-loop-place';
+    mkdir($directory);
+    // a constant of 20 carriage returns: the binary chunk above the emitted functions holds it
+    file_put_contents("$directory/pack.lua", <<<'LUA'
+        local returns = "\r\r\r\r\r\r\r\r\r\r\r\r\r\r\r\r\r\r\r\r"
+        local function pack(...) return {...} end
+        local n = 0
+        for i = 1, 300 do n = n + #pack(i, i, i) end
+        print(n, #returns)
+        LUA);
+    $command = ['php', REPO_ROOT . '/bin/lua2php', 'pack.lua', '-o', 'pack.php'];
+    [$status, , $errors] = runCommand($command, '', $directory);
+    assertSame(0, $status, "bin/lua2php pack.lua: $errors");
+    $file = realpath("$directory/pack.php");
+    assertTrue(preg_match_all('/\r(?!\n)/', file_get_contents($file)) >= 20, "lone carriage returns in $file");
+    [$status, $stdout, $dump] = runCommand(['php', ...detectorOptions('1254', 'eager'), $file], '', $directory);
+    assertSame([0, "900\t20\n"], [$status, $stdout], "$file under the detector's options");
+    $dumpFile = "$directory/pack.dump";
+    file_put_contents($dumpFile, $dump);
+    $places = [];
+    foreach (loopTraceVerdicts($dumpFile) as ['trace' => $trace]) {
+        if (realpath($trace['file']) === $file) {
+            $places[] = tracePlace($trace);
+        }
+    }
+    // the loops the emitter writes for OP_VARARG and OP_SETLIST in pack (each a loop trace)
+    foreach (['[3] VARARG 1 0 0 ; line 2', '[4] SETLIST 0 0 0 ; line 2'] as $instruction) {
+        $place = "pack.lua \$function_0_0 <2,2> $instruction";
+        assertTrue(\in_array($place, $places, true), "$place among the places: " . implode('; ', $places));
     }
 }
 
