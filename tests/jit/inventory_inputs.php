@@ -147,18 +147,19 @@ function transpileProject(string $projectDirectory, string $outputDirectory, arr
 }
 
 /**
- * Runs each input under the detector's options with opcache.jit=$mode,
- * $parallel at a time (stdout discarded, stderr, the JIT's report, in a
- * file of $scratchDirectory that is removed once read), and returns per
- * input: its exit status, how many loop traces the JIT compiled, and the
- * flagged ones (trace, verdict and place, see tracePlace).
+ * Runs each input under the detector's options with opcache.jit=$mode and
+ * the hot counters of $profile (HOT_COUNTER_PROFILES), $parallel at a time
+ * (stdout discarded, stderr, the JIT's report, in a file of
+ * $scratchDirectory that is removed once read), and returns per input: its
+ * exit status, how many loop traces the JIT compiled, and the flagged ones
+ * (trace, verdict and place, see tracePlace).
  *
  * @param list<array{class: string, name: string, arguments: list<string>, environment: list<string>,
  *     directory: string}> $inputs
  * @return list<array{input: array, status: int, loopTraces: int, withoutInterruptCheck: int,
  *     flagged: list<array{trace: array, verdict: array, place: string}>}>
  */
-function examineInputs(array $inputs, string $mode, int $parallel, string $scratchDirectory): array
+function examineInputs(array $inputs, string $mode, string $profile, int $parallel, string $scratchDirectory): array
 {
     $results = [];
     $running = [];
@@ -170,7 +171,7 @@ function examineInputs(array $inputs, string $mode, int $parallel, string $scrat
             $process = proc_open(
                 [
                     'timeout', '-s', 'KILL', (string) INPUT_TIMEOUT_SECONDS, 'env', ...$input['environment'],
-                    'php', ...detectorOptions($mode), ...$input['arguments'],
+                    'php', ...detectorOptions($mode, $profile), ...$input['arguments'],
                 ],
                 [0 => ['file', '/dev/null', 'r'], 1 => ['file', '/dev/null', 'w'], 2 => ['file', $dumpFile, 'w']],
                 $pipes,

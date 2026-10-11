@@ -51,19 +51,31 @@ const JIT_DEBUG = JIT_DEBUG_TRACE_START | JIT_DEBUG_TRACE_STOP | JIT_DEBUG_TRACE
     | JIT_DEBUG_TRACE_BYTECODE | JIT_DEBUG_IR_FINAL;
 
 /**
- * The hot counters every detector run uses, so that two runs (phase 1's
- * inventory, phase 2's checks) compile the same loops. The loop counter is
- * lower than PHP's default (61): loops of the tests' short programs then
- * get hot, while their real users run them longer. The others are PHP
- * 8.5's defaults, written out.
+ * The hot counters of detector runs, as named profiles, fixed so that two
+ * runs (phase 1's inventory, later checks) compile the same loops:
+ * 'default' is PHP 8.5's defaults, written out (what a host runs); 'eager'
+ * makes loops hot after 7 iterations instead of 61, so that the loops of
+ * the tests' short programs get compiled. A different threshold traces
+ * other paths, and each profile flags loops the other does not
+ * (tests/jit/tracing-jit-inventory.md): the inventory runs both.
  */
-const HOT_COUNTERS = [
-    'opcache.jit_hot_loop' => '7',
-    'opcache.jit_hot_func' => '127',
-    'opcache.jit_hot_return' => '8',
-    'opcache.jit_hot_side_exit' => '8',
-    'opcache.jit_max_root_traces' => '1024',
-    'opcache.jit_max_side_traces' => '128',
+const HOT_COUNTER_PROFILES = [
+    'default' => [
+        'opcache.jit_hot_loop' => '61',
+        'opcache.jit_hot_func' => '127',
+        'opcache.jit_hot_return' => '8',
+        'opcache.jit_hot_side_exit' => '8',
+        'opcache.jit_max_root_traces' => '1024',
+        'opcache.jit_max_side_traces' => '128',
+    ],
+    'eager' => [
+        'opcache.jit_hot_loop' => '7',
+        'opcache.jit_hot_func' => '127',
+        'opcache.jit_hot_return' => '8',
+        'opcache.jit_hot_side_exit' => '8',
+        'opcache.jit_max_root_traces' => '1024',
+        'opcache.jit_max_side_traces' => '128',
+    ],
 ];
 
 /** sizeof(zend_op) on 64-bit PHP: the IP moves in steps of it */
@@ -87,15 +99,15 @@ function jitOptions(string $mode): array
 }
 
 /**
- * php options of a detector run: the JIT options, the hot counters and the
- * jit_debug report on stderr
+ * php options of a detector run: the JIT options, the hot counters of
+ * $profile (HOT_COUNTER_PROFILES) and the jit_debug report on stderr
  *
  * @return list<string>
  */
-function detectorOptions(string $mode): array
+function detectorOptions(string $mode, string $profile = 'default'): array
 {
     $options = jitOptions($mode);
-    foreach (HOT_COUNTERS as $name => $value) {
+    foreach (HOT_COUNTER_PROFILES[$profile] as $name => $value) {
         array_push($options, '-d', "$name=$value");
     }
     array_push($options, '-d', 'opcache.jit_debug=' . JIT_DEBUG);
