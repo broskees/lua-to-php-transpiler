@@ -63,7 +63,9 @@ const EMBEDDING_HOST = <<<'PHP'
  * on the sandbox made at the start (JIT off) and on new ones. The scripts
  * count their runs in the sandbox's global "runs", so a call that ran Lua
  * returns the next count. Last, a PHP function called from Lua calls
- * back into Lua with 1205 switched on.
+ * back into Lua with 1205 switched on: callBack catches the refusal and
+ * switches back to 1005; then callBackUncaught lets it through, and the
+ * host switches back to 1005 and calls into the sandbox twice more.
  */
 const SWITCHING_HOST = <<<'PHP'
     <?php
@@ -82,10 +84,15 @@ const SWITCHING_HOST = <<<'PHP'
             ini_set('opcache.jit', '1005');
         }
     });
+    $environment->addGlobal('callBackUncaught', static function () use (&$counter): array {
+        ini_set('opcache.jit', '1205');
+        return $counter->call();
+    });
     $sandbox = $environment->newSandbox();
     $counter = $sandbox->load($counting);
     $sandbox->load("function count() $counting end")->call();
     $callBack = $sandbox->load('return callBack()');
+    $callBackUncaught = $sandbox->load('return callBackUncaught()');
     $calls = [
         'Sandbox::load' => static fn (): string => $sandbox->load('return 1')->type(),
         'Sandbox::run' => static fn (): array => $sandbox->run('count.lua')->values,
@@ -112,8 +119,43 @@ const SWITCHING_HOST = <<<'PHP'
         $rounds[] = [$mode, $results];
     }
     ini_set('opcache.jit', '1005');
-    $nested = $callBack->call();
-    echo json_encode(['rounds' => $rounds, 'nested' => $nested, 'sandbox closed' => $sandbox->isClosed()]), "\n";
+    $caught = $callBack->call();
+    $openAfterCaught = !$sandbox->isClosed();
+    $workingAfterCaught = $counter->call();
+    $escapedError = null;
+    try {
+        $escaped = ['returned', $callBackUncaught->call()];
+    } catch (Throwable $thrown) {
+        $escapedError = $thrown;
+        $escaped = ['threw', get_class($thrown), $thrown->getMessage()];
+    }
+    $modeAfterEscape = ini_get('opcache.jit');
+    $closedAfterEscape = $sandbox->isClosed();
+    ini_set('opcache.jit', '1005');
+    $later = [];
+    $laterCalls = [
+        'LuaFunction::call' => static fn (): array => $counter->call(),
+        'Sandbox::load' => static fn (): string => $sandbox->load('return 1')->type(),
+    ];
+    foreach ($laterCalls as $label => $call) {
+        try {
+            $later[$label] = ['returned', $call()];
+        } catch (Throwable $thrown) {
+            $previous = $thrown->getPrevious();
+            $later[$label] = [
+                'threw',
+                get_class($thrown),
+                $thrown->getMessage(),
+                $previous === null ? null : get_class($previous),
+                $previous !== null && $previous === $escapedError,
+            ];
+        }
+    }
+    echo json_encode([
+        'rounds' => $rounds,
+        'caught' => [$caught, $openAfterCaught, $workingAfterCaught],
+        'escaped' => [$escaped, $modeAfterEscape, $closedAfterEscape, $later],
+    ]), "\n";
     PHP;
 
 /**
@@ -331,7 +373,11 @@ function test_the_refusal_does_not_depend_on_opcache_get_status(): void
  * call from PHP into Lua code repeats the check: while a refused mode is on,
  * each public path that compiles or runs Lua throws UnsafeJitSetting before
  * any Lua runs (the run counts go on without a gap), and the sandbox stays
- * open, so the same calls work again once the host switches back.
+ * open, so the same calls work again once the host switches back. A PHP
+ * function called from Lua may catch the refusal of its call back; one
+ * that lets it through stops the run, as any PHP exception that passes
+ * through Lua code: the host gets the UnsafeJitSetting, and later calls
+ * get SandboxClosed with it as the previous exception.
  */
 function test_a_sandbox_refuses_lua_while_the_host_switched_a_refused_jit_on(): void
 {
@@ -373,10 +419,24 @@ function test_a_sandbox_refuses_lua_while_the_host_switched_a_refused_jit_on(): 
         assertSame($expected, $results, $label);
     }
     // a PHP function that Lua called and that called back into Lua with 1205 on: refused, and it may catch it
-    [$what, $class, $message] = $report['nested'] + [null, null, null];
+    [$caught, $openAfterCaught, $workingAfterCaught] = $report['caught'];
+    [$what, $class, $message] = $caught + [null, null, null];
     assertSame(['threw', 'LuaPhp\Embed\UnsafeJitSetting'], [$what, $class], 'a call back into Lua from a PHP function');
     assertNamesValueAndSafeSettings($message, '1205', 'a call back into Lua from a PHP function');
-    assertSame(false, $report['sandbox closed'], 'the sandbox stays open after the call back');
+    assertSame(true, $openAfterCaught, 'the sandbox stays open after the caught refusal');
+    assertSame([++$runs], $workingAfterCaught, 'the sandbox works at 1005 after the caught refusal');
+    // one that lets the refusal through: it passed through running Lua code, whose frames it abandoned, so it
+    // stops the run (AGENTS.md: Calls into Lua) and reaches the host; later calls are SandboxClosed
+    [$escaped, $modeAfterEscape, $closedAfterEscape, $later] = $report['escaped'];
+    $label = 'a refusal a PHP function let through';
+    [$what, $class, $message] = $escaped + [null, null, null];
+    assertSame(['threw', 'LuaPhp\Embed\UnsafeJitSetting'], [$what, $class], "$label: what the host got");
+    assertNamesValueAndSafeSettings($message, '1205', $label);
+    assertSame('1205', $modeAfterEscape, "$label: nothing switched the mode back");
+    assertSame(true, $closedAfterEscape, "$label: the sandbox is closed");
+    $closedMessage = 'the sandbox is closed: a LuaPhp\Embed\UnsafeJitSetting stopped a run in it';
+    $expected = ['threw', 'LuaPhp\Embed\SandboxClosed', $closedMessage, 'LuaPhp\Embed\UnsafeJitSetting', true];
+    assertSame(['LuaFunction::call' => $expected, 'Sandbox::load' => $expected], $later, "$label, then 1005");
 }
 
 /** the exception the embedding API throws is public: in LuaPhp\Embed, not in Internal, not marked internal */
