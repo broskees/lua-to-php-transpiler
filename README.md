@@ -32,7 +32,10 @@ php hello.php
   instead, and exit with status 1 before they run or compile any Lua
   (lua2php writes no file). The embedding API throws
   `LuaPhp\Embed\UnsafeJitSetting` with the same message when you create a
-  sandbox (`newSandbox`, `run`, `Lua::run`) or call `compile`. The check
+  sandbox (`newSandbox`, `run`, `Lua::run`) or call `compile`, and on every
+  call into a sandbox (`load`, `run`, calling a `LuaFunction`) while you
+  have switched such a mode on with `ini_set`; the sandbox stays usable
+  once you switch back. The check
   works also where the host disables or restricts `opcache_get_status`. The
   tracing JIT has a narrower form of the bug
   ([php-src#24186](https://github.com/php/php-src/issues/24186)): see

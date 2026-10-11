@@ -57,6 +57,66 @@ const EMBEDDING_HOST = <<<'PHP'
     PHP;
 
 /**
+ * A host that switches opcache.jit with ini_set while a sandbox exists,
+ * as a host may at run time. Each mode in $argv[2] (comma-separated) is one
+ * round: ini_set to it, then every public path that compiles or runs Lua,
+ * on the sandbox made at the start (JIT off) and on new ones. The scripts
+ * count their runs in the sandbox's global "runs", so a call that ran Lua
+ * returns the next count. Last, a PHP function called from Lua calls
+ * back into Lua with 1205 switched on.
+ */
+const SWITCHING_HOST = <<<'PHP'
+    <?php
+    declare(strict_types=1);
+    require $argv[1] . '/src/autoload.php';
+    $counting = 'runs = (runs or 0) + 1 return runs';
+    $environment = new LuaPhp\Embed\Environment(new LuaPhp\Embed\Loader\ArrayLoader(['count.lua' => $counting]));
+    $counter = null;
+    $environment->addGlobal('callBack', static function () use (&$counter): LuaPhp\Embed\Multiple {
+        ini_set('opcache.jit', '1205');
+        try {
+            return LuaPhp\Embed\Lua::multiple('returned', $counter->call());
+        } catch (Throwable $thrown) {
+            return LuaPhp\Embed\Lua::multiple('threw', get_class($thrown), $thrown->getMessage());
+        } finally {
+            ini_set('opcache.jit', '1005');
+        }
+    });
+    $sandbox = $environment->newSandbox();
+    $counter = $sandbox->load($counting);
+    $sandbox->load("function count() $counting end")->call();
+    $callBack = $sandbox->load('return callBack()');
+    $calls = [
+        'Sandbox::load' => static fn (): string => $sandbox->load('return 1')->type(),
+        'Sandbox::run' => static fn (): array => $sandbox->run('count.lua')->values,
+        'LuaFunction::call' => static fn (): array => $counter->call(),
+        'LuaFunction::__invoke' => static fn (): array => $counter(),
+        'a function handle of getGlobalHandle' => static fn (): array => $sandbox->getGlobalHandle('count')->call(),
+        'Environment::newSandbox' => static fn (): bool => $environment->newSandbox()->isClosed(),
+        'Environment::run' => static fn (): array => $environment->run('count.lua')->values,
+        'Environment::compile' => static fn (): array => $environment->compile(['count.lua']),
+        'Lua::run' => static fn (): array => LuaPhp\Embed\Lua::run('return 1'),
+    ];
+    $rounds = [];
+    foreach (explode(',', $argv[2]) as $mode) {
+        ini_set('opcache.jit', $mode);
+        $results = [];
+        foreach ($calls as $label => $call) {
+            try {
+                $results[$label] = ['returned', $call()];
+            } catch (Throwable $thrown) {
+                $results[$label] = ['threw', get_class($thrown), $thrown->getMessage()];
+            }
+        }
+        $results['sandbox closed'] = $sandbox->isClosed();
+        $rounds[] = [$mode, $results];
+    }
+    ini_set('opcache.jit', '1005');
+    $nested = $callBack->call();
+    echo json_encode(['rounds' => $rounds, 'nested' => $nested, 'sandbox closed' => $sandbox->isClosed()]), "\n";
+    PHP;
+
+/**
  * The php options of the acceptance criteria's "JIT options" with
  * opcache.jit=$mode, then $changes.
  *
@@ -264,6 +324,59 @@ function test_the_refusal_does_not_depend_on_opcache_get_status(): void
     }
     assertSame(8, count($cases), '2 entry points x 2 modes x 2 ways to take opcache_get_status away');
     runCases($cases);
+}
+
+/**
+ * A host may switch opcache.jit with ini_set after it made a sandbox. Every
+ * call from PHP into Lua code repeats the check: while a refused mode is on,
+ * each public path that compiles or runs Lua throws UnsafeJitSetting before
+ * any Lua runs (the run counts go on without a gap), and the sandbox stays
+ * open, so the same calls work again once the host switches back.
+ */
+function test_a_sandbox_refuses_lua_while_the_host_switched_a_refused_jit_on(): void
+{
+    $directory = prepareDirectory();
+    file_put_contents("$directory/switching-host.php", SWITCHING_HOST);
+    $modes = ['off', '1205', '1005', '1205', 'off'];
+    [$status, $output, $errorOutput] = runCommand(
+        ['php', ...jitOptions('off'), 'switching-host.php', REPO_ROOT, implode(',', $modes)],
+        '',
+        $directory,
+    );
+    assertSame([0, ''], [$status, $errorOutput], "exit status and stderr: $output");
+    $report = json_decode($output, true, 512, JSON_THROW_ON_ERROR);
+    $runs = 0;  // the sandbox's count of runs: 4 calls of each round run a counting script in it
+    foreach ($report['rounds'] as $round => [$mode, $results]) {
+        $label = "round $round, opcache.jit=$mode";
+        assertSame(false, $results['sandbox closed'], "$label: the sandbox stays open");
+        unset($results['sandbox closed']);
+        assertSame(9, count($results), "$label: 9 public paths");
+        if ($mode === '1205') {
+            foreach ($results as $call => $result) {
+                [$what, $class, $message] = $result + [null, null, null];
+                assertSame(['threw', 'LuaPhp\Embed\UnsafeJitSetting'], [$what, $class], "$label, $call");
+                assertNamesValueAndSafeSettings($message, '1205', "$label, $call");
+            }
+            continue;
+        }
+        $expected = [
+            'Sandbox::load' => ['returned', 'function'],
+            'Sandbox::run' => ['returned', [++$runs]],
+            'LuaFunction::call' => ['returned', [++$runs]],
+            'LuaFunction::__invoke' => ['returned', [++$runs]],
+            'a function handle of getGlobalHandle' => ['returned', [++$runs]],
+            'Environment::newSandbox' => ['returned', false],
+            'Environment::run' => ['returned', [1]],
+            'Environment::compile' => ['returned', []],
+            'Lua::run' => ['returned', [1]],
+        ];
+        assertSame($expected, $results, $label);
+    }
+    // a PHP function that Lua called and that called back into Lua with 1205 on: refused, and it may catch it
+    [$what, $class, $message] = $report['nested'] + [null, null, null];
+    assertSame(['threw', 'LuaPhp\Embed\UnsafeJitSetting'], [$what, $class], 'a call back into Lua from a PHP function');
+    assertNamesValueAndSafeSettings($message, '1205', 'a call back into Lua from a PHP function');
+    assertSame(false, $report['sandbox closed'], 'the sandbox stays open after the call back');
 }
 
 /** the exception the embedding API throws is public: in LuaPhp\Embed, not in Internal, not marked internal */

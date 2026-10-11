@@ -17,7 +17,8 @@ namespace LuaPhp\Runtime;
  * under it, before it compiles or runs any Lua code: bin/lua, bin/luac,
  * bin/lua2php and lua2php scripts with a message and exit status 1
  * (Standalone::refusesJit), the embedding API with Embed\UnsafeJitSetting
- * (Embed\Internal\State's constructor, Environment::compile). The tracing
+ * (Embed\Internal\State's constructor and every call into Lua, State::enter,
+ * as a host may switch it with ini_set; Environment::compile). The tracing
  * JIT (T digit 5) and register allocation off (R digit 0) run.
  *
  * @internal

@@ -39,7 +39,9 @@ use LuaPhp\Runtime\PhpErrors;
  * functions hold this).
  *
  * Under a JIT mode that can compute wrong results (Runtime\JitSafety) no
- * state is made: the constructor throws UnsafeJitSetting.
+ * state is made: the constructor throws UnsafeJitSetting. So does every
+ * call into Lua (enter) while the host has switched such a mode on with
+ * ini_set; the sandbox stays open, and works again in a safe mode.
  *
  * The state: the Environment's libraries (openSelected; sandboxed unless
  * Libraries::ALL), require from host modules and the loader, the
@@ -507,6 +509,13 @@ final class State
      */
     private function enter(\Closure $body): mixed
     {
+        // the host may have switched opcache.jit (ini_set) since the
+        // constructor checked it: before any Lua compiles or runs, and
+        // outside the try, so the refusal leaves the sandbox open
+        $jitRefusal = JitSafety::refusal();
+        if ($jitRefusal !== null) {
+            throw new UnsafeJitSetting($jitRefusal);
+        }
         $this->depth++;
         try {
             return PhpErrors::call($body);

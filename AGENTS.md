@@ -680,10 +680,16 @@ Lua string keys and integer keys distinct.
   `Standalone::refusesJit` (one line on stderr naming the value and the
   settings that work, exit status 1, nothing written); in the embedding
   API, `Embed\Internal\State`'s constructor (every sandbox) and
-  `Environment::compile` throw `Embed\UnsafeJitSetting`. A new entry
+  `Environment::compile` throw `Embed\UnsafeJitSetting`, and the check
+  also runs on every call into Lua (`State::enter`: Sandbox::load and
+  run, a LuaFunction's call, a PHP function calling back), as a host may
+  switch opcache.jit with ini_set after it made a sandbox (decided
+  2026-10-11); it throws before the `try`, so the sandbox stays open and
+  works again once a safe mode is back (a PHP function that lets the
+  refusal through stops its run, as any PHP exception). A new entry
   point must call it too. `tests/unit/JitRefusalTest.php` runs every
-  entry point under 14 JIT settings, and with opcache_get_status disabled
-  or restricted.
+  entry point under 14 JIT settings, with opcache_get_status disabled
+  or restricted, and a host that switches the mode under a sandbox.
 - **Loops and the tracing JIT.** php-src#24186 (PHP 8.4 and newer, tracing
   JIT with register allocation: opcache.jit=tracing or 1254, a host's
   setting we must run under): a loop trace that uses the instruction
