@@ -255,3 +255,27 @@ function generatedPlace(string $luaFile, array $lines, int $line): string
     }
     return "$luaFile $function $instruction";
 }
+
+/**
+ * $operation (an IP use, loopTraceVerdicts) with the file and first line
+ * of each method it names: "COALESCE at 0010 in
+ * LuaPhp\Runtime\LuaTable::partCount (src/Runtime/LuaTable.php:528)"
+ * (Reflection: the runtime's classes must load)
+ */
+function withDefinitions(string $operation): string
+{
+    $root = realpath(REPO_ROOT) . '/';
+    return preg_replace_callback(
+        '/ in ([A-Za-z_\\\\][\w\\\\]*)::(\w+)/',
+        static function (array $match) use ($root): string {
+            if (!method_exists($match[1], $match[2])) {
+                return $match[0];
+            }
+            $method = new \ReflectionMethod($match[1], $match[2]);
+            $file = (string) $method->getFileName();
+            $shownFile = str_starts_with($file, $root) ? substr($file, \strlen($root)) : $file;
+            return "{$match[0]} ($shownFile:{$method->getStartLine()})";
+        },
+        $operation,
+    );
+}

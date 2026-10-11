@@ -27,6 +27,7 @@ declare(strict_types=1);
 namespace Tests\TracingJit;
 
 require __DIR__ . '/../harness.php';
+require __DIR__ . '/../../src/autoload.php';
 require __DIR__ . '/detector.php';
 require __DIR__ . '/inventory_inputs.php';
 
@@ -60,6 +61,8 @@ $withoutInterruptCheck = 0;
 $statuses = [];
 $failedInputs = [];
 $places = [];
+$flaggedWithoutOpline = 0;
+$flaggedWithUnplacedUses = 0;
 foreach ($results as $result) {
     $class = $result['input']['class'];
     $profile = $result['profile'];
@@ -73,12 +76,15 @@ foreach ($results as $result) {
         $failedInputs[$input][] = "{$result['status']} ($profile)";
     }
     foreach ($result['flagged'] as $flagged) {
-        $operations = $flagged['verdict']['operations'];
+        $operations = array_map(withDefinitions(...), $flagged['verdict']['operations']);
+        $flaggedWithoutOpline += preg_match('/ at \d{4}\b/', $operations[0] ?? '') === 1 ? 0 : 1;
+        $flaggedWithUnplacedUses += $flagged['verdict']['unplacedUses'] > 0 ? 1 : 0;
         $operation = $operations[0] ?? '(no use of the IP found)';
         $key = $flagged['place'] . "\n" . $operation;
         $places[$key] ??= ['place' => $flagged['place'], 'operation' => $operation, 'laterUses' => [],
             'registers' => [], 'traces' => array_fill_keys($classes, 0), 'profiles' => array_fill_keys($profiles, 0),
-            'inputs' => []];
+            'inputs' => [], 'tracesWithUnplacedUses' => 0];
+        $places[$key]['tracesWithUnplacedUses'] += $flagged['verdict']['unplacedUses'] > 0 ? 1 : 0;
         $places[$key]['traces'][$class]++;
         $places[$key]['profiles'][$profile]++;
         $places[$key]['inputs'][$input] = true;
@@ -137,6 +143,8 @@ foreach ($profiles as $profile) {
 }
 printf("- loop traces without an interrupt check (never flagged): %d\n", $withoutInterruptCheck);
 printf("- flagged traces: %d, at %d places\n", $flaggedTotal, \count($places));
+printf("  - whose operation names no opline: %d\n", $flaggedWithoutOpline);
+printf("  - with a use of the IP not placed (the operation could be another): %d\n", $flaggedWithUnplacedUses);
 printf("- run time: %.0f s\n", microtime(true) - $startTime);
 
 echo "\n## Flagged places\n";
@@ -149,6 +157,11 @@ foreach ($places as $place) {
     sort($registers);
     echo "\n- {$place['place']}\n";
     echo "  - operation: {$place['operation']}\n";
+    if ($place['tracesWithUnplacedUses'] > 0) {
+        // the operation is the first use placed; one not placed may come before it
+        echo "  - traces with uses of the IP not placed (the operation may be another): "
+            . "{$place['tracesWithUnplacedUses']}\n";
+    }
     echo '  - later uses of the IP in its traces: ' . (implode('; ', $laterUses) ?: 'none') . "\n";
     echo '  - registers: ' . implode(', ', $registers) . "\n";
     printf(

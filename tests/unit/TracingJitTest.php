@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Tests\TracingJitTest;
 
+use Tests\TracingJit\Canaries\CanaryWeights;
+
 use function Tests\TracingJit\detectorOptions;
 use function Tests\TracingJit\jitOptions;
 use function Tests\TracingJit\loopTraceVerdicts;
@@ -27,28 +29,32 @@ const INTERRUPTS = REPO_ROOT . '/tests/jit/interrupts.php';
 
 /**
  * The detector's verdicts on the loop traces of a canary's loop (its
- * closure), from a run without interrupts under the detector's options
- * with opcache.jit=$mode
+ * closure, or the function $loopFunction in canaries/$loopFile), from a
+ * run without interrupts under the detector's options with
+ * opcache.jit=$mode
  *
  * @return list<array{flagged: bool, interruptCheck: bool, snapshot: bool, registers: list<string>,
  *     operations: list<string>}>
  */
-function canaryLoopVerdicts(string $canary, string $mode): array
+function canaryLoopVerdicts(string $canary, string $mode, ?string $loopFile, string $loopFunction): array
 {
     $file = realpath(CANARIES . "/$canary");
     [$status, $stdout, $dump] = runCommand(['php', ...detectorOptions($mode), $file]);
     assertSame([0, "0\n"], [$status, $stdout], "$canary under opcache.jit=$mode without interrupts");
-    return loopVerdictsOf($file, $dump);
+    return loopVerdictsOf($loopFile === null ? $file : realpath(CANARIES . "/$loopFile"), $dump, $loopFunction);
 }
 
-/** the verdicts on the loop traces of the closure in $file, from the jit_debug report $dump */
-function loopVerdictsOf(string $file, string $dump): array
+/**
+ * the verdicts on the loop traces of the function $function (or the
+ * closures) in $file, from the jit_debug report $dump
+ */
+function loopVerdictsOf(string $file, string $dump, string $function = '{closure'): array
 {
     $dumpFile = scratchDirectory() . '/tracing-jit.dump';
     file_put_contents($dumpFile, $dump);
     $verdicts = [];
     foreach (loopTraceVerdicts($dumpFile) as ['trace' => $trace, 'verdict' => $verdict]) {
-        if ($trace['file'] === $file && str_starts_with($trace['function'], '{closure')) {
+        if ($trace['file'] === $file && str_starts_with($trace['function'], $function)) {
             $verdicts[] = $verdict;
         }
     }
@@ -57,7 +63,8 @@ function loopVerdictsOf(string $file, string $dump): array
 
 function test_the_detector_tells_the_loops_that_go_wrong_from_those_that_do_not(): void
 {
-    // canary, opcache.jit, flagged, the operation that causes it (the first use of the IP the trace keeps)
+    // canary, opcache.jit, flagged, the operation that causes it (the first use of the IP the trace keeps),
+    // and where the loop is if not in the canary's closure
     $cases = [
         'a' => ['coalesce.php', '1254', true, 'COALESCE at \\d{4} \\(VM handler call\\)'],
         'b' => ['jmpset.php', '1254', true, 'JMP_SET at \\d{4} \\(VM handler call\\)'],
@@ -66,10 +73,16 @@ function test_the_detector_tells_the_loops_that_go_wrong_from_those_that_do_not(
         'e' => ['coalesce.php', '1054', false, null],
         // php-src#24186 without ?? or ?:
         'f' => ['foreach_counter.php', '1254', true, 'FE_FETCH_R at \\d{4} \\(EX\\(opline\\) from the IP\\)'],
+        // the operation in a function the trace inlines, at an address no check places (search mode)
+        'g' => [
+            'inlined_class_constant.php', '1254', false,
+            preg_quote('FETCH_CLASS_CONSTANT at 0001 in ' . CanaryWeights::class . '::weight (VM handler call)', '/'),
+            'CanaryWeights.php', CanaryWeights::class . '::total',
+        ],
     ];
     foreach ($cases as $letter => [$canary, $mode, $flagged, $operation]) {
         $label = "($letter) $canary under opcache.jit=$mode";
-        $verdicts = canaryLoopVerdicts($canary, $mode);
+        $verdicts = canaryLoopVerdicts($canary, $mode, $cases[$letter][4] ?? null, $cases[$letter][5] ?? '{closure');
         // examined: compiled as a loop trace with its interrupt check found
         assertTrue($verdicts !== [], "$label: no loop trace of its loop was compiled");
         foreach ($verdicts as $verdict) {
