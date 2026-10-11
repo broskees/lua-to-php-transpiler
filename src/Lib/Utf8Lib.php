@@ -285,8 +285,12 @@ final class Utf8Lib
         }
         if ($n < $length) {
             $skipFrom = $n;
-            while (self::isContinuation($s, $n)) {
-                $n++;  // go to next character
+            // go to next character (the call in the body, not in the test: a loop that starts with a static
+            // method call stores the opline from the IP, see AGENTS.md, Loops and the tracing JIT)
+            $isContinuation = self::isContinuation($s, $n);
+            while ($isContinuation) {
+                $n++;
+                $isContinuation = self::isContinuation($s, $n);
             }
             $L->globalState->budget?->chargeSteps($n - $skipFrom);
         }
