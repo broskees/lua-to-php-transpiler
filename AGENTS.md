@@ -665,6 +665,24 @@ Lua string keys and integer keys distinct.
   `DisabledFunctionsTest` runs bin/lua, bin/lua2php and its output, the
   whole diff corpus (Lua2PhpTest too) and a host of the embedding API,
   under a typical shared host's list.
+  PHP's function JIT with register allocation (opcache.jit T digit 0-3
+  with R digit 1 or 2: function, 1205, 1105, 1215, 1225, ...) repeats loop
+  iterations after a VM interrupt in any JIT-compiled loop (php-src#23983;
+  no fix released, no per-function opt-out), and the setting is the
+  host's, so every entry point refuses it before it compiles or runs any
+  Lua code (decided 2026-10-10; never switch it with ini_set): the check
+  is `Runtime\JitSafety::refusal()` (opcache_get_status when the host
+  allows it, else the ini settings; never warns; kept per opcache.jit
+  value, the one setting that changes at run time, so a call costs one
+  ini_get). The first thing `LuaCommand::main`, `LuacCommand::main`,
+  `Lua2PhpCommand::main` and `Standalone::runCompiledScript` do is
+  `Standalone::refusesJit` (one line on stderr naming the value and the
+  settings that work, exit status 1, nothing written); in the embedding
+  API, `Embed\Internal\State`'s constructor (every sandbox) and
+  `Environment::compile` throw `Embed\UnsafeJitSetting`. A new entry
+  point must call it too. `tests/unit/JitRefusalTest.php` runs every
+  entry point under 14 JIT settings, and with opcache_get_status disabled
+  or restricted.
 - **Reference build.** lua5.4 is built with LUA_COMPAT_5_3: `__le` falls back
   to `not __lt(b, a)`, and math has pow, ldexp, frexp, cosh, sinh, tanh, log10,
   atan2. Its package.path/cpath defaults include the distribution's `/usr/`

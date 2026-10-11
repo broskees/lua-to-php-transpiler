@@ -14,6 +14,7 @@ use LuaPhp\Embed\RunContext;
 use LuaPhp\Embed\RuntimeError;
 use LuaPhp\Embed\SandboxClosed;
 use LuaPhp\Embed\ScriptError;
+use LuaPhp\Embed\UnsafeJitSetting;
 use LuaPhp\Embed\Usage;
 use LuaPhp\Lib\PackageLib;
 use LuaPhp\Lib\StandardLibraries;
@@ -22,6 +23,7 @@ use LuaPhp\Runtime\Budget;
 use LuaPhp\Runtime\Calls;
 use LuaPhp\Runtime\Coroutine;
 use LuaPhp\Runtime\Gc\Collector;
+use LuaPhp\Runtime\JitSafety;
 use LuaPhp\Runtime\LimitReached;
 use LuaPhp\Runtime\Lua;
 use LuaPhp\Runtime\LuaClosure;
@@ -35,6 +37,9 @@ use LuaPhp\Runtime\PhpErrors;
 /**
  * One sandbox's Lua state (Sandbox is its public face; handles and PHP
  * functions hold this).
+ *
+ * Under a JIT mode that can compute wrong results (Runtime\JitSafety) no
+ * state is made: the constructor throws UnsafeJitSetting.
  *
  * The state: the Environment's libraries (openSelected; sandboxed unless
  * Libraries::ALL), require from host modules and the loader, the
@@ -132,6 +137,10 @@ final class State
         ?\Closure $output,
         array $context,
     ) {
+        $jitRefusal = JitSafety::refusal();
+        if ($jitRefusal !== null) {
+            throw new UnsafeJitSetting($jitRefusal);
+        }
         $this->raisedErrors = new \WeakMap();
         $this->hostFunctions = new \WeakMap();
         $this->context = new RunContext($context, $this);

@@ -249,13 +249,14 @@ function test_jit_is_switched_on_only_when_the_host_left_it_available(): void
             "jit disable off\n",
         ],
         [['-d', 'opcache.enable_cli=1', '-d', 'opcache.jit=off', '-d', 'opcache.jit_buffer_size=0'], "jit  off\n"],
+        // a mode the host chose stays (a function JIT with register allocation is refused: JitRefusalTest)
         [
-            ['-d', 'opcache.enable_cli=1', '-d', 'opcache.jit=function', '-d', 'opcache.jit_buffer_size=16M'],
-            "jit function on\n",
+            ['-d', 'opcache.enable_cli=1', '-d', 'opcache.jit=tracing', '-d', 'opcache.jit_buffer_size=16M'],
+            "jit tracing on\n",
         ],
         [
-            ['-d', 'opcache.enable_cli=1', '-d', 'opcache.jit=1205', '-d', 'opcache.jit_buffer_size=16M'],
-            "jit 1205 on\n",
+            ['-d', 'opcache.enable_cli=1', '-d', 'opcache.jit=1005', '-d', 'opcache.jit_buffer_size=16M'],
+            "jit 1005 on\n",
         ],
         [['-d', 'opcache.enable_cli=0', '-d', 'opcache.jit=off', '-d', 'opcache.jit_buffer_size=16M'], "jit  off\n"],
     ];
