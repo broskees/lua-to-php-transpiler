@@ -522,19 +522,23 @@ function slotName(?int $offset, array $bytecode): string
  * same function (to an opline of the trace, or one it does not run, as an
  * exit's); a handler leaves it at the next opline of the trace; at a MERGE
  * every path must agree. An address (where the IP was set to a constant)
- * is placed by an anchor (the IP the loop sets before its interrupt check,
- * at its first opline, places every opline of the loop's own function the
- * trace runs); for a handler call, by the check of the next opline after it
- * when one opline of the trace fits; else, given the handlers' opcodes
- * the process's traces placed (search mode), by trying each opline of the
- * trace for it: a placement may add no inconsistency (a handler call at an
- * opline the trace does not run or at one with another handler call, one
- * handler function at two opcodes, or at another opcode than the process's
- * traces placed it at), and the one that places the most handler calls is
- * taken and anchors its function; addresses not placed are tried again after
- * each placement. Where
- * the IR does not show a use (a set to the opline the IP already holds
- * emits nothing), it is not listed; where it cannot be placed, it says so.
+ * is placed by an anchor, the address of a function's opline 0 (the IP
+ * the loop sets before its interrupt check gives the loop's own function's;
+ * an opline in several calls of a function goes by rank: the n-th set of
+ * the IP to it to the n-th such opline of the trace); for a handler call,
+ * by the check of the next opline after it when one opline of the trace
+ * fits; else in search mode, given the opcodes the handlers were placed at
+ * (by the process's traces, else by other processes', handlerKey), by
+ * trying each opline of the trace for it: a placement may add no
+ * inconsistency (a handler call at an opline the trace does not run or at
+ * one with another handler call, one handler function at two opcodes, or
+ * at another opcode than it was placed at elsewhere), and the one that
+ * places the most handler calls (ties: the one between the oplines of the
+ * placed handler calls before and after it in the IR) is taken and anchors
+ * its function; addresses not placed are tried again after each placement.
+ * Where the IR does not show a use (a set to the opline the IP already
+ * holds emits nothing), it is not listed; where it cannot be placed, it
+ * says so.
  */
 final class IpUses
 {
