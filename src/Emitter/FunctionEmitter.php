@@ -1211,6 +1211,64 @@ final class FunctionEmitter
         return $code . self::INDENT . "} else {\n" . self::INDENT . "    $fallback\n" . self::INDENT . "}\n";
     }
 
+    /**
+     * Binary arithmetic (ADD, SUB, MUL, MOD, IDIV) with nested type
+     * dispatch (lvm.c: op_arith_aux / op_arithf_aux): checking is_int($x)
+     * first gives the two-integer path two type checks and the float paths
+     * three, where the flat order cost four to five for mixed pairs.
+     * Strings and other non-numbers reach the metamethod in both shapes.
+     * The metamethod fallback is shared (one goto label) so the emitted
+     * code stays about the flat form's size.
+     */
+    private function binaryArithmetic(
+        int $pc,
+        string $load,
+        string $intStatement,
+        string $floatStatement,
+    ): string {
+        $i = self::INDENT;
+        $code = self::lines($load);
+        $fallback = $this->metamethodFallback($pc);
+        if ($fallback === '') {
+            // the MMBIN at pc + 1 is emitted on its own (it is a jump
+            // target): both failure paths jump into it, success skips it
+            $fail = $this->jump($pc, $pc + 1);
+            $code .= "{$i}if (\\is_int(\$x)) {\n";
+            $code .= "{$i}    if (\\is_int(\$y)) {\n";
+            $code .= "{$i}        $intStatement\n";
+            $code .= "{$i}    } elseif (\\is_float(\$y)) {\n";
+            $code .= "{$i}        $floatStatement\n";
+            $code .= "{$i}    } else {\n";
+            $code .= "{$i}        $fail\n";
+            $code .= "{$i}    }\n";
+            $code .= "{$i}} elseif (\\is_float(\$x) && (\\is_float(\$y) || \\is_int(\$y))) {\n";
+            $code .= "{$i}    $floatStatement\n";
+            $code .= "{$i}} else {\n";
+            $code .= "{$i}    $fail\n";
+            $code .= "{$i}}\n";
+            return $code . self::lines($this->jump($pc, $pc + 2));
+        }
+        $fail = "goto mm_$pc;";
+        $code .= "{$i}if (\\is_int(\$x)) {\n";
+        $code .= "{$i}    if (\\is_int(\$y)) {\n";
+        $code .= "{$i}        $intStatement\n";
+        $code .= "{$i}    } elseif (\\is_float(\$y)) {\n";
+        $code .= "{$i}        $floatStatement\n";
+        $code .= "{$i}    } else {\n";
+        $code .= "{$i}        $fail\n";
+        $code .= "{$i}    }\n";
+        $code .= "{$i}} elseif (\\is_float(\$x) && (\\is_float(\$y) || \\is_int(\$y))) {\n";
+        $code .= "{$i}    $floatStatement\n";
+        $code .= "{$i}} else {\n";
+        $code .= "{$i}    $fail\n";
+        $code .= "{$i}}\n";
+        $code .= "{$i}goto done_$pc;\n";
+        $code .= "mm_$pc:\n";
+        $code .= "{$i}$fallback\n";
+        $code .= "done_$pc:\n";
+        return $code;
+    }
+
     /** whether the instruction at $pc is emitted in compact form when it has one (compactCodeOutsideLoops) */
     private function isCompact(int $pc): bool
     {
@@ -1645,28 +1703,28 @@ final class FunctionEmitter
                     OpCodes::OP_SUB => 'subWrap',
                     OpCodes::OP_MUL => 'mulWrap',
                 };
-                return $this->arithmetic($pc, '$x = ' . self::r($b) . '; $y = ' . self::r($c) . ';', [
-                    [
-                        '\is_int($x) && \is_int($y)',
-                        "\$v = \$x $operator \$y; $ra = \\is_int(\$v) ? \$v : Vm::$wrap(\$x, \$y);",
-                    ],
-                    ['(\is_float($x) || \is_int($x)) && (\is_float($y) || \is_int($y))', "$ra = \$x $operator \$y;"],
-                ]);
+                return $this->binaryArithmetic(
+                    $pc,
+                    '$x = ' . self::r($b) . '; $y = ' . self::r($c) . ';',
+                    "\$v = \$x $operator \$y; $ra = \\is_int(\$v) ? \$v : Vm::$wrap(\$x, \$y);",
+                    "$ra = \$x $operator \$y;",
+                );
 
             case OpCodes::OP_MOD:
-                return $this->arithmetic($pc, '$x = ' . self::r($b) . '; $y = ' . self::r($c) . ';', [
-                    ['\is_int($x) && \is_int($y)', self::savePc($pc) . " $ra = Vm::mod(\$L, \$x, \$y);"],
-                    ['(\is_float($x) || \is_int($x)) && (\is_float($y) || \is_int($y))', "$ra = Vm::modf(\$x, \$y);"],
-                ]);
+                return $this->binaryArithmetic(
+                    $pc,
+                    '$x = ' . self::r($b) . '; $y = ' . self::r($c) . ';',
+                    self::savePc($pc) . " $ra = Vm::mod(\$L, \$x, \$y);",
+                    "$ra = Vm::modf(\$x, \$y);",
+                );
 
             case OpCodes::OP_IDIV:
-                return $this->arithmetic($pc, '$x = ' . self::r($b) . '; $y = ' . self::r($c) . ';', [
-                    ['\is_int($x) && \is_int($y)', self::savePc($pc) . " $ra = Vm::idiv(\$L, \$x, \$y);"],
-                    [
-                        '(\is_float($x) || \is_int($x)) && (\is_float($y) || \is_int($y))',
-                        "$ra = \\floor(\\fdiv(\$x, \$y));",
-                    ],
-                ]);
+                return $this->binaryArithmetic(
+                    $pc,
+                    '$x = ' . self::r($b) . '; $y = ' . self::r($c) . ';',
+                    self::savePc($pc) . " $ra = Vm::idiv(\$L, \$x, \$y);",
+                    "$ra = \\floor(\\fdiv(\$x, \$y));",
+                );
 
             case OpCodes::OP_POW:
                 return $this->arithmetic($pc, '$x = ' . self::r($b) . '; $y = ' . self::r($c) . ';', [

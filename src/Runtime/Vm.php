@@ -883,11 +883,17 @@ final class Vm
                     return self::floatArith($op, (float) $p1, (float) $p2);
                 }
                 return null;
-            default:  // other operations
-                if (\is_int($p1) && \is_int($p2)) {
-                    return self::integerArith($L, $op, $p1, $p2);
+            default:  // other operations (lvm.c: op_arith_aux / op_arithf_aux)
+                if (\is_int($p1)) {
+                    if (\is_int($p2)) {
+                        return self::integerArith($L, $op, $p1, $p2);
+                    }
+                    if (\is_float($p2)) {
+                        return self::floatArith($op, (float) $p1, (float) $p2);
+                    }
+                    return null;
                 }
-                if ((\is_int($p1) || \is_float($p1)) && (\is_int($p2) || \is_float($p2))) {
+                if (\is_float($p1) && (\is_float($p2) || \is_int($p2))) {
                     return self::floatArith($op, (float) $p1, (float) $p2);
                 }
                 return null;
