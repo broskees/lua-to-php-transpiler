@@ -1097,6 +1097,9 @@ interpreter `lua5.4` (5.4.9) and compiler `luac5.4`, both installed.
     php bench/run.php <label>    benchmarks vs lua5.4 (not a test; results in bench/results/<label>.md,
                                  see bench/README.md): speed of saved lua2php output with a warm
                                  opcache (transpile time apart), memory and virtual memory under bin/lua
+    bench/score/score.sh         the speed score (execute-score's scorer): CPU time of transpiling and of
+                                 lua2php output vs the commit that added it, under a shared-host profile;
+                                 lower is better, 100 = that commit (see bench/README.md)
 
 - Differential cases live in `tests/diff/*.lua`: each runs under `lua5.4` and
   under `bin/lua` from `tests/diff`; exit status, stdout and stderr must match

@@ -41,3 +41,22 @@ takes a few minutes; run it on an otherwise idle machine.
 
 The reports up to `final-b193de9.md` timed `php bin/lua` (transpile, eval
 and run in one process) as their speed, with no saved PHP or JIT columns.
+
+## The speed score (`bench/score/`)
+
+    bench/score/score.sh [--quick]
+
+is the scorer of an execute-score run: one number for the speed of
+transpiling and of transpiled PHP, as 100 times the attempt's CPU time over
+the start's (the commit that added `bench/score/score.php`; lower is
+better). It measures both sides interleaved from scratch copies at paths of
+equal length, under a shared-host PHP profile (no php.ini, opcache warm, no
+JIT, optional extensions' functions and a typical host's disable_functions
+disabled). Execution (weight 2/3) is the geometric mean over
+`workloads/speed` and the program-like `score/workloads`; transpiling
+(weight 1/3) is `bin/lua2php` on the official test files. Every run must
+print what lua5.4 prints. Without `--quick`, gates follow: existing
+`tests/diff` cases unchanged, `composer lint`, `php tests/run.php`, and
+all.lua without optional extensions. `score.php`'s header has the details.
+`capped.sh` and `heavy.sh` run commands under this machine's memory rules
+(heavy.sh: one at a time).
