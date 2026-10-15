@@ -126,6 +126,20 @@ final class FunctionEmitter
     private array $inLoop = [];
 
     /**
+     * The line of the instruction last asked for in lineAt: emission is in
+     * pc order, so the walk of DebugInfo::getFuncLine (ldebug.c:
+     * luaG_getfuncline) continues from where the last one stopped instead
+     * of starting at its baseline again.
+     */
+    private int $lineCursorPc = -1;
+
+    /** the line of the instruction at $lineCursorPc (a walk from -1 starts at linedefined) */
+    private int $lineCursorLine = 0;
+
+    /** the $absLineInfo entry of or after $lineCursorPc (lineAt walks them in order) */
+    private int $lineCursorAbs = 0;
+
+    /**
      * Tests only: emit the compact form (emitCompact) of every instruction
      * that has one, in every function, in loops too (compact_forms.php).
      */
@@ -444,6 +458,9 @@ final class FunctionEmitter
      */
     private function instructionWeight(int $pc): int
     {
+        // (kept as a fresh computation: a table of weights per pc is
+        // another array of an instruction count, which did not fit 128 MB
+        // for a data module's Proto)
         $instruction = $this->proto->code[$pc];
         return 1 + match ($this->opcodes[$pc]) {
             self::$opCall, self::$opVararg => max(OpCodes::getArgC($instruction) - 1, 0),
@@ -464,6 +481,8 @@ final class FunctionEmitter
     private static int $opTforcall = OpCodes::OP_TFORCALL;
     private static int $opSetlist = OpCodes::OP_SETLIST;
     private static int $opConcat = OpCodes::OP_CONCAT;
+    private static int $opVarargprep = OpCodes::OP_VARARGPREP;
+    private static int $opTforloop = OpCodes::OP_TFORLOOP;
 
     /** the segment of instruction $pc: the last one starting at or before it (0 when the function is one piece) */
     private function segmentOf(int $pc): int
@@ -545,13 +564,14 @@ final class FunctionEmitter
     private function hookCheck(int $pc): string
     {
         $opcode = $this->opcodes[$pc];
-        if ($opcode === OpCodes::OP_VARARGPREP || $opcode === OpCodes::OP_TFORLOOP) {
+        if ($opcode === self::$opVarargprep || $opcode === self::$opTforloop) {
             return '';
         }
         if (OpCodes::testITMode($opcode) && OpCodes::getArgB($this->proto->code[$pc]) === 0) {  // lopcodes.h: isIT
-            return self::lines("if (\$trap) { Hooks::traceExec(\$L, \$ci, $pc, \$top); }");
+            // (the lines() form is one PHP call and an array per instruction)
+            return self::INDENT . "if (\$trap) { Hooks::traceExec(\$L, \$ci, $pc, \$top); }\n";
         }
-        return self::lines("if (\$trap) { Hooks::traceExec(\$L, \$ci, $pc); }");
+        return self::INDENT . "if (\$trap) { Hooks::traceExec(\$L, \$ci, $pc); }\n";
     }
 
     /** marks every instruction some jump can reach */
@@ -699,10 +719,9 @@ final class FunctionEmitter
      */
     private function emitConstructorRun(int $first, int $last): string
     {
-        $proto = $this->proto;
         $code = self::INDENT . "// [$first..$last] constant table constructor: " . ($last - $first + 1)
             . ' instructions ; lines '
-            . DebugInfo::getFuncLine($proto, $first) . '-' . DebugInfo::getFuncLine($proto, $last) . "\n";
+            . $this->lineAt($first) . '-' . $this->lineAt($last) . "\n";
         $call = "TableConstructor::run(\$L, \$ci, \$R, $first, $last);";
         $result = $this->constructorLiterals ? $this->constructorResult($first, $last) : null;
         if ($result === null) {
@@ -984,9 +1003,61 @@ final class FunctionEmitter
             OpCodes::IAX => (string) OpCodes::getArgAx($instruction),
             OpCodes::ISJ => (string) OpCodes::getArgSJ($instruction),
         };
-        $line = DebugInfo::getFuncLine($this->proto, $pc);
+        $line = $this->lineAt($pc);
         return self::INDENT . "// [$pc] $name $arguments ; line $line\n";
     }
+
+    /**
+     * DebugInfo::getFuncLine (ldebug.c: luaG_getfuncline) for the
+     * instruction at $pc, from the last one asked for: emission asks in pc
+     * order, and walking the line deltas from the previous instruction is
+     * one addition, where getFuncLine starts again at its baseline (the
+     * walk cost a fifth of the emit of the official files).
+     */
+    private function lineAt(int $pc): int
+    {
+        $f = $this->proto;
+        if ($f->lineinfo === []) {  // no debug information?
+            return -1;
+        }
+        if ($pc === $this->lineCursorPc) {
+            return $this->lineCursorLine;
+        }
+        if ($pc < $this->lineCursorPc) {  // out of order: walk from the start, as getFuncLine
+            $this->lineCursorPc = -1;
+            $this->lineCursorAbs = 0;
+        }
+        $lineinfo = $f->lineinfo;
+        $absLineInfo = $f->abslineinfo;
+        $absCount = \count($absLineInfo);
+        $abs = $this->lineCursorAbs;
+        $line = $this->lineCursorPc === -1 ? $f->linedefined : $this->lineCursorLine;
+        // (a for loop, not foreach: see AGENTS.md, Loops and the tracing JIT)
+        for ($pcAt = $this->lineCursorPc + 1; $pcAt <= $pc; $pcAt++) {
+            $delta = $lineinfo[$pcAt];
+            if ($delta === self::$absLineInfo) {
+                // ldebug.c: getbaseline lands on this instruction and takes its
+                // absolute line; the walk of getFuncLine starts after it
+                while ($abs < $absCount && $absLineInfo[$abs]->pc < $pcAt) {
+                    $abs++;
+                }
+                $line = $absLineInfo[$abs]->line;
+            } else {
+                $line += $delta;
+            }
+        }
+        $this->lineCursorPc = $pc;
+        $this->lineCursorLine = $line;
+        $this->lineCursorAbs = $abs;
+        return $line;
+    }
+
+    /**
+     * DebugInfo::ABSLINEINFO, as a static property: lineAt runs in the
+     * emitter's loop, where a constant of another class is a VM handler
+     * call (see AGENTS.md, Loops and the tracing JIT).
+     */
+    private static int $absLineInfo = DebugInfo::ABSLINEINFO;
 
     private static function r(int $register): string
     {
@@ -1060,11 +1131,12 @@ final class FunctionEmitter
     /** lines of code, indented */
     private static function lines(string ...$lines): string
     {
-        $code = '';
-        foreach ($lines as $line) {
-            $code .= self::INDENT . $line . "\n";
+        if ($lines === []) {
+            return '';
         }
-        return $code;
+        // one pass over the parts (a part may hold code of its own): each
+        // line gets INDENT before and "\n" after, as a per-line loop did
+        return self::INDENT . implode("\n" . self::INDENT, $lines) . "\n";
     }
 
     /** truthiness test (Lua: not nil and not false) */

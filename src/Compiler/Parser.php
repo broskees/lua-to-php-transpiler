@@ -223,8 +223,10 @@ final class Parser
      */
     private static function reglevel(FuncState $fs, int $nvar): int
     {
+        $actvar = $fs->ls->dyd->actvar;
+        $first = $fs->firstlocal;
         while ($nvar-- > 0) {
-            $vd = self::getlocalvardesc($fs, $nvar);  // get previous variable
+            $vd = $actvar[$first + $nvar];  // lparser.c: getlocalvardesc
             if ($vd->kind !== Vardesc::RDKCTC) {  // is in a register?
                 return $vd->ridx + 1;
             }
@@ -356,8 +358,13 @@ final class Parser
      */
     private static function searchvar(FuncState $fs, string $n, E $var): int
     {
+        // (getlocalvardesc's table, once: this walks every active local of
+        // every name at every use, and a property chain and a PHP call per
+        // step were a sixth of the compile of the official files)
+        $actvar = $fs->ls->dyd->actvar;
+        $first = $fs->firstlocal;
         for ($i = $fs->nactvar - 1; $i >= 0; $i--) {
-            $vd = self::getlocalvardesc($fs, $i);
+            $vd = $actvar[$first + $i];  // lparser.c: getlocalvardesc
             if ($n === $vd->name) {  // found?
                 if ($vd->kind === Vardesc::RDKCTC) {  // compile-time constant?
                     self::initExp($var, E::VCONST, $fs->firstlocal + $i);

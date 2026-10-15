@@ -303,11 +303,14 @@ final class Lexer
         $this->buffer[$this->bufferLength++] = chr($c & 0xFF);
     }
 
-    // llex.c: save_and_next
+    // llex.c: save_and_next (save and next, inline: it runs per byte of a name,
+    // numeral or string, and a PHP call of each costs more than their work)
     private function saveAndNext(): void
     {
-        $this->save($this->current);
-        $this->next();
+        $this->buffer[$this->bufferLength++] = chr($this->current & 0xFF);
+        $this->current = $this->inputPosition < $this->inputEnd
+            ? ord($this->input[$this->inputPosition++])
+            : $this->fill();
     }
 
     // lzio.h: luaZ_buffremove
@@ -696,7 +699,14 @@ final class Lexer
                 case 12:  // '\f'
                 case 9:   // '\t'
                 case 11:  // '\v': spaces
-                    $this->next();
+                    // (the C loop returns to the switch per space; a run of
+                    // them is one skip: same tokens and buffer)
+                    do {
+                        $this->next();
+                    } while (
+                        $this->current === 32 || $this->current === 12
+                        || $this->current === 9 || $this->current === 11
+                    );
                     break;
                 case 45:  // '-': '-' or '--' (comment)
                     $this->next();
@@ -715,7 +725,8 @@ final class Lexer
                         }
                     }
                     // else short comment: skip until end of line (or end of file)
-                    while (!$this->currIsNewline() && $this->current !== self::EOZ) {
+                    // (currIsNewline's test, inline: per byte of every comment)
+                    while ($this->current !== 10 && $this->current !== 13 && $this->current !== self::EOZ) {
                         $this->next();
                     }
                     break;
@@ -792,10 +803,17 @@ final class Lexer
                     if (self::lislalpha($this->current)) {  // identifier or reserved word?
                         do {
                             $this->saveAndNext();
-                        } while (self::lislalnum($this->current));
+                            // lctype.h: lislalnum, inline (it runs per byte of
+                            // every name; a PHP call of it cost more than the test)
+                            $c = $this->current;
+                        } while (
+                            ($c >= 97 && $c <= 122) || ($c >= 65 && $c <= 90)
+                            || $c === 95 || ($c >= 48 && $c <= 57)
+                        );
                         $name = $this->newString($this->buffer);  // (the buffer is the name: nothing was removed)
                         $token->seminfo = $name;
-                        return self::RESERVED_WORDS[$name] ?? self::TK_NAME;
+                        // (no ?? in a loop: see AGENTS.md, Loops and the tracing JIT)
+                        return isset(self::RESERVED_WORDS[$name]) ? self::RESERVED_WORDS[$name] : self::TK_NAME;
                     }
                     // single-char tokens ('+', '*', '%', '{', '}', ...)
                     $c = $this->current;
