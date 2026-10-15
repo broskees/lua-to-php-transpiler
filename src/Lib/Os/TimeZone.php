@@ -488,8 +488,12 @@ final class TimeZone
                 if ($d < 0) {
                     $d += 7;
                 }
+                $monthIndex = $leap * 13 + $rule['m'];
+                $monthEnd = isset(self::MON_YDAY_FLAT[$monthIndex])
+                    ? self::MON_YDAY_FLAT[$monthIndex]
+                    : 0;
                 for ($i = 1; $i < $rule['n']; $i++) {
-                    if ($d + 7 >= (self::MON_YDAY_FLAT[$leap * 13 + $rule['m']] ?? 0) - $monthStart) {
+                    if ($d + 7 >= $monthEnd - $monthStart) {
                         break;
                     }
                     $d += 7;

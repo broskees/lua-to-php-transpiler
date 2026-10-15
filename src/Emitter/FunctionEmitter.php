@@ -43,6 +43,9 @@ final class FunctionEmitter
     /** @var array<int, true> instructions that are jump targets */
     private array $jumpTargets = [];
 
+    /** @var array<int, list<int>> the pcs each instruction's code can jump to (findJumpTargets) */
+    private array $jumpEdges = [];
+
     /** @var array<int, true> instructions already emitted as part of the previous one */
     private array $consumed = [];
 
@@ -148,12 +151,47 @@ final class FunctionEmitter
     /** whether the function has a backward jump (a loop: findLoops) */
     private bool $hasBackwardJumps = false;
 
+    /** @var list<array{int, int}> backward jumps of UNCHECKED_REGION_MINIMUM or more instructions (findLoops) */
+    private array $backwardRanges = [];
+
     /**
      * whether the function can have to-be-closed variables: only OP_TBC and
      * OP_TFORPREP (a generic for's closing value) create them (lfunc.c:
      * luaF_newtbcupval). Without, closing a level only closes upvalues.
      */
     private bool $hasToBeClosedVariables;
+
+    /**
+     * The fewest instructions an unchecked copy of a loop needs
+     * (findUncheckedRegions): below that its size and the analysis do not
+     * pay for the hook checks they save (as CONSTRUCTOR_RUN_MINIMUM does
+     * for a constant constructor run).
+     */
+    private const UNCHECKED_REGION_MINIMUM = 3;
+
+    /**
+     * Loop regions emitted twice (findUncheckedRegions): first pc => the
+     * backward jump that ends it. The second copy has no hook checks (see
+     * emitUncheckedCopy).
+     *
+     * @var array<int, int>
+     */
+    private array $uncheckedRegions = [];
+
+    /** @var array<int, true> labels of the unchecked copies (U<pc>) */
+    private array $uncheckedJumpTargets = [];
+
+    /** @var array<int, int> the weight each accepted unchecked copy adds (uncheckedRegionShape) */
+    private array $uncheckedRegionWeight = [];
+
+    /**
+     * @var array<int, int> the first pc after each one that gets code of
+     *   its own (afterLuaRun: where a path that ran Lua continues)
+     */
+    private array $nextEmitted = [];
+
+    /** [first, last] of the unchecked region being emitted; null in the checked code */
+    private ?array $emittingUnchecked = null;
 
     /**
      * @param bool $countSteps code for an embedded state (Emitter::emitChunk):
@@ -180,6 +218,7 @@ final class FunctionEmitter
         $this->findJumpTargets();
         $this->findConstructorRuns();
         $this->findLoops();
+        $this->findUncheckedRegions();
     }
 
     /**
@@ -212,6 +251,9 @@ final class FunctionEmitter
             }
             $pc = $last;
         }
+        foreach ($this->uncheckedRegionWeight as $regionWeight) {  // the unchecked copies (findUncheckedRegions)
+            $weight += $regionWeight;
+        }
         return [$weight, $weightOutsideLoops];
     }
 
@@ -235,6 +277,7 @@ final class FunctionEmitter
         // dispatcher's cases are known once every jump is emitted, and the
         // frame's size once the compact instructions are
         $pieces = [];
+        $uncheckedPieces = [];
         $compactInstructions = 0;
         $instructionCount = \count($proto->code);
         // The loop runs the whole emitter, full of VM handler calls: its counters are references, so
@@ -244,13 +287,16 @@ final class FunctionEmitter
         $pcInMemory = &$pc;
         $compactInstructionsInMemory = &$compactInstructions;
         for (; $pc < $instructionCount; $pc++) {
+            $headDispatch = isset($this->uncheckedRegions[$pc])
+                ? self::INDENT . "if (!\$trap) { goto U$pc; }\n"
+                : '';
             if (isset($this->constructorRuns[$pc])) {
                 $last = $this->constructorRuns[$pc];
-                $pieces[$pc] = $this->emitConstructorRun($pc, $last);
+                $pieces[$pc] = $headDispatch . $this->emitConstructorRun($pc, $last);
                 $pc = $last;
                 continue;
             }
-            $pieces[$pc] = $this->comment($pc);
+            $pieces[$pc] = $this->comment($pc) . $headDispatch;
             if (isset($this->consumed[$pc])) {
                 continue;
             }
@@ -259,6 +305,9 @@ final class FunctionEmitter
                 $compactInstructions++;
             }
             $pieces[$pc] .= $compact ?? ($this->hookCheck($pc) . $this->emitInstruction($pc));
+        }
+        foreach ($this->uncheckedRegions as $first => $last) {
+            $uncheckedPieces[$first] = $this->emitUncheckedCopy($first, $last);
         }
 
         $uses = [];
@@ -339,6 +388,9 @@ final class FunctionEmitter
             }
             $code .= $piece;
         }
+        foreach ($uncheckedPieces as $piece) {
+            $code .= $piece;
+        }
         if ($segmentStarts !== []) {
             $code .= self::lines('} }');
         }
@@ -354,6 +406,51 @@ final class FunctionEmitter
             $code .= "    if (\\function_exists('opcache_jit_blacklist')) { "
                 . "\\opcache_jit_blacklist(\$function_{$this->path}); }\n";
         }
+        return $code;
+    }
+
+    /**
+     * The unchecked copy of one loop region (findUncheckedRegions): the
+     * same code without the hook checks, entered at U$first when $trap is
+     * false. Labels are U<pc>; where code can run Lua (a call, a
+     * metamethod, a finalizer) the copy looks at $trap again and continues
+     * in the checked copy when one is set (uncheckedDispatches), so with
+     * no hook the loop pays no check at all and with one it behaves
+     * exactly as the checked code (which the copy leaves and re-enters).
+     */
+    private function emitUncheckedCopy(int $first, int $last): string
+    {
+        $this->emittingUnchecked = [$first, $last];
+        $code = self::INDENT . "// unchecked copy of L$first..L$last: no hook checks (\$trap is false here,\n"
+            . self::INDENT . "// checked again where the code can set one; see findUncheckedRegions)\n";
+        $pieces = [];
+        $instructionCount = \count($this->proto->code);
+        // (the loop counter is a reference, see emit)
+        $pc = $first;
+        $pcInMemory = &$pc;
+        for (; $pc <= $last; $pc++) {
+            $at = '';
+            if (isset($this->uncheckedJumpTargets[$pc])) {
+                $at .= "    U$pc:\n";
+            }
+            if (isset($this->constructorRuns[$pc])) {
+                $runLast = $this->constructorRuns[$pc];
+                $pieces[$pc] = $at . $this->emitConstructorRun($pc, $runLast);
+                $pc = $runLast;
+                continue;
+            }
+            if (isset($this->consumed[$pc])) {
+                continue;
+            }
+            $pieces[$pc] = $at . $this->emitInstruction($pc);
+        }
+        foreach ($pieces as $piece) {
+            $code .= $piece;
+        }
+        if ($last + 1 < $instructionCount) {
+            $code .= self::INDENT . $this->jump($last, $last + 1) . "\n";
+        }
+        $this->emittingUnchecked = null;
         return $code;
     }
 
@@ -508,6 +605,13 @@ final class FunctionEmitter
      */
     private function jump(int $pc, int $target, string $label = 'L'): string
     {
+        if ($label === 'L' && $this->emittingUnchecked !== null) {
+            [$first, $last] = $this->emittingUnchecked;
+            if ($target >= $first && $target <= $last) {
+                $label = 'U';
+                $this->uncheckedJumpTargets[$target] = true;
+            }
+        }
         if ($this->segmentStarts === [] || $this->segmentOf($pc) === $this->segmentOf($target)) {
             $transfer = "goto $label$target;";
         } else {
@@ -563,6 +667,9 @@ final class FunctionEmitter
      */
     private function hookCheck(int $pc): string
     {
+        if ($this->emittingUnchecked !== null) {
+            return '';  // the unchecked copy: $trap is false, see findUncheckedRegions
+        }
         $opcode = $this->opcodes[$pc];
         if ($opcode === self::$opVarargprep || $opcode === self::$opTforloop) {
             return '';
@@ -582,16 +689,28 @@ final class FunctionEmitter
             $opcode = $this->opcodes[$pc];
             switch ($opcode) {
                 case OpCodes::OP_JMP:
-                    $this->jumpTargets[$pc + 1 + OpCodes::getArgSJ($instruction)] = true;
+                    $target = $pc + 1 + OpCodes::getArgSJ($instruction);
+                    $this->jumpTargets[$target] = true;
+                    $this->jumpEdges[$pc] = [$target];
                     break;
                 case OpCodes::OP_FORLOOP:
                 case OpCodes::OP_TFORLOOP:
-                    $this->jumpTargets[$pc + 1 - OpCodes::getArgBx($instruction)] = true;
+                    $target = $pc + 1 - OpCodes::getArgBx($instruction);
+                    $this->jumpTargets[$target] = true;
+                    $this->jumpEdges[$pc] = [$target];
                     break;
                 case OpCodes::OP_FORPREP:
-                    $this->jumpTargets[$pc + OpCodes::getArgBx($instruction) + 2] = true;
+                    $target = $pc + OpCodes::getArgBx($instruction) + 2;
+                    $this->jumpTargets[$target] = true;
+                    $this->jumpEdges[$pc] = [$target];
+                    break;
+                case OpCodes::OP_TFORPREP:  // to OP_TFORCALL, past its hook check (T<pc>)
+                    $this->jumpEdges[$pc] = [$pc + OpCodes::getArgBx($instruction) + 1];
                     break;
                 case OpCodes::OP_LFALSESKIP:
+                    $this->jumpTargets[$pc + 2] = true;
+                    $this->jumpEdges[$pc] = [$pc + 2];
+                    break;
                 case OpCodes::OP_EQ:
                 case OpCodes::OP_LT:
                 case OpCodes::OP_LE:
@@ -603,7 +722,10 @@ final class FunctionEmitter
                 case OpCodes::OP_GEI:
                 case OpCodes::OP_TEST:
                 case OpCodes::OP_TESTSET:
+                    // the code of a test ends with its jumps
+                    // (conditionalJump: docondjump and donextjump)
                     $this->jumpTargets[$pc + 2] = true;
+                    $this->jumpEdges[$pc] = [$pc + 2, $pc + 2 + OpCodes::getArgSJ($code[$pc + 1] ?? 0)];
                     break;
             }
         }
@@ -619,6 +741,7 @@ final class FunctionEmitter
                 $this->consumed[$nextPc] = true;
             } elseif ($nextPc < \count($code) && OpCodes::testMMMode($this->opcodes[$nextPc])) {
                 $this->jumpTargets[$pc + 2] = true;  // success path skips the MMBIN with a goto
+                $this->jumpEdges[$pc] = [$nextPc, $pc + 2];  // into it on failure, over it on success
             }
         }
         foreach (array_keys($code) as $pc) {
@@ -665,6 +788,9 @@ final class FunctionEmitter
                 $loopChanges[$target] = ($loopChanges[$target] ?? 0) + 1;
                 $loopChanges[$pc + 1] = ($loopChanges[$pc + 1] ?? 0) - 1;
                 $this->hasBackwardJumps = true;
+                if ($pc - $target + 1 >= self::UNCHECKED_REGION_MINIMUM) {
+                    $this->backwardRanges[] = [$target, $pc];  // a possible unchecked copy
+                }
             }
         }
         $loops = 0;
@@ -677,6 +803,220 @@ final class FunctionEmitter
                 $this->inLoop[$pc] = true;
             }
         }
+    }
+
+    /**
+     * The loop regions to emit a second time without hook checks (the
+     * "unchecked copy", emitUncheckedCopy): with no hook set, the check
+     * before each instruction is pure overhead (measured 8 to 17 percent
+     * of the loop-heavy workloads), and $trap can become true only while
+     * Lua code runs (a call, a metamethod, a finalizer, a hook). The copy
+     * is entered with $trap false and re-checks it where its code can set
+     * one (uncheckedDispatches), so it runs exactly the instructions C's
+     * vmfetch fetches with 'trap' off (lvm.c: vmfetch). One region is one
+     * backward jump's range (findLoops' rule) with these refusals:
+     * anything may enter but at its first instruction (a Lua goto cannot
+     * cross a local's declaration, so a for body has one entry; other
+     * interior entries refuse the region here), a generic 'for' (its
+     * OP_TFORPREP jumps to T<pc>, past an OP_TFORCALL's hook check), a
+     * constructor run across its edge, a jump to an instruction another
+     * one consumes, overlapping ranges that do not nest, and a function
+     * heavier than one segment: their code counts toward its weight.
+     */
+    private function findUncheckedRegions(): void
+    {
+        if (self::$compactEverywhere) {
+            return;
+        }
+        $code = $this->proto->code;
+        $instructionCount = \count($code);
+        $ranges = $this->backwardRanges;
+        if ($ranges === []) {
+            return;
+        }
+        // once per instruction: the pcs that get code of their own (see
+        // emit: consumed instructions and the instructions of a
+        // constructor run after its first are part of another one)
+        $startsPiece = [];
+        foreach (array_keys($code) as $pc) {
+            $startsPiece[$pc] = !isset($this->consumed[$pc]);
+        }
+        foreach ($this->constructorRuns as $first => $last) {
+            for ($pc = $first + 1; $pc <= $last; $pc++) {
+                $startsPiece[$pc] = false;
+            }
+        }
+        $nextPiece = [];
+        $next = $instructionCount;
+        for ($pc = $instructionCount - 1; $pc >= 0; $pc--) {
+            $nextPiece[$pc] = $next;
+            if ($startsPiece[$pc]) {
+                $next = $pc;
+            }
+        }
+        $this->nextEmitted = $nextPiece;
+        // the shapes that fit, with the weight their copies add
+        $candidates = [];
+        foreach ($ranges as [$first, $last]) {
+            $weight = $this->uncheckedRegionShape($first, $last, $startsPiece);
+            if ($weight !== null) {
+                $candidates[] = [$first, $last, $weight];
+            }
+        }
+        // the outermost of two nested ranges covers the inner one; two that
+        // only partially overlap would share their labels: neither is kept
+        $kept = [];
+        foreach ($candidates as [$first, $last, $weight]) {
+            $dropped = false;
+            foreach ($kept as $index => [$keptFirst, $keptLast]) {
+                if ($first >= $keptFirst && $last <= $keptLast) {
+                    $dropped = true;  // nested in a kept one
+                    break;
+                }
+                if ($keptFirst >= $first && $keptLast <= $last) {
+                    unset($kept[$index]);  // this range covers the kept one
+                    continue;
+                }
+                unset($kept[$index]);  // partial overlap: neither is kept
+                $dropped = true;
+                break;
+            }
+            if (!$dropped) {
+                $kept[] = [$first, $last, $weight];
+            }
+        }
+        // the copies count toward the one segment the function is emitted
+        // as (planSegments: the search of opcache's optimizer per block)
+        $weightAtMost = 0;
+        foreach (array_keys($code) as $pc) {
+            $weightAtMost += $this->instructionWeight($pc);
+        }
+        foreach ($kept as [$first, $last, $weight]) {
+            if ($weightAtMost + $weight > self::$maximumSegmentWeight) {
+                continue;
+            }
+            $weightAtMost += $weight;
+            $this->uncheckedRegions[$first] = $last;
+            $this->uncheckedRegionWeight[$first] = $weight;
+            $this->uncheckedJumpTargets[$first] = true;
+            $this->jumpTargets[$first] = true;
+            if ($last + 1 < $instructionCount) {
+                $this->jumpTargets[$last + 1] = true;  // the copy leaves the loop with a goto
+            }
+        }
+        // the labels the copies' jumps need (a backward one goes to an
+        // earlier instruction)
+        foreach ($this->uncheckedRegions as $first => $last) {
+            for ($pc = $first; $pc <= $last; $pc++) {
+                foreach ($this->gotoTargets($pc) as $target) {
+                    if ($target >= $first && $target <= $last) {
+                        $this->uncheckedJumpTargets[$target] = true;
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Whether the unchecked copy of $first .. $last has the shape
+     * findUncheckedRegions allows, and the weight it adds to the function
+     * (null when it does not fit).
+     *
+     * @param array<int, bool> $startsPiece
+     */
+    private function uncheckedRegionShape(int $first, int $last, array $startsPiece): ?int
+    {
+        $weight = 0;
+        for ($pc = $first; $pc <= $last; $pc++) {
+            if (!$startsPiece[$pc] && isset($this->jumpTargets[$pc])) {
+                return null;  // a jump to code another instruction owns
+            }
+            if (isset($this->constructorRuns[$pc])) {
+                if ($this->constructorRuns[$pc] > $last) {
+                    return null;
+                }
+                $pc = $this->constructorRuns[$pc];
+                $weight++;
+                continue;
+            }
+            $weight += $this->instructionWeight($pc);
+        }
+        foreach ($this->constructorRuns as $runFirst => $runLast) {
+            if ($runFirst < $first && $runLast >= $first) {
+                return null;
+            }
+        }
+        // one entry: nothing outside jumps into the middle (a generic
+        // for's OP_TFORPREP enters its OP_TFORCALL past the hook check:
+        // the copy's own dispatch there, see that instruction)
+        foreach ($this->jumpEdges as $pc => $targets) {
+            if ($pc >= $first && $pc <= $last) {
+                continue;
+            }
+            foreach ($targets as $target) {
+                if ($target > $first && $target <= $last) {
+                    if (
+                        $this->opcodes[$pc] === OpCodes::OP_TFORPREP
+                        && $this->opcodes[$target] === OpCodes::OP_TFORCALL
+                    ) {
+                        continue;
+                    }
+                    return null;
+                }
+            }
+        }
+        return $weight;
+    }
+
+    /**
+     * The end of a path of instruction $pc that can run Lua code, in the
+     * unchecked copy (findUncheckedRegions): $trap may have been set
+     * while it ran, so the copy continues in the checked one. Empty in
+     * the checked code, where the next instruction's own check is the one
+     * C's vmfetch does (lvm.c: vmfetch).
+     */
+    private function afterLuaRun(int $pc): string
+    {
+        if ($this->emittingUnchecked === null) {
+            return '';
+        }
+        $cont = $this->nextEmitted[$pc] ?? -1;
+        if ($cont < 0) {
+            return '';  // the instruction leaves the function
+        }
+        $this->jumpTargets[$cont] = true;
+        return "if (\$trap) { goto L$cont; }";
+    }
+
+    /**
+     * The jumps of a test after its slow path set $c in the unchecked
+     * copy: that path can run Lua code (a metamethod), so the copy leaves
+     * for the checked one at whichever way it goes (afterLuaRun).
+     */
+    private function checkedJumpOn(int $pc, string $condition, int $k): string
+    {
+        if ($this->emittingUnchecked === null) {
+            return '';
+        }
+        $was = $this->emittingUnchecked;
+        $this->emittingUnchecked = null;  // the checked labels
+        $skip = $this->jump($pc, $pc + 2);
+        $taken = $this->nextJump($pc);
+        $this->emittingUnchecked = $was;
+        $test = $k ? "if (!$condition) " : "if ($condition) ";
+        return "if (\$trap) { $test$skip $taken }";
+    }
+
+    /**
+     * The pcs the code of instruction $pc can jump to (its gotos: the
+     * fall-throughs continue at the next instruction's code), recorded by
+     * findJumpTargets.
+     *
+     * @return list<int>
+     */
+    private function gotoTargets(int $pc): array
+    {
+        return $this->jumpEdges[$pc] ?? [];
     }
 
     /**
@@ -725,7 +1065,7 @@ final class FunctionEmitter
         $call = "TableConstructor::run(\$L, \$ci, \$R, $first, $last);";
         $result = $this->constructorLiterals ? $this->constructorResult($first, $last) : null;
         if ($result === null) {
-            return $code . self::lines($call);
+            return $code . self::lines($call . ' ' . $this->afterLuaRun($first));
         }
         [$tables, $registers, $charge] = $result;
         $fastPath = ["\$L->globalState->gcDebt += $charge;"];
@@ -749,7 +1089,7 @@ final class FunctionEmitter
         $fastPath[] = 'unset(' . implode(', ', $tableVariables) . ');';
         return $code . self::lines("if (!\$trap && \$L->globalState->gcDebt + $charge <= 0) {")
             . self::lines(...array_map(static fn (string $line): string => "    $line", $fastPath))
-            . self::lines('} else {', "    $call", '}');
+            . self::lines('} else {', "    $call " . $this->afterLuaRun($first), '}');
     }
 
     /**
@@ -1123,9 +1463,10 @@ final class FunctionEmitter
      * expression) to the collector's debt and run a collection step when
      * the debt becomes positive; registers from $top up are dead.
      */
-    private static function checkGc(int $pc, int $top, string $size): string
+    private function checkGc(int $pc, int $top, string $size): string
     {
-        return "if ((\$L->globalState->gcDebt += $size) > 0) { " . self::savePc($pc) . " Collector::step(\$L, $top); }";
+        return "if ((\$L->globalState->gcDebt += $size) > 0) { " . self::savePc($pc)
+            . " Collector::step(\$L, $top); " . $this->afterLuaRun($pc) . '}';
     }
 
     /** lines of code, indented */
@@ -1162,9 +1503,10 @@ final class FunctionEmitter
         if (!isset($this->consumed[$mmPc])) {
             return '';  // emitted on its own (it is a jump target)
         }
-        // C's vmfetch fetches (and traces) the OP_MMBIN* only when the fast path fails
-        return "if (\$trap) { Hooks::traceExec(\$L, \$ci, $mmPc); } "
-            . $this->emitMetamethodCall($mmPc, $resultRegister);
+        // C's vmfetch fetches (and traces) the OP_MMBIN* only when the fast
+        // path fails; the unchecked copy reached it with $trap still false
+        $trace = $this->emittingUnchecked === null ? "if (\$trap) { Hooks::traceExec(\$L, \$ci, $mmPc); } " : '';
+        return $trace . $this->emitMetamethodCall($mmPc, $resultRegister) . ' ' . $this->afterLuaRun($pc);
     }
 
     private function emitMetamethodCall(int $mmPc, int $resultRegister): string
@@ -1248,7 +1590,11 @@ final class FunctionEmitter
             $code .= "{$i}}\n";
             return $code . self::lines($this->jump($pc, $pc + 2));
         }
-        $fail = "goto mm_$pc;";
+        // the shared metamethod fallback: its labels are its own in each
+        // copy of a region (findUncheckedRegions)
+        $mm = $this->emittingUnchecked === null ? "mm_$pc" : "mmu_$pc";
+        $done = $this->emittingUnchecked === null ? "done_$pc" : "doneu_$pc";
+        $fail = "goto $mm;";
         $code .= "{$i}if (\\is_int(\$x)) {\n";
         $code .= "{$i}    if (\\is_int(\$y)) {\n";
         $code .= "{$i}        $intStatement\n";
@@ -1262,10 +1608,10 @@ final class FunctionEmitter
         $code .= "{$i}} else {\n";
         $code .= "{$i}    $fail\n";
         $code .= "{$i}}\n";
-        $code .= "{$i}goto done_$pc;\n";
-        $code .= "mm_$pc:\n";
+        $code .= "{$i}goto $done;\n";
+        $code .= "$mm:\n";
         $code .= "{$i}$fallback\n";
-        $code .= "done_$pc:\n";
+        $code .= "$done:\n";
         return $code;
     }
 
@@ -1558,7 +1904,8 @@ final class FunctionEmitter
                         . "|| \$t->metatable === null)) {",
                     "    $ra = \$v;",
                     '} else {',
-                    '    ' . self::savePc($pc) . " $ra = Vm::finishGet(\$L, \$t, \$key, $b);",
+                    '    ' . self::savePc($pc) . " $ra = Vm::finishGet(\$L, \$t, \$key, $b); "
+                        . $this->afterLuaRun($pc),
                     '}',
                 );
 
@@ -1569,7 +1916,8 @@ final class FunctionEmitter
                         . " || \$t->metatable === null)) {",
                     "    $ra = \$v;",
                     '} else {',
-                    '    ' . self::savePc($pc) . " $ra = Vm::finishGet(\$L, \$t, $c, $b);",
+                    '    ' . self::savePc($pc) . " $ra = Vm::finishGet(\$L, \$t, $c, $b); "
+                        . $this->afterLuaRun($pc),
                     '}',
                 );
 
@@ -1596,7 +1944,8 @@ final class FunctionEmitter
                         . ' && ($t->metatable === null || isset($t->hash[$key]))) {',
                     '    if ($v !== null) { $t->hash[$key] = $v; } else { unset($t->hash[$key]); }',
                     '} else {',
-                    '    ' . self::savePc($pc) . " Vm::setTable(\$L, \$t, \$key, \$v, $a);",
+                    '    ' . self::savePc($pc) . " Vm::setTable(\$L, \$t, \$key, \$v, $a); "
+                        . $this->afterLuaRun($pc),
                     '}',
                 );
 
@@ -1606,7 +1955,8 @@ final class FunctionEmitter
                     "if (\$t instanceof LuaTable && (\$t->metatable === null || isset(\$t->arr[$b]))) {",
                     "    if (\$v !== null) { \$t->arr[$b] = \$v; } else { unset(\$t->arr[$b]); }",
                     '} else {',
-                    '    ' . self::savePc($pc) . " Vm::setTable(\$L, \$t, $b, \$v, $a);",
+                    '    ' . self::savePc($pc) . " Vm::setTable(\$L, \$t, $b, \$v, $a); "
+                        . $this->afterLuaRun($pc),
                     '}',
                 );
 
@@ -1628,7 +1978,7 @@ final class FunctionEmitter
                 $hashSize = $b > 0 ? 1 << ($b - 1) : 0;  // size is 2^(b - 1)
                 return self::lines(
                     "$ra = new LuaTable($arraySize);",
-                    self::checkGc($pc, $a + 1, (string) Collector::tableSize($arraySize, $hashSize)),
+                    $this->checkGc($pc, $a + 1, (string) Collector::tableSize($arraySize, $hashSize)),
                 );
 
             case OpCodes::OP_SELF:
@@ -1640,7 +1990,8 @@ final class FunctionEmitter
                         . " || \$t->metatable === null)) {",
                     "    $ra = \$v;",
                     '} else {',
-                    '    ' . self::savePc($pc) . " $ra = Vm::finishGet(\$L, \$t, \$key, $b);",
+                    '    ' . self::savePc($pc) . " $ra = Vm::finishGet(\$L, \$t, \$key, $b); "
+                        . $this->afterLuaRun($pc),
                     '}',
                 );
 
@@ -1766,7 +2117,10 @@ final class FunctionEmitter
             case OpCodes::OP_MMBINI:
             case OpCodes::OP_MMBINK:
                 // reached only when the preceding arithmetic instruction failed its fast paths
-                return self::lines($this->emitMetamethodCall($pc, OpCodes::getArgA($proto->code[$pc - 1])));
+                return self::lines(
+                    $this->emitMetamethodCall($pc, OpCodes::getArgA($proto->code[$pc - 1]))
+                        . ' ' . $this->afterLuaRun($pc),
+                );
 
             case OpCodes::OP_UNM:
                 return self::lines(
@@ -1778,7 +2132,8 @@ final class FunctionEmitter
                     "    $ra = \$x === \$x ? -\$x : Vm::floatNegate(\$x);",
                     '} else {',
                     '    ' . self::savePc($pc)
-                        . " $ra = MetaMethods::tryBinTM(\$L, \$x, \$x, " . MetaMethods::TM_UNM . ", $b, $b);",
+                        . " $ra = MetaMethods::tryBinTM(\$L, \$x, \$x, " . MetaMethods::TM_UNM . ", $b, $b); "
+                        . $this->afterLuaRun($pc),
                     '}',
                 );
 
@@ -1791,7 +2146,8 @@ final class FunctionEmitter
                     "    $ra = ~\$i1;",
                     '} else {',
                     '    ' . self::savePc($pc)
-                        . " $ra = MetaMethods::tryBinTM(\$L, \$x, \$x, " . MetaMethods::TM_BNOT . ", $b, $b);",
+                        . " $ra = MetaMethods::tryBinTM(\$L, \$x, \$x, " . MetaMethods::TM_BNOT . ", $b, $b); "
+                        . $this->afterLuaRun($pc),
                     '}',
                 );
 
@@ -1806,7 +2162,8 @@ final class FunctionEmitter
                     '} elseif ($x instanceof LuaTable && $x->metatable === null) {',
                     "    $ra = \$x->length();",
                     '} else {',
-                    '    ' . self::savePc($pc) . " $ra = Vm::objectLength(\$L, \$x, $b);",
+                    '    ' . self::savePc($pc) . " $ra = Vm::objectLength(\$L, \$x, $b); "
+                        . $this->afterLuaRun($pc),
                     '}',
                 );
 
@@ -1826,9 +2183,10 @@ final class FunctionEmitter
                     'if (' . implode(' && ', $conditions) . ') {',
                     "    $ra = " . implode(' . ', $operands) . ';',
                     '} else {',
-                    '    ' . self::savePc($pc) . " $ra = Vm::concat(\$L, [" . implode(', ', $operands) . "], $a);",
+                    '    ' . self::savePc($pc) . " $ra = Vm::concat(\$L, [" . implode(', ', $operands) . "], $a); "
+                        . $this->afterLuaRun($pc),
                     '}',
-                    self::checkGc(
+                    $this->checkGc(
                         $pc,
                         $a + 1,
                         "(\\is_string($ra) ? " . Collector::STRING_OVERHEAD . " + \\strlen($ra) : 0)",
@@ -1839,13 +2197,14 @@ final class FunctionEmitter
                 if (!$this->hasToBeClosedVariables) {  // (lfunc.c: luaF_close, with no tbc variables)
                     return self::lines(
                         'if ($ci->openupval !== []) {',
-                        '    ' . self::savePc($pc) . " Upvalues::closeUpvalues(\$ci, $a);",
+                        '    ' . self::savePc($pc) . " Upvalues::closeUpvalues(\$ci, $a); "
+                            . $this->afterLuaRun($pc),
                         '}',
                     );
                 }
                 return self::lines(
                     'if ($ci->openupval !== [] || $ci->tbclist !== []) {',
-                    '    ' . self::savePc($pc) . " Upvalues::close(\$L, \$ci, $a);",
+                    '    ' . self::savePc($pc) . " Upvalues::close(\$L, \$ci, $a); " . $this->afterLuaRun($pc),
                     '}',
                 );
 
@@ -1861,7 +2220,8 @@ final class FunctionEmitter
                     'if ($x === $y) {',
                     '    $c = true;',
                     '} elseif (\is_object($x) || \is_float($x) || \is_float($y)) {',
-                    '    ' . self::savePc($pc) . ' $c = Vm::equalObjects($L, $x, $y);',
+                    '    ' . self::savePc($pc) . ' $c = Vm::equalObjects($L, $x, $y);'
+                        . ' ' . $this->checkedJumpOn($pc, '$c', $k),
                     '} else {',
                     '    $c = false;',
                     '}',
@@ -1876,7 +2236,8 @@ final class FunctionEmitter
                     'if ((\is_int($x) && \is_int($y)) || (\is_float($x) && \is_float($y))) {',
                     "    \$c = \$x $operator \$y;",
                     '} else {',
-                    '    ' . self::savePc($pc) . " \$c = Vm::$function(\$L, \$x, \$y);",
+                    '    ' . self::savePc($pc) . " \$c = Vm::$function(\$L, \$x, \$y);"
+                        . ' ' . $this->checkedJumpOn($pc, '$c', $k),
                     '}',
                 ) . $this->conditionalJump($pc, '$c', $k);
 
@@ -1907,7 +2268,8 @@ final class FunctionEmitter
                     "    \$c = \$x $operator " . self::operand($immediate) . ';',
                     '} else {',
                     '    ' . self::savePc($pc) . " \$c = MetaMethods::callOrderITM(\$L, \$x, "
-                        . self::operand($immediate) . ", $flip, $isFloat, $event);",
+                        . self::operand($immediate) . ", $flip, $isFloat, $event);"
+                        . ' ' . $this->checkedJumpOn($pc, '$c', $k),
                     '}',
                 ) . $this->conditionalJump($pc, '$c', $k);
 
@@ -2006,25 +2368,40 @@ final class FunctionEmitter
                 );
 
             case OpCodes::OP_TFORPREP:
+                $target = $pc + OpCodes::getArgBx($instruction) + 1;  // to OP_TFORCALL, past its hook check
+                $inside = $this->emittingUnchecked;
+                $to = $inside !== null && $target >= $inside[0] && $target <= $inside[1]
+                    ? $this->jump($pc, $target)  // the copy's own label
+                    : $this->jump($pc, $target, 'T');
+                if ($inside === null && isset($this->uncheckedRegions[$target])) {
+                    // the copy of the loop it starts has no hook checks
+                    $this->uncheckedJumpTargets[$target] = true;
+                    $to = "if (!\$trap) { goto U$target; } $to";
+                }
                 return self::lines(
                     'if (' . self::r($a + 3) . ' !== null && ' . self::r($a + 3) . ' !== false) {',
                     '    ' . self::savePc($pc) . ' Upvalues::newTbc($L, $ci, ' . ($a + 3) . ');',
                     '}',
-                    // to OP_TFORCALL, past its hook check
-                    $this->jump($pc, $pc + OpCodes::getArgBx($instruction) + 1, 'T'),
+                    $to,
                 );
 
             case OpCodes::OP_TFORCALL:
                 // (its OP_TFORPREP, the only jump to T<pc>, comes before it:
-                // whether it jumps here from another segment is known)
-                $code = (isset($this->entries["T$pc"]) ? "    case 'T$pc':\n" : '') . "    T$pc:\n" . self::lines(
+                // whether it jumps here from another segment is known; the
+                // unchecked copy's label U<pc> is its own, see emitUncheckedCopy)
+                $code = '';
+                if ($this->emittingUnchecked === null) {
+                    $code .= (isset($this->entries["T$pc"]) ? "    case 'T$pc':\n" : '') . "    T$pc:\n";
+                }
+                $code .= self::lines(
                     self::savePc($pc),
                     "\$ret = Calls::call(\$L, $ra, [" . self::r($a + 1) . ', ' . self::r($a + 2) . ']);',
                 );
                 for ($i = 0; $i < $c; $i++) {
                     $code .= self::lines(self::r($a + 4 + $i) . " = \$ret[$i] ?? null;");
                 }
-                return $code;
+                $tail = $this->afterLuaRun($pc);
+                return $code . ($tail === '' ? '' : self::lines($tail));
 
             case OpCodes::OP_TFORLOOP:
                 return self::lines(
@@ -2085,7 +2462,7 @@ final class FunctionEmitter
                     : implode(', ', $upvalues);
                 return self::lines(
                     "$ra = new $childClass(\$proto_$childPath, \$function_$childPath, $upvalueArguments);",
-                    self::checkGc($pc, $a + 1, (string) Collector::closureSize(\count($upvalues))),
+                    $this->checkGc($pc, $a + 1, (string) Collector::closureSize(\count($upvalues))),
                 );
 
             case OpCodes::OP_VARARG:
@@ -2112,13 +2489,13 @@ final class FunctionEmitter
                 return $code;
 
             case OpCodes::OP_VARARGPREP:
+                $tail = $this->afterLuaRun($pc);
                 return self::lines(
                     "Calls::adjustVarargs(\$ci, \$R, {$proto->numparams});",
                     'if ($L->hookmask !== 0) {',
                     '    Hooks::hookCall($L, $ci, 1);',
                     '    $L->oldpc = 1;  // next opcode will be seen as a "new" line',
-                    '}',
-                );
+                ) . ($tail === '' ? self::lines('}') : self::lines('    ' . $tail, '}'));
 
             case OpCodes::OP_EXTRAARG:
                 return '';
@@ -2150,7 +2527,8 @@ final class FunctionEmitter
                 . " || \$t->metatable === null)) {",
             "    $ra = \$v;",
             '} else {',
-            '    ' . self::savePc($pc) . " $ra = Vm::finishGet(\$L, \$t, $keyLiteral, $slot);",
+            '    ' . self::savePc($pc) . " $ra = Vm::finishGet(\$L, \$t, $keyLiteral, $slot); "
+                . $this->afterLuaRun($pc),
             '}',
         );
     }
@@ -2172,7 +2550,8 @@ final class FunctionEmitter
             "if (\$t instanceof LuaTable && (\$t->metatable === null || isset(\$t->hash[$keyLiteral]))) {",
             $rawSet,
             '} else {',
-            '    ' . self::savePc($pc) . " Vm::setTable(\$L, \$t, $keyLiteral, \$v, $slot);",
+            '    ' . self::savePc($pc) . " Vm::setTable(\$L, \$t, $keyLiteral, \$v, $slot); "
+                . $this->afterLuaRun($pc),
             '}',
         );
     }
@@ -2294,6 +2673,7 @@ final class FunctionEmitter
                 . ' : Calls::callNonLua($L, $f, $args);',
         );
         $wanted = $c - 1;
+        $tail = $this->afterLuaRun($pc);
         if ($wanted < 0) {  // all results
             return $code . self::lines(
                 '$n = \count($ret);',
@@ -2301,11 +2681,11 @@ final class FunctionEmitter
                 "    \$R[$a + \$i] = \$ret[\$i];",
                 '}',
                 "\$top = $a + \$n;",
-            );
+            ) . ($tail === '' ? '' : self::lines($tail));
         }
         for ($i = 0; $i < $wanted; $i++) {
             $code .= self::lines(self::r($a + $i) . " = \$ret[$i] ?? null;");
         }
-        return $code;
+        return $code . ($tail === '' ? '' : self::lines($tail));
     }
 }

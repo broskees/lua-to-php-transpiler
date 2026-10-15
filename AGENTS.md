@@ -611,7 +611,19 @@ Lua string keys and integer keys distinct.
   directly: donextjump), not OP_TFORCALL when entered from OP_TFORPREP
   (`goto T<pc>`, a label after its check); `TableConstructor::run` does
   the same for the instructions of a constructor run, and each `Op`
-  method for its compact instruction. Call hooks: `Hooks::hookCall`
+  method for its compact instruction. A loop of UNCHECKED_REGION_MINIMUM
+  (12) or more instructions (a backward jump's range with one entry, no
+  generic 'for', in a function of one segment) is emitted twice
+  (FunctionEmitter::findUncheckedRegions): the copy after its `L<last>`
+  (labels `U<pc>`) has no hook checks and is entered at the loop head
+  with `if (!$trap) { goto U<head>; }`. `$trap` can become true only
+  while Lua code runs (a call, a metamethod, a finalizer, a hook), so
+  every path of the copy that can run any ends with
+  `if ($trap) { goto L<next>; }` (afterLuaRun) — or, for a test's slow
+  path, the checked jumps on its condition (checkedJumpOn) — and the
+  copy then continues in the checked one at the next instruction, which
+  runs its check as C's vmfetch would. With no hook set, a hot loop pays
+  no check at all. Call hooks: `Hooks::hookCall`
   in the prologue (after OP_VARARGPREP for vararg functions) and in
   `Calls::callNative`; return hooks: `Hooks::retHook` in OP_RETURN* (before
   the results are collected), `Calls::callNative` (a native's results are
