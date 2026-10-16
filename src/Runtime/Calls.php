@@ -268,13 +268,15 @@ final class Calls
     {
         if ($function instanceof NativeFunction) {
             // callNative($L, $function, $arguments, 0), inline: a PHP call less per native call
+            // (the limit check writes each field as it compares it: one pass over them)
             $ci = new CallInfo();
             $ci->func = $function;
             $ci->callstatus = Lua::CIST_C;
             $ci->previous = $previous = $L->ci;
-            $ci->top = $previous->top + \count($arguments) + 1 + Lua::LUA_MINSTACK;
-            $ci->frameBytes = $previous->frameBytes + self::NATIVE_FRAME_BYTES;
-            if ($ci->top > $L->stackLimit || $ci->frameBytes > $L->frameBytesLimit) {
+            if (
+                ($ci->top = $previous->top + \count($arguments) + 1 + Lua::LUA_MINSTACK) > $L->stackLimit
+                || ($ci->frameBytes = $previous->frameBytes + self::NATIVE_FRAME_BYTES) > $L->frameBytesLimit
+            ) {
                 self::stackOverflow($L);
             }
             $L->ci = $ci;
@@ -341,14 +343,16 @@ final class Calls
      */
     public static function callNative(Coroutine $L, NativeFunction $function, array $arguments, int $callstatus): array
     {
-        // CallInfo::push, inline (a PHP call less per native call; $L->ci is never null here)
+        // CallInfo::push, inline (a PHP call less per native call; $L->ci is never null here;
+        // the limit check writes each field as it compares it: one pass over them)
         $ci = new CallInfo();
         $ci->func = $function;
         $ci->callstatus = $callstatus | Lua::CIST_C;
         $ci->previous = $previous = $L->ci;
-        $ci->top = $previous->top + \count($arguments) + 1 + Lua::LUA_MINSTACK;
-        $ci->frameBytes = $previous->frameBytes + self::NATIVE_FRAME_BYTES;
-        if ($ci->top > $L->stackLimit || $ci->frameBytes > $L->frameBytesLimit) {
+        if (
+            ($ci->top = $previous->top + \count($arguments) + 1 + Lua::LUA_MINSTACK) > $L->stackLimit
+            || ($ci->frameBytes = $previous->frameBytes + self::NATIVE_FRAME_BYTES) > $L->frameBytesLimit
+        ) {
             self::stackOverflow($L);
         }
         $L->ci = $ci;

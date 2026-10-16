@@ -248,14 +248,19 @@ Lua string keys and integer keys distinct.
   rename under the flock of its `usage` counter, which empties the directory
   before it passes 20000 entries or 256 MB (`CacheDirectory`, shared with
   the embedding API's compile cache).
-- **Emitted function** (one per Proto): `static function (Coroutine $L,
-  LuaClosure $cl, array &$R, int $callstatus = 0) use ($proto_<path>,
-  $function_<path>...): mixed`. `$R` is the register file (by reference:
+- **Emitted function** (one per Proto): `static function ($L, $cl, &$R,
+  $callstatus = 0) use ($proto_<path>, $function_<path>...): mixed`. The
+  parameters carry no types: each typed parameter is a type check per call
+  (measured: about 8 ns of a ~330 ns Lua call, 2 to 4 percent of the
+  call-heavy workloads), and every call site passes the values the types
+  would check. `$R` is the register file (by reference:
   the caller's argument array becomes the callee's registers without a
   copy of it, so the prologue's `$ci->R = &$R` binds the same array); the
   incoming argument list becomes registers 0..n-1. The prologue pushes a
   CallInfo
-  (inline `CallInfo::push`) and binds `$ci->R = &$R`. Each instruction is
+  (inline `CallInfo::push`) and binds `$ci->R = &$R`; its limit check
+  writes `$ci->top` and `$ci->frameBytes` as it compares them (one pass
+  over them, as `Calls::callNative`). Each instruction is
   `// [pc] OPNAME args ; line N` plus code; jump targets are labels `L<pc>`;
   arithmetic carries its OP_MMBIN* fallback in its `else`. Constants are PHP
   literals, except long strings (over 40 bytes), read as `$cl->proto->k[i]`:
@@ -263,10 +268,10 @@ Lua string keys and integer keys distinct.
   PHP string per Lua string object (the Lexer and `Undump(..., true)` for
   lua2php share equal strings like llex.c), and opcache interns literals or
   not. A closure's class fits its Proto's upvalue count (see Upvalues), so
-  the function's `$cl` is typed with it, upvalue `i` is `$cl->u<i>` or
-  `$cl->upvals[i]`, and `OP_CLOSURE` is `new LuaClosure1($proto_X,
+  `OP_CLOSURE` is `new LuaClosure1($proto_X,
   $function_X, $upval)` ... or `new LuaClosureN($proto_X, $function_X,
-  [upvals])`.
+  [upvals])`, and upvalue `i` is `$cl->u<i>` or
+  `$cl->upvals[i]`.
   A constant table constructor is one piece of code, commented
   `// [first..last] constant table constructor`: a straight run (nothing
   jumps into it) of 3 or more instructions from an OP_NEWTABLE, made of

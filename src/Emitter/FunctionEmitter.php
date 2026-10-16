@@ -332,21 +332,25 @@ final class FunctionEmitter
         }
         $useClause = $uses === [] ? '' : ' use (' . implode(', ', $uses) . ')';
 
-        $closureClass = self::closureClass($proto);
+        // the parameters carry no type: each one is a type check per call
+        // (measured: ~8 ns of a ~330 ns Lua call), and the call sites pass
+        // the values the types would check (see AGENTS.md, Emitted function)
         $code = "    \$function_{$this->path} = static function "
-            . "(Coroutine \$L, $closureClass \$cl, array &\$R, int \$callstatus = 0)$useClause: mixed {\n";
+            . "(\$L, \$cl, &\$R, \$callstatus = 0)$useClause: mixed {\n";
         // not the chunk name: the same code loaded under another name is
         // the same PHP, so ChunkLoader::factoryForSource reuses its factory
         // (PHP never frees eval'd code); the name reaches Lua in the Proto
         $code .= self::INDENT . "// function <{$proto->linedefined},{$proto->lastlinedefined}>"
             . " numparams={$proto->numparams}" . ($proto->is_vararg ? ' vararg' : '')
             . " maxstacksize={$proto->maxstacksize} instructions=" . \count($proto->code) . "\n";
-        // ldo.c: luaD_precall for a Lua function (CallInfo::push, inline)
+        // ldo.c: luaD_precall for a Lua function (CallInfo::push, inline); the
+        // limit check writes each field as it compares it (one pass over them)
         $code .= self::lines(
             '$ci = new CallInfo(); $ci->func = $cl; $ci->callstatus = $callstatus;',
-            '$ci->previous = $previous = $L->ci; $ci->top = $previous->top + ' . ($proto->maxstacksize + 1)
-                . '; $ci->frameBytes = $previous->frameBytes + ' . $this->frameBytes($compactInstructions) . ';',
-            'if ($ci->top > $L->stackLimit || $ci->frameBytes > $L->frameBytesLimit) {',
+            '$ci->previous = $previous = $L->ci;',
+            'if (($ci->top = $previous->top + ' . ($proto->maxstacksize + 1)
+                . ') > $L->stackLimit || ($ci->frameBytes = $previous->frameBytes + '
+                . $this->frameBytes($compactInstructions) . ') > $L->frameBytesLimit) {',
             '    Calls::stackOverflow($L);',
             '}',
         );
