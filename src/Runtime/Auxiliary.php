@@ -148,7 +148,11 @@ final class Auxiliary
      */
     public static function checkNumber(Coroutine $L, array $args, int $arg): int|float
     {
-        $number = Vm::toNumber($args[$arg - 1] ?? null);
+        $value = $args[$arg - 1] ?? null;
+        if (\is_int($value) || \is_float($value)) {
+            return $value;  // (Vm::toNumber's fast path, inlined)
+        }
+        $number = Vm::toNumber($value);
         if ($number === null) {
             self::typeError($L, $args, $arg, 'number');
         }

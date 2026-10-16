@@ -13,10 +13,15 @@ use LuaPhp\Compiler\Proto;
  * closure of the same Proto shares it. Calling convention (see AGENTS.md,
  * "Runtime conventions"):
  *
- *     ($closure->code)(Coroutine $L, LuaClosure $closure, array $arguments, int $callstatus = 0): ?array
+ *     ($closure->code)(Coroutine $L, LuaClosure $closure, array &$R, int $callstatus = 0): mixed
  *
- * returns the list of results, or null when the function ended in a tail
- * call that the caller must finish (Calls::finishTailCall).
+ * $R is the callee's register file (by reference: the caller's argument
+ * array becomes it without a copy, so a caller must not read that array
+ * after the call). The function returns one non-nil value bare (a single
+ * result of one non-nil value,
+ * the common case), an array for zero results, a nil result or multiple
+ * results, or null when the function ended in a tail call that the caller
+ * must finish (Calls::finishTailCall).
  *
  * Upvalues: C allocates a closure with exactly as many UpVal pointers as
  * its Proto has upvalues. Here too the object fits the count: a closure is

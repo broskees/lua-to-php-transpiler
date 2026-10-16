@@ -704,23 +704,27 @@ final class Vm
      */
     private static function forLimit(Coroutine $L, int $init, mixed $limitValue, int $step): ?int
     {
-        $limit = self::toInteger($limitValue, $step < 0 ? self::F2ICEIL : self::F2IFLOOR);
-        if ($limit === null) {  // not coercible to in integer
-            $floatLimit = self::toFloat($limitValue);  // try to convert to float
-            if ($floatLimit === null) {  // cannot convert to float?
-                DebugInfo::forError($L, $limitValue, 'limit');
-            }
-            // else 'flim' is a float out of integer bounds
-            if (0 < $floatLimit) {  // if it is positive, it is too large
-                if ($step < 0) {
-                    return null;  // initial value must be less than it
+        if (\is_int($limitValue)) {
+            $limit = $limitValue;  // (toInteger's fast path, inlined)
+        } else {
+            $limit = self::toInteger($limitValue, $step < 0 ? self::F2ICEIL : self::F2IFLOOR);
+            if ($limit === null) {  // not coercible to in integer
+                $floatLimit = self::toFloat($limitValue);  // try to convert to float
+                if ($floatLimit === null) {  // cannot convert to float?
+                    DebugInfo::forError($L, $limitValue, 'limit');
                 }
-                $limit = PHP_INT_MAX;  // truncate
-            } else {  // it is less than min integer
-                if ($step > 0) {
-                    return null;  // initial value must be greater than it
+                // else 'flim' is a float out of integer bounds
+                if (0 < $floatLimit) {  // if it is positive, it is too large
+                    if ($step < 0) {
+                        return null;  // initial value must be less than it
+                    }
+                    $limit = PHP_INT_MAX;  // truncate
+                } else {  // it is less than min integer
+                    if ($step > 0) {
+                        return null;  // initial value must be greater than it
+                    }
+                    $limit = PHP_INT_MIN;  // truncate
                 }
-                $limit = PHP_INT_MIN;  // truncate
             }
         }
         return ($step > 0 ? $init > $limit : $init < $limit) ? null : $limit;
@@ -742,9 +746,18 @@ final class Vm
                 DebugInfo::runError($L, "'for' step is zero");
             }
             $R[$a + 3] = $init;  // control variable
-            $integerLimit = self::forLimit($L, $init, $limit, $step);
-            if ($integerLimit === null) {
-                return true;  // skip the loop
+            if (\is_int($limit)) {
+                // all-integer loop (lvm.c: forlimit's luaV_tointegerns is
+                // the identity): skip the forLimit call and its toInteger
+                $integerLimit = $limit;
+                if ($step > 0 ? $init > $limit : $init < $limit) {
+                    return true;  // skip the loop
+                }
+            } else {
+                $integerLimit = self::forLimit($L, $init, $limit, $step);
+                if ($integerLimit === null) {
+                    return true;  // skip the loop
+                }
             }
             // prepare loop counter (unsigned)
             if ($step > 0) {  // ascending loop?

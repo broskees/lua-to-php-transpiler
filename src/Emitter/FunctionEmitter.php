@@ -40,6 +40,13 @@ final class FunctionEmitter
     /** @var list<int> the opcode of each instruction, decoded once (lopcodes.h: GET_OPCODE) */
     private array $opcodes = [];
 
+    /**
+     * @var array<int, string> the PHP source of each constant (k), once:
+     * a constant is referenced per use and its literal (PhpLiteral) is not
+     * cheap to build again
+     */
+    private array $constantLiterals = [];
+
     /** @var array<int, true> instructions that are jump targets */
     private array $jumpTargets = [];
 
@@ -213,6 +220,11 @@ final class FunctionEmitter
         foreach ($proto->code as $instruction) {
             $this->opcodes[] = OpCodes::getOpcode($instruction);
         }
+        foreach ($proto->k as $index => $constant) {
+            $this->constantLiterals[$index] = \is_string($constant) && \strlen($constant) > Lua::LUAI_MAXSHORTLEN
+                ? "\$cl->proto->k[$index]"
+                : PhpLiteral::of($constant);
+        }
         $this->hasToBeClosedVariables = \in_array(OpCodes::OP_TBC, $this->opcodes, true)
             || \in_array(OpCodes::OP_TFORPREP, $this->opcodes, true);
         $this->findJumpTargets();
@@ -300,7 +312,10 @@ final class FunctionEmitter
             if (isset($this->consumed[$pc])) {
                 continue;
             }
-            $compact = $this->isCompact($pc) ? $this->emitCompact($pc) : null;
+            // isCompact, inline (it runs per instruction of every function)
+            $compact = (self::$compactEverywhere || ($this->compact && !isset($this->inLoop[$pc])))
+                ? $this->emitCompact($pc)
+                : null;
             if ($compact !== null) {
                 $compactInstructions++;
             }
@@ -319,7 +334,7 @@ final class FunctionEmitter
 
         $closureClass = self::closureClass($proto);
         $code = "    \$function_{$this->path} = static function "
-            . "(Coroutine \$L, $closureClass \$cl, array \$R, int \$callstatus = 0)$useClause: ?array {\n";
+            . "(Coroutine \$L, $closureClass \$cl, array &\$R, int \$callstatus = 0)$useClause: mixed {\n";
         // not the chunk name: the same code loaded under another name is
         // the same PHP, so ChunkLoader::factoryForSource reuses its factory
         // (PHP never frees eval'd code); the name reaches Lua in the Proto
@@ -729,33 +744,39 @@ final class FunctionEmitter
                     break;
             }
         }
-        // an arithmetic instruction followed by its OP_MMBIN* emits the
-        // metamethod call in its 'else' branch, unless something jumps there
-        foreach ($code as $pc => $instruction) {
+        // one forward pass over what follows: an arithmetic instruction
+        // followed by its OP_MMBIN* emits the metamethod call in its 'else'
+        // branch, unless something jumps there; an OP_EXTRAARG is consumed
+        // by the instruction before it; and the code of a test ends with its
+        // jumps (conditionalJump), so its OP_JMP runs only when something
+        // else jumps there. (A write here marks pc + 2 and is read at pc + 1
+        // at the earliest: one pass sees every write before it is read.)
+        // (the opcodes as locals before the loop: see AGENTS.md, Loops and
+        // the tracing JIT)
+        $loadkx = OpCodes::OP_LOADKX;
+        $newtable = OpCodes::OP_NEWTABLE;
+        $setlist = OpCodes::OP_SETLIST;
+        $extraarg = OpCodes::OP_EXTRAARG;
+        $instructionCount = \count($code);
+        for ($pc = 0; $pc < $instructionCount; $pc++) {
+            $opcode = $this->opcodes[$pc];
             $nextPc = $pc + 1;
+            if ($nextPc < $instructionCount && OpCodes::testMMMode($this->opcodes[$nextPc])) {
+                if (!isset($this->jumpTargets[$nextPc])) {
+                    $this->consumed[$nextPc] = true;
+                } else {
+                    $this->jumpTargets[$pc + 2] = true;  // success path skips the MMBIN with a goto
+                    $this->jumpEdges[$pc] = [$nextPc, $pc + 2];  // into it on failure, over it on success
+                }
+            }
             if (
-                $nextPc < \count($code)
-                && OpCodes::testMMMode($this->opcodes[$nextPc])
-                && !isset($this->jumpTargets[$nextPc])
+                ($opcode === $loadkx || $opcode === $newtable || $opcode === $setlist)
+                && $nextPc < $instructionCount && $this->opcodes[$nextPc] === $extraarg
             ) {
                 $this->consumed[$nextPc] = true;
-            } elseif ($nextPc < \count($code) && OpCodes::testMMMode($this->opcodes[$nextPc])) {
-                $this->jumpTargets[$pc + 2] = true;  // success path skips the MMBIN with a goto
-                $this->jumpEdges[$pc] = [$nextPc, $pc + 2];  // into it on failure, over it on success
             }
-        }
-        foreach (array_keys($code) as $pc) {
-            $opcode = $this->opcodes[$pc];
-            if (
-                ($opcode === OpCodes::OP_LOADKX || $opcode === OpCodes::OP_NEWTABLE || $opcode === OpCodes::OP_SETLIST)
-                && $pc + 1 < \count($code) && $this->opcodes[$pc + 1] === OpCodes::OP_EXTRAARG
-            ) {
-                $this->consumed[$pc + 1] = true;
-            }
-            // the code of a test ends with its jumps (conditionalJump): the
-            // OP_JMP after it runs only when something else jumps there
-            if (self::isTest($opcode) && !isset($this->jumpTargets[$pc + 1])) {
-                $this->consumed[$pc + 1] = true;
+            if (self::isTest($opcode) && !isset($this->jumpTargets[$nextPc])) {
+                $this->consumed[$nextPc] = true;
             }
         }
     }
@@ -864,7 +885,8 @@ final class FunctionEmitter
             }
         }
         // the outermost of two nested ranges covers the inner one; two that
-        // only partially overlap would share their labels: neither is kept
+        // only partially overlap would share their labels: neither is kept;
+        // disjoint ranges share no label and are all kept
         $kept = [];
         foreach ($candidates as [$first, $last, $weight]) {
             $dropped = false;
@@ -876,6 +898,9 @@ final class FunctionEmitter
                 if ($keptFirst >= $first && $keptLast <= $last) {
                     unset($kept[$index]);  // this range covers the kept one
                     continue;
+                }
+                if ($last < $keptFirst || $keptLast < $first) {
+                    continue;  // disjoint: the copies share no pcs or labels
                 }
                 unset($kept[$index]);  // partial overlap: neither is kept
                 $dropped = true;
@@ -1432,11 +1457,9 @@ final class FunctionEmitter
      */
     private function k(int $index): string
     {
-        $constant = $this->proto->k[$index];
-        if (\is_string($constant) && \strlen($constant) > Lua::LUAI_MAXSHORTLEN) {
-            return "\$cl->proto->k[$index]";
-        }
-        return PhpLiteral::of($constant);
+        // (built once per constant in the constructor: a constant is
+        // referenced per use)
+        return $this->constantLiterals[$index];
     }
 
     /** a numeric literal usable as an operand (negative numbers parenthesized) */
@@ -1472,8 +1495,15 @@ final class FunctionEmitter
     /** lines of code, indented */
     private static function lines(string ...$lines): string
     {
-        if ($lines === []) {
+        $count = \count($lines);
+        if ($count === 0) {
             return '';
+        }
+        if ($count === 1) {  // the common case: no implode
+            return self::INDENT . $lines[0] . "\n";
+        }
+        if ($count === 2) {
+            return self::INDENT . $lines[0] . "\n" . self::INDENT . $lines[1] . "\n";
         }
         // one pass over the parts (a part may hold code of its own): each
         // line gets INDENT before and "\n" after, as a per-line loop did
@@ -1613,12 +1643,6 @@ final class FunctionEmitter
         $code .= "{$i}$fallback\n";
         $code .= "$done:\n";
         return $code;
-    }
-
-    /** whether the instruction at $pc is emitted in compact form when it has one (compactCodeOutsideLoops) */
-    private function isCompact(int $pc): bool
-    {
-        return self::$compactEverywhere || ($this->compact && !isset($this->inLoop[$pc]));
     }
 
     /**
@@ -1983,6 +2007,35 @@ final class FunctionEmitter
 
             case OpCodes::OP_SELF:
                 $key = $k ? $this->k($c) : self::r($c);
+                $slowGet = self::lines(
+                    '    ' . self::savePc($pc) . " $ra = Vm::finishGet(\$L, \$t, \$key, $b); "
+                        . $this->afterLuaRun($pc),
+                );
+                if ($k && \is_string($this->proto->k[$c])) {
+                    // A string method (s:byte(...), lvm.c: luaV_finishget's
+                    // method-lookup fast path): the string metatable's
+                    // '__index' table answers the lookup without the
+                    // finishGet call (finishGet's first block, inlined).
+                    return self::lines(
+                        '$t = ' . self::r($b) . '; $key = ' . $key . ';',
+                        self::r($a + 1) . ' = $t;',
+                        'if (\is_string($t)) {',
+                        '    $im = $L->globalState->typeMetatables[' . Lua::LUA_TSTRING . '] ?? null;',
+                        "    \$im = \$im === null ? null : (\$im->hash['__index'] ?? null);",
+                        "    if (\$im instanceof LuaTable && (\$v = \$im->hash[\$key] ?? null) !== null) {",
+                        "        $ra = \$v;",
+                        '    } else {',
+                        '        ' . self::savePc($pc) . " $ra = Vm::finishGet(\$L, \$t, \$key, $b); "
+                            . $this->afterLuaRun($pc),
+                        '    }',
+                        "} elseif (\$t instanceof LuaTable && ((\$v = \$t->hash[\$key] ?? null) !== null"
+                            . " || \$t->metatable === null)) {",
+                        "    $ra = \$v;",
+                        '} else {',
+                        $slowGet,
+                        '}',
+                    );
+                }
                 return self::lines(
                     '$t = ' . self::r($b) . '; $key = ' . $key . ';',
                     self::r($a + 1) . ' = $t;',
@@ -1990,8 +2043,7 @@ final class FunctionEmitter
                         . " || \$t->metatable === null)) {",
                     "    $ra = \$v;",
                     '} else {',
-                    '    ' . self::savePc($pc) . " $ra = Vm::finishGet(\$L, \$t, \$key, $b); "
-                        . $this->afterLuaRun($pc),
+                    $slowGet,
                     '}',
                 );
 
@@ -2229,16 +2281,37 @@ final class FunctionEmitter
 
             case OpCodes::OP_LT:
             case OpCodes::OP_LE:
+                // nested type dispatch (lvm.c: luaV_lessthan/luaV_lessequal):
+                // is_float first gives float pairs two type checks, where the
+                // flat order cost three; the slow path is shared via goto
+                // (its labels are their own in each copy of a region:
+                // findUncheckedRegions)
                 $operator = $opcode === OpCodes::OP_LT ? '<' : '<=';
                 $function = $opcode === OpCodes::OP_LT ? 'lessThan' : 'lessEqual';
+                $slow = $this->emittingUnchecked === null ? "cmp_slow_$pc" : "cmp_slowu_$pc";
+                $done = $this->emittingUnchecked === null ? "cmp_done_$pc" : "cmp_doneu_$pc";
                 return self::lines(
                     "\$x = $ra; \$y = " . self::r($b) . ';',
-                    'if ((\is_int($x) && \is_int($y)) || (\is_float($x) && \is_float($y))) {',
-                    "    \$c = \$x $operator \$y;",
+                    'if (\is_float($x)) {',
+                    '    if (\is_float($y)) {',
+                    "        \$c = \$x $operator \$y;",
+                    '    } else {',
+                    "        goto $slow;",
+                    '    }',
+                    '} elseif (\is_int($x)) {',
+                    '    if (\is_int($y)) {',
+                    "        \$c = \$x $operator \$y;",
+                    '    } else {',
+                    "        goto $slow;",
+                    '    }',
                     '} else {',
+                    "    goto $slow;",
+                    '}',
+                    "goto $done;",
+                    "$slow:",
                     '    ' . self::savePc($pc) . " \$c = Vm::$function(\$L, \$x, \$y);"
                         . ' ' . $this->checkedJumpOn($pc, '$c', $k),
-                    '}',
+                    "$done:",
                 ) . $this->conditionalJump($pc, '$c', $k);
 
             case OpCodes::OP_EQK:
@@ -2331,6 +2404,10 @@ final class FunctionEmitter
                 for ($i = 0; $i < $b - 1; $i++) {
                     $results[] = self::r($a + $i);
                 }
+                if ($b === 2) {  // one value: return it bare (nil is the one wrapped case)
+                    return $code . $this->returnHook($pc, $a, (string) ($b - 1))
+                        . self::lines('$L->ci = $ci->previous;', "return $ra === null ? [null] : $ra;");
+                }
                 return $code . $this->returnHook($pc, $a, (string) ($b - 1))
                     . self::lines('$L->ci = $ci->previous;', 'return [' . implode(', ', $results) . '];');
 
@@ -2338,7 +2415,8 @@ final class FunctionEmitter
                 return $this->returnHook($pc, $a, '0') . self::lines('$L->ci = $ci->previous;', 'return [];');
 
             case OpCodes::OP_RETURN1:
-                return $this->returnHook($pc, $a, '1') . self::lines('$L->ci = $ci->previous;', "return [$ra];");
+                return $this->returnHook($pc, $a, '1')
+                    . self::lines('$L->ci = $ci->previous;', "return $ra === null ? [null] : $ra;");
 
             case OpCodes::OP_FORLOOP:
                 $loopStart = $pc + 1 - OpCodes::getArgBx($instruction);
@@ -2354,16 +2432,46 @@ final class FunctionEmitter
                     "        $ra = \$x; " . self::r($a + 3) . ' = $x;',
                     '        ' . $this->jump($pc, $loopStart),
                     '    }',
-                    "} elseif (Vm::floatForLoop(\$R, $a)) {",
-                    '    ' . $this->jump($pc, $loopStart),
+                    '} else {',
+                    '    // lvm.c: floatforloop',
+                    '    $step = ' . self::r($a + 2) . ';',
+                    '    $limit = ' . self::r($a + 1) . ';',
+                    '    $index = ' . $ra . ' + $step;',
+                    '    if (0 < $step) {',
+                    '        if ($index <= $limit) {',
+                    '            ' . $ra . ' = $index; ' . self::r($a + 3) . ' = $index;',
+                    '            ' . $this->jump($pc, $loopStart),
+                    '        }',
+                    '    } elseif ($limit <= $index) {',
+                    '        ' . $ra . ' = $index; ' . self::r($a + 3) . ' = $index;',
+                    '        ' . $this->jump($pc, $loopStart),
+                    '    }',
                     '}',
                 );
 
             case OpCodes::OP_FORPREP:
+                // integer fast path (lvm.c: forprep's integer branch) inline
+                // so the common all-integer loop skips the Vm::forPrep call;
+                // anything else falls through to it unchanged
+                $skip = $this->jump($pc, $pc + OpCodes::getArgBx($instruction) + 2);
                 return self::lines(
                     self::savePc($pc),
-                    "if (Vm::forPrep(\$L, \$R, $a)) {",
-                    '    ' . $this->jump($pc, $pc + OpCodes::getArgBx($instruction) + 2),
+                    '$fi = ' . self::r($a) . '; $fl = ' . self::r($a + 1)
+                        . '; $fs = ' . self::r($a + 2) . ';',
+                    'if (\is_int($fi) && \is_int($fs) && \is_int($fl) && $fs !== 0) {',
+                    '    ' . self::r($a + 3) . ' = $fi;',
+                    '    if ($fs > 0) {',
+                    "        if (\$fi > \$fl) { $skip }",
+                    '        $fn = Vm::subWrap($fl, $fi);',
+                    '        if ($fs !== 1) { $fn = Vm::unsignedDivide($fn, $fs); }',
+                    '    } else {',
+                    "        if (\$fi < \$fl) { $skip }",
+                    '        $fn = Vm::subWrap($fi, $fl);',
+                    '        $fn = Vm::unsignedDivide($fn, Vm::addWrap(-($fs + 1), 1));',
+                    '    }',
+                    '    ' . self::r($a + 1) . ' = $fn;',
+                    "} elseif (Vm::forPrep(\$L, \$R, $a)) {",
+                    "    $skip",
                     '}',
                 );
 
@@ -2676,12 +2784,21 @@ final class FunctionEmitter
         $tail = $this->afterLuaRun($pc);
         if ($wanted < 0) {  // all results
             return $code . self::lines(
+                'if (!\is_array($ret)) { $ret = [$ret]; }',
                 '$n = \count($ret);',
                 'for ($i = 0; $i < $n; $i++) {',
                 "    \$R[$a + \$i] = \$ret[\$i];",
                 '}',
                 "\$top = $a + \$n;",
             ) . ($tail === '' ? '' : self::lines($tail));
+        }
+        if ($wanted === 1) {  // one result: bare values come unwrapped
+            return $code . self::lines(
+                self::r($a) . ' = \is_array($ret) ? ($ret[0] ?? null) : $ret;',
+            ) . ($tail === '' ? '' : self::lines($tail));
+        }
+        if ($wanted > 1) {
+            $code .= self::lines('if (!\is_array($ret)) { $ret = [$ret]; }');
         }
         for ($i = 0; $i < $wanted; $i++) {
             $code .= self::lines(self::r($a + $i) . " = \$ret[$i] ?? null;");

@@ -303,6 +303,57 @@ final class Lexer
         $this->buffer[$this->bufferLength++] = chr($c & 0xFF);
     }
 
+    /**
+     * The bytes a run of name characters has (lctype.h: lislalnum and
+     * '_'), for one strspn of a name instead of a byte at a time.
+     */
+    private const NAME_BYTES = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_';
+
+    /** the bytes a short comment ends at (llex.c: currIsNewline) */
+    private const LINE_END_BYTES = "\n\r";
+
+    /** the space bytes one strspn skips (lisspace without the line ends) */
+    private const SPACE_BYTES = " \t\v\f";
+
+    /** the ordinary bytes of a decimal numeral's run (read_numeral: '%x|%.'): 'e'/'E' open an exponent */
+    private const DECIMAL_NUMERAL_BYTES = '0123456789abcdfABCDF.';
+
+    /** the ordinary bytes of a hexadecimal numeral's run (its exponent mark is 'p'/'P') */
+    private const HEX_NUMERAL_BYTES = '0123456789abcdefABCDEF.';
+
+    /**
+     * Appends $bytes to the token's buffer at $bufferLength: a save() over
+     * bytes a buffremove() dropped writes over them (the buffer keeps the
+     * dead tail), so a run appended whole must not pass them either.
+     */
+    private function appendToBuffer(string $bytes): void
+    {
+        if ($this->bufferLength === 0) {
+            $this->buffer = $bytes;
+        } elseif ($this->bufferLength === \strlen($this->buffer)) {
+            $this->buffer .= $bytes;
+        } else {
+            $this->buffer = substr($this->buffer, 0, $this->bufferLength) . $bytes;
+        }
+        $this->bufferLength += \strlen($bytes);
+    }
+
+    /**
+     * The run of bytes at $inputPosition strspn accepts (or strcspn stops
+     * at, when $complement), at most to the window's end (fill). A run the
+     * window ends continues after the next fill, as saveAndNext would.
+     */
+    private function spanOf(bool $complement, string $set): int
+    {
+        $windowLeft = $this->inputEnd - $this->inputPosition;
+        if ($windowLeft <= 0) {
+            return 0;
+        }
+        return $complement
+            ? strcspn($this->input, $set, $this->inputPosition, $windowLeft)
+            : strspn($this->input, $set, $this->inputPosition, $windowLeft);
+    }
+
     // llex.c: save_and_next (save and next, inline: it runs per byte of a name,
     // numeral or string, and a PHP call of each costs more than their work)
     private function saveAndNext(): void
@@ -430,7 +481,28 @@ final class Lexer
             if ($this->checkNext2($exponentMarks)) {  // exponent mark?
                 $this->checkNext2('-+');  // optional exponent sign
             } elseif (self::lisxdigit($this->current) || $this->current === 46) {  // '%x|%.'
-                $this->saveAndNext();
+                // a run of the ordinary bytes is one strspn, as saveAndNext
+                // would take per byte ('e'/'E' open a decimal exponent and
+                // stay for check_next2 above; the buffer grows per run:
+                // fill() checks memory with its size)
+                $ordinarySet = $exponentMarks === 'Pp'
+                    ? self::HEX_NUMERAL_BYTES
+                    : self::DECIMAL_NUMERAL_BYTES;
+                $this->appendToBuffer(chr($this->current & 0xFF));
+                for (;;) {
+                    $span = $this->spanOf(false, $ordinarySet);
+                    if ($span > 0) {
+                        $this->appendToBuffer(substr($this->input, $this->inputPosition, $span));
+                        $this->inputPosition += $span;
+                    }
+                    $this->next();  // the byte that stopped the run
+                    $c = $this->current;
+                    if (!str_contains($ordinarySet, chr($c & 0xFF))) {
+                        break;
+                    }
+                    $this->appendToBuffer(chr($c & 0xFF));
+                }
+                continue;  // the top decides what the byte that stopped it is
             } else {
                 break;
             }
@@ -456,9 +528,23 @@ final class Lexer
         $count = 0;
         $bracket = $this->current;
         $this->saveAndNext();
-        while ($this->current === 61) {  // '='
-            $this->saveAndNext();
-            $count++;
+        if ($this->current === 61) {  // '=': the run of them is one strspn
+            $this->appendToBuffer('=');
+            $count = 1;
+            for (;;) {
+                $span = $this->spanOf(false, '=');
+                if ($span > 0) {
+                    $this->appendToBuffer(substr($this->input, $this->inputPosition, $span));
+                    $this->inputPosition += $span;
+                    $count += $span;
+                }
+                $this->next();  // the byte that stopped the run
+                if ($this->current !== 61) {
+                    break;
+                }
+                $this->appendToBuffer('=');  // the run continues past a window's end
+                $count++;
+            }
         }
         if ($this->current === $bracket) {
             return $count + 2;
@@ -599,6 +685,7 @@ final class Lexer
     private function readString(int $delimiter, Token $token): void
     {
         $this->saveAndNext();  // keep delimiter (for error messages)
+        $stopSet = "\n\r\\" . chr($delimiter);  // the bytes an ordinary run stops at
         while ($this->current !== $delimiter) {
             switch ($this->current) {
                 case self::EOZ:
@@ -678,7 +765,25 @@ final class Lexer
                     $this->save($escapedValue);
                     break;
                 default:
-                    $this->saveAndNext();
+                    // a run of ordinary bytes is one strcspn of the bytes
+                    // that stop it (the delimiter, an escape, a line end),
+                    // as saveAndNext would take per byte (the buffer grows
+                    // per run: fill() checks memory with its size)
+                    $this->appendToBuffer(chr($this->current & 0xFF));
+                    for (;;) {
+                        $span = $this->spanOf(true, $stopSet);
+                        if ($span > 0) {
+                            $this->appendToBuffer(substr($this->input, $this->inputPosition, $span));
+                            $this->inputPosition += $span;
+                        }
+                        $this->next();  // the byte that stopped the run
+                        $c = $this->current;
+                        if ($c === $delimiter || $c === 92 || $c === 10 || $c === 13 || $c === self::EOZ) {
+                            break;
+                        }
+                        $this->appendToBuffer(chr($c & 0xFF));
+                    }
+                    break;
             }
         }
         $this->saveAndNext();  // skip delimiter
@@ -700,8 +805,9 @@ final class Lexer
                 case 9:   // '\t'
                 case 11:  // '\v': spaces
                     // (the C loop returns to the switch per space; a run of
-                    // them is one skip: same tokens and buffer)
+                    // them is one strspn: same tokens and buffer)
                     do {
+                        $this->inputPosition += $this->spanOf(false, self::SPACE_BYTES);
                         $this->next();
                     } while (
                         $this->current === 32 || $this->current === 12
@@ -724,9 +830,12 @@ final class Lexer
                             break;
                         }
                     }
-                    // else short comment: skip until end of line (or end of file)
-                    // (currIsNewline's test, inline: per byte of every comment)
+                    // else short comment: skip until end of line (or end of
+                    // file): a run to the next newline is one strcspn (no
+                    // byte of the comment is kept), as the per-byte loop of
+                    // currIsNewline's test would skip
                     while ($this->current !== 10 && $this->current !== 13 && $this->current !== self::EOZ) {
+                        $this->inputPosition += $this->spanOf(true, self::LINE_END_BYTES);
                         $this->next();
                     }
                     break;
@@ -801,15 +910,29 @@ final class Lexer
                     return self::TK_EOS;
                 default:
                     if (self::lislalpha($this->current)) {  // identifier or reserved word?
-                        do {
-                            $this->saveAndNext();
-                            // lctype.h: lislalnum, inline (it runs per byte of
-                            // every name; a PHP call of it cost more than the test)
+                        // the name is scanned in one run (strspn of the name
+                        // bytes) as saveAndNext would per byte: the same
+                        // buffer and the same current at the end (the buffer
+                        // grows per run: fill() checks memory with its size)
+                        $this->appendToBuffer(chr($this->current & 0xFF));
+                        for (;;) {
+                            $span = $this->spanOf(false, self::NAME_BYTES);
+                            if ($span > 0) {
+                                $this->appendToBuffer(substr($this->input, $this->inputPosition, $span));
+                                $this->inputPosition += $span;
+                            }
+                            $this->next();  // the byte that stopped the run
                             $c = $this->current;
-                        } while (
-                            ($c >= 97 && $c <= 122) || ($c >= 65 && $c <= 90)
-                            || $c === 95 || ($c >= 48 && $c <= 57)
-                        );
+                            // lctype.h: lislalnum, inline (it runs per byte
+                            // that ends a name at a window's end)
+                            if (
+                                !(($c >= 97 && $c <= 122) || ($c >= 65 && $c <= 90)
+                                || $c === 95 || ($c >= 48 && $c <= 57))
+                            ) {
+                                break;
+                            }
+                            $this->appendToBuffer(chr($c & 0xFF));
+                        }
                         $name = $this->newString($this->buffer);  // (the buffer is the name: nothing was removed)
                         $token->seminfo = $name;
                         // (no ?? in a loop: see AGENTS.md, Loops and the tracing JIT)

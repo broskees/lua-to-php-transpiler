@@ -36,6 +36,9 @@ use LuaPhp\Runtime\Gc\Collector;
  */
 final class Op
 {
+    /** Lua::LUA_TSTRING (a constant of this class is compiled in; see AGENTS.md) */
+    private const TYPE_STRING = Lua::LUA_TSTRING;
+
     /** OP_MOVE: R[A] := R[B] */
     public static function move(Coroutine $L, int $pc, int $a, int $b): void
     {
@@ -311,12 +314,21 @@ final class Op
         $R = &$ci->R;
         $t = $R[$b];
         $R[$a + 1] = $t;
-        if ($t instanceof LuaTable && (($v = $t->hash[$key] ?? null) !== null || $t->metatable === null)) {
+        if (\is_string($t)) {
+            // a string method: finishGet's method-lookup fast path, inlined
+            // (FunctionEmitter's OP_SELF; lvm.c: luaV_finishget)
+            $im = $L->globalState->typeMetatables[self::TYPE_STRING] ?? null;
+            $im = $im === null ? null : ($im->hash['__index'] ?? null);
+            if ($im instanceof LuaTable && ($v = $im->hash[$key] ?? null) !== null) {
+                $R[$a] = $v;
+                return;
+            }
+        } elseif ($t instanceof LuaTable && (($v = $t->hash[$key] ?? null) !== null || $t->metatable === null)) {
             $R[$a] = $v;
-        } else {
-            $ci->savedpc = $pc;
-            $R[$a] = Vm::finishGet($L, $t, $key, $b);
+            return;
         }
+        $ci->savedpc = $pc;
+        $R[$a] = Vm::finishGet($L, $t, $key, $b);
     }
 
     /**
@@ -603,7 +615,12 @@ final class Op
         }
         $x = $ci->R[$a];
         $y = $ci->R[$b];
-        if ((\is_int($x) && \is_int($y)) || (\is_float($x) && \is_float($y))) {
+        // nested type dispatch (lvm.c: luaV_lessthan): is_float first gives
+        // float pairs two type checks, where the flat order cost three
+        if (\is_float($x) && \is_float($y)) {
+            return $x < $y;
+        }
+        if (\is_int($x) && \is_int($y)) {
             return $x < $y;
         }
         $ci->savedpc = $pc;
@@ -619,7 +636,11 @@ final class Op
         }
         $x = $ci->R[$a];
         $y = $ci->R[$b];
-        if ((\is_int($x) && \is_int($y)) || (\is_float($x) && \is_float($y))) {
+        // nested type dispatch (lvm.c: luaV_lessequal)
+        if (\is_float($x) && \is_float($y)) {
+            return $x <= $y;
+        }
+        if (\is_int($x) && \is_int($y)) {
             return $x <= $y;
         }
         $ci->savedpc = $pc;
@@ -751,15 +772,30 @@ final class Op
             }
         }
         $f = $R[$a];
-        $ret = $f instanceof LuaClosure
-            ? (($f->code)($L, $f, $args) ?? Calls::finishTailCall($L))
-            : Calls::callNonLua($L, $f, $args);
+        if ($f instanceof LuaClosure) {
+            $ret = ($f->code)($L, $f, $args);
+            if ($ret === null) {
+                $ret = Calls::finishTailCall($L);
+            }
+        } else {
+            $ret = Calls::callNonLua($L, $f, $args);
+        }
         if ($c === 0) {  // all results
+            if (!\is_array($ret)) {
+                $ret = [$ret];
+            }
             $n = \count($ret);
             for ($i = 0; $i < $n; $i++) {
                 $R[$a + $i] = $ret[$i];
             }
             return $a + $n;
+        }
+        if ($c === 2) {  // one result: bare values come unwrapped
+            $R[$a] = \is_array($ret) ? (isset($ret[0]) ? $ret[0] : null) : $ret;
+            return $top;
+        }
+        if (!\is_array($ret)) {
+            $ret = [$ret];
         }
         for ($i = 0; $i < $c - 1; $i++) {
             $R[$a + $i] = isset($ret[$i]) ? $ret[$i] : null;  // (no ?? in a loop: see AGENTS.md)

@@ -249,9 +249,12 @@ Lua string keys and integer keys distinct.
   before it passes 20000 entries or 256 MB (`CacheDirectory`, shared with
   the embedding API's compile cache).
 - **Emitted function** (one per Proto): `static function (Coroutine $L,
-  LuaClosure $cl, array $R, int $callstatus = 0) use ($proto_<path>,
-  $function_<path>...): ?array`. `$R` is the register file; the incoming
-  argument list becomes registers 0..n-1. The prologue pushes a CallInfo
+  LuaClosure $cl, array &$R, int $callstatus = 0) use ($proto_<path>,
+  $function_<path>...): mixed`. `$R` is the register file (by reference:
+  the caller's argument array becomes the callee's registers without a
+  copy of it, so the prologue's `$ci->R = &$R` binds the same array); the
+  incoming argument list becomes registers 0..n-1. The prologue pushes a
+  CallInfo
   (inline `CallInfo::push`) and binds `$ci->R = &$R`. Each instruction is
   `// [pc] OPNAME args ; line N` plus code; jump targets are labels `L<pc>`;
   arithmetic carries its OP_MMBIN* fallback in its `else`. Constants are PHP
@@ -354,9 +357,13 @@ Lua string keys and integer keys distinct.
   with tiny segments, `compact_tiny_segments.php`).
   Never use `array_slice`/array functions on `$R`: open upvalues make its
   elements PHP references.
-- **Calls.** Lua function: `($f->code)($L, $f, $args)` returns the result list,
-  or `null` for a pending tail call (`$L->tailCallFunction/Arguments`; finish
-  with `Calls::finishTailCall($L)`). Native: `($native->function)($L, $args):
+- **Calls.** Lua function: `($f->code)($L, $f, $args)` returns one non-nil
+  value bare (a single result of one non-nil value: no result array), an
+  array for zero results, a nil result or multiple results, or `null` for a
+  pending tail call (`$L->tailCallFunction/Arguments`; finish
+  with `Calls::finishTailCall($L)`). `Calls::call`/`callk`/`callNonLua` wrap
+  bare values into `[$value]` so their `array` return type holds. Native:
+  `($native->function)($L, $args):
   array`, arguments 0-based, run via `Calls::callNative` (pushes a C
   CallInfo). PHP code (libraries, metamethods) calls any value with
   `Calls::call` / `Calls::callk` / `Calls::callNoYield` (luaD_call: counts
@@ -542,8 +549,16 @@ Lua string keys and integer keys distinct.
   drivers (str_find_aux, gmatch_aux, str_gsub) stay C's and ask it only
   `nextCandidate`/`matchAt`, which run the pattern's exactly equivalent
   PCRE translation (`Lib\String\PatternRegex`: from a pattern's second use,
-  or at once on a subject of 64+ bytes) when there is one. Patterns that
-  could make match() raise, and any PCRE failure at run time, run the port.
+  or at once on a subject of 64+ bytes) when there is one. Before that, a
+  pattern that is one shape PHP's str* functions answer exactly
+  (`MatchState::detectSimpleShape`: a plain literal, or one single
+  character class with no suffix or with '+', its accept flags from
+  `MatchState::classBytes` so the port's own classes decide) is scanned
+  with strpos/strcspn/strspn: a scanner loop pays no preg_match and no
+  match() per byte (`MatchState::$forcePort` still runs the port). What
+  could make match() raise is left alone, so it raises exactly when C does
+  (errors are lazy). Patterns that could make match() raise, and any PCRE
+  failure at run time, run the port.
   `tests/fuzz/patterns.php` checks lua5.4 vs translation vs port
   (`MatchState::$forcePort`); its fixed-seed corpus is the diff case
   `string_pattern_corpus.lua`.

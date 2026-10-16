@@ -24,6 +24,10 @@ use LuaPhp\Runtime\MemoryLimit;
  * Not in C: when PatternRegex can translate the pattern, the drivers'
  * question "where is the next match from here, and what are its captures"
  * (nextCandidate, matchAt) is answered by preg_match instead of match().
+ * Before that, a pattern that is one shape PHP's str* functions answer
+ * exactly (detectSimpleShape: a plain literal, or one single character
+ * class with no suffix or with '+') is answered with strpos/strcspn/
+ * strspn, so a scanner loop pays no preg_match and no match() per byte.
  *
  * @internal
  */
@@ -74,6 +78,15 @@ final class MatchState
     /** @var list<int>|null byte => its class bits in the C locale */
     private static ?array $classBitsOfByte = null;
 
+    /**
+     * Not in C: detectSimpleShape's answers by pattern (its scan walks the
+     * bracket of a class; the flags and mask are the same for every
+     * subject), like PatternRegex::$cache bounded.
+     *
+     * @var array<string, array{0: string|null, 1: string|null, 2: string|null, 3: bool}|false>
+     */
+    private static array $simpleShapes = [];
+
     public int $matchdepth = self::MAXCCALLS;  // control for recursive depth
     public int $level = 0;  // total number of captures (finished or unfinished)
     /** @var array<int, int> */
@@ -98,6 +111,25 @@ final class MatchState
     private readonly ?string $firstLiteral;
 
     /**
+     * Not in C: the pattern is one shape PHP's str* functions answer
+     * exactly (detectSimpleShape): a plain literal (this is it), or one
+     * single character class (its classBytes accept flags in
+     * $simpleClassFlags and the accepted bytes in $simpleClassMask, with
+     * $simpleClassRun for a trailing '+'). nextCandidate and matchAt scan
+     * with strpos/strcspn/strspn instead of PatternRegex or match().
+     */
+    private ?string $simpleLiteral = null;
+
+    /** @var string|null classBytes' 256 accept flags of a simple class shape */
+    private ?string $simpleClassFlags = null;
+
+    /** the bytes a simple class shape accepts, for strcspn/strspn */
+    private ?string $simpleClassMask = null;
+
+    /** a simple class shape with a trailing '+' (one or more bytes) */
+    private bool $simpleClassRun = false;
+
+    /**
      * Not in C: test-only switch that makes every new MatchState run the
      * port (the pattern fuzzer compares it with the PCRE translation).
      */
@@ -106,7 +138,7 @@ final class MatchState
     /** Not in C: the pattern's PCRE translation, or null to run the port */
     private ?PatternRegex $regex;
 
-    /** Not in C: the start (or -1) and end of the last match the regex found */
+    /** Not in C: the start (or -1) and end of the last match a scan found (nextCandidate: regexSearch or a simple shape) */
     private int $regexStart = -1;
     private int $regexEnd = -1;
 
@@ -140,7 +172,24 @@ final class MatchState
         $isPlain = $first !== null && !str_contains(self::SPECIALS . ')', $first);
         $isOptional = $second === '*' || $second === '?' || $second === '-';
         $this->firstLiteral = ($isPlain && !$isOptional) ? $first : null;
-        $this->regex = self::$forcePort ? null : PatternRegex::forPattern($pattern, $this->srcEnd, $this);
+        if (self::$forcePort) {
+            $this->regex = null;  // the fuzzer's third output runs the port
+        } else {
+            $shape = self::$simpleShapes[$pattern] ?? null;
+            if ($shape === null) {
+                $shape = $this->detectSimpleShape($pattern);
+                if (\count(self::$simpleShapes) >= 512) {
+                    self::$simpleShapes = [];  // (as PatternRegex::$cache)
+                }
+                self::$simpleShapes[$pattern] = $shape;
+            }
+            if ($shape !== false) {
+                [$this->simpleLiteral, $this->simpleClassFlags, $this->simpleClassMask, $this->simpleClassRun] = $shape;
+                $this->regex = null;
+            } else {
+                $this->regex = PatternRegex::forPattern($pattern, $this->srcEnd, $this);
+            }
+        }
         $this->budget = $L->globalState->budget;
         if ($this->budget !== null) {
             $this->matchesUntilCharge = self::MATCHES_PER_CHARGE;
@@ -151,11 +200,47 @@ final class MatchState
      * The first position >= $s (up to the end of the subject) where a
      * match of the whole pattern may start, or -1 if there is none. Only
      * for unanchored searches that try every position in turn: match()
-     * fails at every position skipped. With a regex, the answer is where
-     * the next match starts, and matchAt() then returns that very match.
+     * fails at every position skipped. With a simple shape or a regex,
+     * the answer is where the next match starts and matchAt() then
+     * returns that very match (its end is left in $regexEnd).
      */
     public function nextCandidate(int $s): int
     {
+        if ($this->simpleLiteral !== null) {
+            $candidate = \strpos($this->src, $this->simpleLiteral, $s);
+            if ($candidate === false) {
+                $this->regexStart = -1;
+                $this->budget?->chargeSteps(
+                    1 + intdiv($this->srcEnd - $s, Budget::BYTES_PER_STEP)
+                );
+                return -1;
+            }
+            $this->regexStart = $candidate;
+            $this->regexEnd = $candidate + \strlen($this->simpleLiteral);
+            $this->budget?->chargeSteps(
+                1 + intdiv($this->regexEnd - $s, Budget::BYTES_PER_STEP)
+            );
+            return $candidate;
+        }
+        if ($this->simpleClassFlags !== null) {
+            $candidate = $s + \strcspn($this->src, $this->simpleClassMask, $s);
+            if ($candidate >= $this->srcEnd) {
+                $this->regexStart = -1;
+                $this->budget?->chargeSteps(
+                    1 + intdiv($this->srcEnd - $s, Budget::BYTES_PER_STEP)
+                );
+                return -1;
+            }
+            $this->regexStart = $candidate;
+            $this->regexEnd = $candidate + 1;
+            if ($this->simpleClassRun) {
+                $this->regexEnd = $candidate + \strspn($this->src, $this->simpleClassMask, $candidate);
+            }
+            $this->budget?->chargeSteps(
+                1 + intdiv($this->regexEnd - $s, Budget::BYTES_PER_STEP)
+            );
+            return $candidate;
+        }
         if ($this->regex !== null) {
             $start = $this->regexSearch($this->regex->search, $s);
             if ($start !== self::PCRE_FAILED) {
@@ -181,10 +266,30 @@ final class MatchState
      */
     public function matchAt(int $s): int
     {
-        if ($this->regex !== null) {
-            if ($s === $this->regexStart) {  // found by nextCandidate
-                return $this->regexEnd;
+        if ($s === $this->regexStart) {  // found by nextCandidate (a simple shape or a regex)
+            return $this->regexEnd;
+        }
+        if ($this->simpleLiteral !== null) {
+            $length = \strlen($this->simpleLiteral);
+            $matched = $s + $length <= $this->srcEnd
+                && \substr_compare($this->src, $this->simpleLiteral, $s, $length) === 0;
+            $end = $matched ? $s + $length : -1;
+            $this->budget?->chargeSteps(
+                1 + intdiv($end === -1 ? 0 : $end - $s, Budget::BYTES_PER_STEP)
+            );
+            return $end;
+        }
+        if ($this->simpleClassFlags !== null) {
+            $end = -1;
+            if ($s < $this->srcEnd && $this->simpleClassFlags[\ord($this->src[$s])] === "\1") {
+                $end = $this->simpleClassRun ? $s + \strspn($this->src, $this->simpleClassMask, $s) : $s + 1;
             }
+            $this->budget?->chargeSteps(
+                1 + intdiv($end === -1 ? 0 : $end - $s, Budget::BYTES_PER_STEP)
+            );
+            return $end;
+        }
+        if ($this->regex !== null) {
             $start = $this->regexSearch($this->regex->anchored, $s);
             if ($start !== self::PCRE_FAILED) {
                 $this->budget?->chargeSteps(
@@ -398,6 +503,94 @@ final class MatchState
             default:
                 return $patternCharacter === $this->src[$s];
         }
+    }
+
+    /**
+     * Not in C: the shape of $pattern that nextCandidate and matchAt scan
+     * with PHP's str* functions (a plain literal, or one single character
+     * class with no suffix or with '+'), or false for every other
+     * pattern. Raise-free: what could make match() raise stays with the
+     * port, which raises it exactly when C does (errors are lazy).
+     *
+     * @return array{0: string|null, 1: string|null, 2: string|null, 3: bool}|false
+     */
+    private function detectSimpleShape(string $pattern): array|false
+    {
+        $patternEnd = \strlen($pattern);
+        if ($patternEnd === 0) {
+            return false;  // matches empty at every position
+        }
+        if (strcspn($pattern, self::SPECIALS . ')') === $patternEnd) {
+            return [$pattern, null, null, false];  // a plain literal
+        }
+        $classEnd = $this->classItemEnd($pattern, $patternEnd);
+        if ($classEnd === false) {
+            return false;
+        }
+        $run = false;
+        if ($classEnd < $patternEnd) {
+            if ($classEnd + 1 !== $patternEnd || $pattern[$classEnd] !== '+') {
+                return false;  // more items follow, or a '*', '?' or '-' suffix
+            }
+            $run = true;
+        }
+        $flags = $this->classBytes(0, $classEnd);
+        $mask = '';
+        for ($byte = 0; $byte < 256; $byte++) {
+            if ($flags[$byte] === "\1") {
+                $mask .= \chr($byte);
+            }
+        }
+        return [null, $flags, $mask, $run];
+    }
+
+    /**
+     * Not in C: where the single character class at the start of $pattern
+     * ends (classEnd), or false when the item is not one ('(' and ')'
+     * open and close a capture, '%b', '%f' and '%1'-'%9' are other
+     * items), when $pattern is only '$' (the end of the subject), or when
+     * it could raise ("ends with '%'", "missing ']'"): the port raises
+     * then, when match() reaches it.
+     */
+    private function classItemEnd(string $pattern, int $patternEnd): int|false
+    {
+        $character = $pattern[0];
+        if ($character === self::L_ESC) {
+            if ($patternEnd < 2) {
+                return false;  // "malformed pattern (ends with '%')"
+            }
+            $next = $pattern[1];
+            if ($next === 'b' || $next === 'f' || ($next >= '0' && $next <= '9')) {
+                return false;
+            }
+            return 2;
+        }
+        if ($character === '[') {
+            $p = 1;
+            if ($p < $patternEnd && $pattern[$p] === '^') {
+                $p++;  // skip the '^'
+            }
+            for (;;) {
+                if ($p >= $patternEnd) {
+                    return false;  // "malformed pattern (missing ']')"
+                }
+                $item = $pattern[$p];
+                $p++;
+                if ($item === self::L_ESC && $p < $patternEnd) {
+                    $p++;  // skip escapes (e.g. '%]')
+                }
+                if ($p < $patternEnd && $pattern[$p] === ']') {
+                    return $p + 1;
+                }
+            }
+        }
+        if ($character === '(' || $character === ')') {
+            return false;
+        }
+        if ($character === '$' && $patternEnd === 1) {
+            return false;
+        }
+        return 1;  // '.' or one literal byte
     }
 
     /**

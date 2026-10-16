@@ -324,7 +324,11 @@ final class Coroutine
                 Calls::checkCStack($L);
             }
             if ($body instanceof LuaClosure) {
-                return ($body->code)($L, $body, $arguments) ?? Calls::finishTailCall($L);
+                $result = ($body->code)($L, $body, $arguments);
+                if ($result === null) {
+                    $result = Calls::finishTailCall($L);
+                }
+                return \is_array($result) ? $result : [$result];
             }
             return Calls::callNonLua($L, $body, $arguments);
         };

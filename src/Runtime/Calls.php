@@ -189,7 +189,13 @@ final class Calls
                 self::checkCStack($L);
             }
             if ($function instanceof LuaClosure) {
-                $results = ($function->code)($L, $function, $arguments) ?? self::finishTailCall($L);
+                $results = ($function->code)($L, $function, $arguments);
+                if ($results === null) {
+                    $results = self::finishTailCall($L);
+                }
+                if (!\is_array($results)) {
+                    $results = [$results];
+                }
             } else {
                 $results = self::callNonLua($L, $function, $arguments);
             }
@@ -218,7 +224,13 @@ final class Calls
             self::checkCStack($L);
         }
         if ($function instanceof LuaClosure) {
-            $results = ($function->code)($L, $function, $arguments) ?? self::finishTailCall($L);
+            $results = ($function->code)($L, $function, $arguments);
+            if ($results === null) {
+                $results = self::finishTailCall($L);
+            }
+            if (!\is_array($results)) {
+                $results = [$results];
+            }
         } else {
             $results = self::callNonLua($L, $function, $arguments);
         }
@@ -293,7 +305,11 @@ final class Calls
             $arguments = array_merge(array_reverse($calledObjects), $arguments);
         }
         if ($function instanceof LuaClosure) {
-            return ($function->code)($L, $function, $arguments) ?? self::finishTailCall($L);
+            $result = ($function->code)($L, $function, $arguments);
+            if ($result === null) {
+                $result = self::finishTailCall($L);
+            }
+            return \is_array($result) ? $result : [$result];
         }
         return self::callNative($L, $function, $arguments, 0);
     }
@@ -430,11 +446,10 @@ final class Calls
 
     /**
      * Run the pending tail call(s) left by a Lua function that returned
-     * null, and return the final results.
-     *
-     * @return list<mixed>
+     * null, and return the final result: bare for one non-nil value (see
+     * the emitted-function convention in AGENTS.md), an array otherwise.
      */
-    public static function finishTailCall(Coroutine $L): array
+    public static function finishTailCall(Coroutine $L): mixed
     {
         do {
             $function = $L->tailCallFunction;
