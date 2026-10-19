@@ -632,8 +632,9 @@ Lua string keys and integer keys distinct.
   (`goto T<pc>`, a label after its check); `TableConstructor::run` does
   the same for the instructions of a constructor run, and each `Op`
   method for its compact instruction. A loop of UNCHECKED_REGION_MINIMUM
-  (12) or more instructions (a backward jump's range with one entry, no
-  generic 'for', in a function of one segment) is emitted twice
+  (3) or more instructions (a backward jump's range with one entry; a
+  generic 'for''s OP_TFORPREP entering its OP_TFORCALL is a second
+  entry; in a function of one segment) is emitted twice
   (FunctionEmitter::findUncheckedRegions): the copy after its `L<last>`
   (labels `U<pc>`) has no hook checks and is entered at the loop head
   with `if (!$trap) { goto U<head>; }`. `$trap` can become true only
@@ -642,7 +643,11 @@ Lua string keys and integer keys distinct.
   `if ($trap) { goto L<next>; }` (afterLuaRun) — or, for a test's slow
   path, the checked jumps on its condition (checkedJumpOn) — and the
   copy then continues in the checked one at the next instruction, which
-  runs its check as C's vmfetch would. With no hook set, a hot loop pays
+  runs its check as C's vmfetch would. The transfer comes only after all
+  of the instruction's work: OP_CONCAT's GC check follows its
+  metamethod, so each of its paths has its own check and the slow one
+  transfers after it (a skipped step skips finalizers;
+  `unchecked_loop_gc.lua`). With no hook set, a hot loop pays
   no check at all. Call hooks: `Hooks::hookCall`
   in the prologue (after OP_VARARGPREP for vararg functions) and in
   `Calls::callNative`; return hooks: `Hooks::retHook` in OP_RETURN* (before

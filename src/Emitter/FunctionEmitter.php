@@ -433,7 +433,7 @@ final class FunctionEmitter
      * same code without the hook checks, entered at U$first when $trap is
      * false. Labels are U<pc>; where code can run Lua (a call, a
      * metamethod, a finalizer) the copy looks at $trap again and continues
-     * in the checked copy when one is set (uncheckedDispatches), so with
+     * in the checked copy when one is set (afterLuaRun), so with
      * no hook the loop pays no check at all and with one it behaves
      * exactly as the checked code (which the copy leaves and re-enters).
      */
@@ -837,13 +837,13 @@ final class FunctionEmitter
      * of the loop-heavy workloads), and $trap can become true only while
      * Lua code runs (a call, a metamethod, a finalizer, a hook). The copy
      * is entered with $trap false and re-checks it where its code can set
-     * one (uncheckedDispatches), so it runs exactly the instructions C's
-     * vmfetch fetches with 'trap' off (lvm.c: vmfetch). One region is one
-     * backward jump's range (findLoops' rule) with these refusals:
+     * one (afterLuaRun, checkedJumpOn), so it runs exactly the instructions
+     * C's vmfetch fetches with 'trap' off (lvm.c: vmfetch). One region is
+     * one backward jump's range (findLoops' rule) with these refusals:
      * anything may enter but at its first instruction (a Lua goto cannot
      * cross a local's declaration, so a for body has one entry; other
-     * interior entries refuse the region here), a generic 'for' (its
-     * OP_TFORPREP jumps to T<pc>, past an OP_TFORCALL's hook check), a
+     * interior entries refuse the region here, except a generic 'for''s
+     * OP_TFORPREP entering its OP_TFORCALL past the hook check), a
      * constructor run across its edge, a jump to an instruction another
      * one consumes, overlapping ranges that do not nest, and a function
      * heavier than one segment: their code counts toward its weight.
@@ -1002,7 +1002,9 @@ final class FunctionEmitter
      * unchecked copy (findUncheckedRegions): $trap may have been set
      * while it ran, so the copy continues in the checked one. Empty in
      * the checked code, where the next instruction's own check is the one
-     * C's vmfetch does (lvm.c: vmfetch).
+     * C's vmfetch does (lvm.c: vmfetch). It comes after all of the
+     * instruction's work, as vmfetch does: a path with work left after
+     * the Lua code (OP_CONCAT's GC check) puts it after that work.
      */
     private function afterLuaRun(int $pc): string
     {
@@ -2235,18 +2237,30 @@ final class FunctionEmitter
                     $lengths[] = '\strlen(' . self::r($a + $i) . ')';
                 }
                 $conditions[] = implode(' + ', $lengths) . ' <= ' . MemoryLimit::CHECK_ABOVE;
+                $joinTest = 'if (' . implode(' && ', $conditions) . ') {';
+                $join = "    $ra = " . implode(' . ', $operands) . ';';
+                $concat = '    ' . self::savePc($pc)
+                    . " $ra = Vm::concat(\$L, [" . implode(', ', $operands) . "], $a); ";
+                // lvm.c: OP_CONCAT's checkGC, after luaV_concat
+                $gcCheck = $this->checkGc(
+                    $pc,
+                    $a + 1,
+                    "(\\is_string($ra) ? " . Collector::STRING_OVERHEAD . " + \\strlen($ra) : 0)",
+                );
+                if ($this->emittingUnchecked === null) {
+                    return self::lines($joinTest, $join, '} else {', $concat, '}', $gcCheck);
+                }
+                // the unchecked copy: a metamethod Vm::concat calls may set a
+                // hook, and the copy looks at $trap again only after the GC
+                // check, which is still this instruction's work (afterLuaRun),
+                // so each path has its own; the join runs Lua only in its step
                 return self::lines(
-                    'if (' . implode(' && ', $conditions) . ') {',
-                    "    $ra = " . implode(' . ', $operands) . ';',
+                    $joinTest,
+                    $join,
+                    "    $gcCheck",
                     '} else {',
-                    '    ' . self::savePc($pc) . " $ra = Vm::concat(\$L, [" . implode(', ', $operands) . "], $a); "
-                        . $this->afterLuaRun($pc),
+                    $concat . $gcCheck . ' ' . $this->afterLuaRun($pc),
                     '}',
-                    $this->checkGc(
-                        $pc,
-                        $a + 1,
-                        "(\\is_string($ra) ? " . Collector::STRING_OVERHEAD . " + \\strlen($ra) : 0)",
-                    ),
                 );
 
             case OpCodes::OP_CLOSE:
